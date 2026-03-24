@@ -7,23 +7,27 @@
     {
       "name": "Seed",
       "participants": ["facilitator"],
-      "prompt": "Frame the problem. What are we brainstorming? Set constraints."
+      "prompt": "Frame the problem. What are we brainstorming? Set constraints.",
+      "timeout": 120
     },
     {
       "name": "Ideate",
       "participants": ["creative_a", "creative_b"],
-      "prompt": "Generate 3-5 ideas each. Be bold, no filtering yet."
+      "prompt": "Generate 3-5 ideas each. Be bold, no filtering yet.",
+      "timeout": 120
     },
     {
       "name": "Build",
       "participants": ["creative_b", "creative_a"],
-      "prompt": "Pick the best idea from the other's list. Expand and improve it."
+      "prompt": "Pick the best idea from the other's list. Expand and improve it.",
+      "timeout": 120
     },
     {
       "name": "Converge",
       "participants": ["facilitator"],
       "prompt": "Select the top 2-3 ideas. Explain why and suggest next steps.",
-      "is_output": true
+      "is_output": true,
+      "timeout": 120
     }
   ]
 }

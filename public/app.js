@@ -24,6 +24,10 @@ var openPopover = null;
 var lastSender = null; // for message grouping
 var lastScanResults = []; // cached scan results for auto-refresh
 var isMuted = JSON.parse(localStorage.getItem('joind-muted') || 'false');
+var allMessages = []; // all messages for reply lookup
+var typingNames = new Set(); // agents currently typing
+var staleNames = new Set(); // agents marked as stale
+var replyingTo = null; // current reply target (message object or null)
 
 if (typeof marked !== 'undefined') { marked.setOptions({ breaks: true, gfm: true }); }
 
@@ -101,22 +105,29 @@ function connect() {
       case 'init':
         agents = event.data.agents;
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
+        allMessages = event.data.messages.slice();
         renderPills(); renderMessages(event.data.messages);
         break;
       case 'message':
-        hideWelcome(); appendMessage(event.data);
+        hideWelcome();
+        allMessages.push(event.data);
+        appendMessage(event.data);
         if (event.data.sender !== 'system') playSound(event.data.sender);
         break;
       case 'join':
         onlineNames.add(event.data.name);
+        staleNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
         agents.push(event.data); renderPills();
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
       case 'leave':
         onlineNames.delete(event.data.name);
+        staleNames.delete(event.data.name);
+        typingNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
         renderPills();
+        renderTypingBar();
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
       case 'rename':
@@ -127,6 +138,18 @@ function connect() {
         break;
       case 'role':
         agents = agents.map(function(a) { return a.name === event.data.name ? event.data : a; });
+        renderPills();
+        break;
+      case 'typing':
+        if (event.data.typing) {
+          typingNames.add(event.data.name);
+        } else {
+          typingNames.delete(event.data.name);
+        }
+        renderTypingBar();
+        break;
+      case 'stale':
+        staleNames.add(event.data.name);
         renderPills();
         break;
     }
@@ -140,7 +163,7 @@ function renderPills() {
   c.textContent = '';
   agents.forEach(function(a) {
     var pill = document.createElement('div');
-    pill.className = 'agent-pill';
+    pill.className = 'agent-pill' + (staleNames.has(a.name) ? ' stale' : '');
     var color = getSenderColor(a.name);
     pill.style.setProperty('--pill-color', color);
     pill.style.borderColor = color + '30';
@@ -167,6 +190,31 @@ function renderPills() {
     });
     c.appendChild(pill);
   });
+}
+
+function renderTypingBar() {
+  var bar = document.getElementById('typing-bar');
+  if (!bar) return;
+  bar.textContent = '';
+  var names = Array.from(typingNames);
+  if (names.length === 0) return;
+  var text = '';
+  if (names.length === 1) {
+    text = names[0] + ' is thinking';
+  } else if (names.length === 2) {
+    text = names[0] + ' and ' + names[1] + ' are thinking';
+  } else {
+    text = names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] + ' are thinking';
+  }
+  bar.appendChild(document.createTextNode(text));
+  var dots = document.createElement('span');
+  dots.className = 'typing-dots';
+  for (var i = 0; i < 3; i++) {
+    var dot = document.createElement('span');
+    dot.textContent = '.';
+    dots.appendChild(dot);
+  }
+  bar.appendChild(dots);
 }
 
 function showPopover(anchor, agent) {
@@ -390,6 +438,7 @@ function appendMessage(msg, scroll) {
   if (scroll === undefined) scroll = true;
   var c = document.getElementById('messages');
   var el = document.createElement('div');
+  el.dataset.id = msg.id;
 
   var isGrouped = msg.sender !== 'system' && msg.sender === lastSender;
 
@@ -413,6 +462,19 @@ function appendMessage(msg, scroll) {
     var body = document.createElement('div');
     body.className = 'msg-body';
 
+    // Reply quote (before header)
+    if (msg.replyTo) {
+      var orig = allMessages.find(function(m) { return m.id === msg.replyTo; });
+      if (orig) {
+        var quote = document.createElement('div');
+        quote.className = 'reply-quote';
+        quote.textContent = orig.sender + ': ' + orig.text.slice(0, 80);
+        quote.style.borderLeftColor = getSenderColor(orig.sender);
+        quote.addEventListener('click', function() { scrollToMessage(orig.id); });
+        body.appendChild(quote);
+      }
+    }
+
     var hdr = document.createElement('div');
     hdr.className = 'msg-header';
     var sn = document.createElement('span');
@@ -434,10 +496,28 @@ function appendMessage(msg, scroll) {
     tw.className = 'msg-text-wrap';
     renderContent(tw, msg.text);
 
+    // Image display
+    if (msg.image) {
+      var img = document.createElement('img');
+      img.className = 'msg-image';
+      img.src = msg.image;
+      img.addEventListener('click', function() { openLightbox(msg.image); });
+      tw.appendChild(img);
+    }
+
     body.appendChild(hdr); body.appendChild(tw);
 
     var actions = document.createElement('div');
     actions.className = 'msg-actions';
+
+    // Reply button
+    var replyBtn = document.createElement('button');
+    replyBtn.className = 'msg-action-btn';
+    replyBtn.textContent = '\u21A9';
+    replyBtn.title = 'Reply';
+    replyBtn.addEventListener('click', function() { setReplyTo(msg); });
+    actions.appendChild(replyBtn);
+
     var copyBtn = document.createElement('button');
     copyBtn.className = 'msg-action-btn'; copyBtn.textContent = '\u2398';
     copyBtn.title = 'Copy message';
@@ -508,15 +588,67 @@ function scrollToBottom() {
   var c = document.getElementById('messages'); c.scrollTop = c.scrollHeight;
 }
 
+// --- Image upload ---
+function uploadImage(file) {
+  fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': file.type }, body: file })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var sender = document.getElementById('sender-name').value || 'human';
+      var payload = { sender: sender, text: '[image]', image: data.url };
+      if (replyingTo) { payload.replyTo = replyingTo.id; clearReply(); }
+      fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload) });
+    });
+}
+
+function openLightbox(src) {
+  var overlay = document.createElement('div');
+  overlay.className = 'lightbox';
+  var img = document.createElement('img');
+  img.src = src;
+  overlay.appendChild(img);
+  overlay.addEventListener('click', function() { overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+// --- Reply/Thread ---
+function setReplyTo(msg) {
+  replyingTo = msg;
+  var preview = document.getElementById('reply-preview');
+  var previewText = document.getElementById('reply-preview-text');
+  previewText.textContent = msg.sender + ': ' + msg.text.slice(0, 100);
+  preview.classList.remove('hidden');
+  document.getElementById('message-input').focus();
+}
+
+function clearReply() {
+  replyingTo = null;
+  var preview = document.getElementById('reply-preview');
+  preview.classList.add('hidden');
+}
+
+function scrollToMessage(id) {
+  var el = document.querySelector('[data-id="' + id + '"]');
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.style.transition = 'background 0.3s';
+    el.style.background = 'var(--accent-soft)';
+    setTimeout(function() { el.style.background = ''; }, 1500);
+  }
+}
+
 // --- Send ---
 function sendMessage() {
   var input = document.getElementById('message-input');
   var sender = document.getElementById('sender-name');
   var text = input.value.trim();
   if (!text) return;
+  var payload = { sender: sender.value || 'human', text: text };
+  if (replyingTo) payload.replyTo = replyingTo.id;
   input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
+  clearReply();
   fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sender: sender.value || 'human', text: text }) });
+    body: JSON.stringify(payload) });
 }
 
 function mentionAll() {
@@ -526,14 +658,19 @@ function mentionAll() {
 
 function clearChat() { document.getElementById('messages').textContent = ''; }
 
+function exportChat() {
+  window.open('/api/export', '_blank');
+}
+
 // --- Global sound setting (popover, not prompt) ---
-function openSoundSettings() {
+function openSoundSettings(evt) {
   closePopover();
+  var anchor = evt ? (evt.currentTarget || evt.target) : null;
   var pop = document.createElement('div');
   pop.className = 'pill-popover';
-  pop.style.bottom = '60px';
-  pop.style.left = '16px';
-  pop.style.top = 'auto';
+  pop.style.width = '260px';
+  pop.style.maxHeight = '400px';
+  pop.style.overflowY = 'auto';
   pop.addEventListener('click', function(e) { e.stopPropagation(); });
 
   var hdr = document.createElement('div');
@@ -557,7 +694,9 @@ function openSoundSettings() {
   globalSelect.addEventListener('change', function() {
     soundSettings._global = globalSelect.value;
     saveSoundSettings();
+    var wasMuted = isMuted; isMuted = false;
     playSound('_preview');
+    isMuted = wasMuted;
   });
   globalRow.appendChild(globalLabel);
   globalRow.appendChild(globalSelect);
@@ -595,7 +734,94 @@ function openSoundSettings() {
   });
   pop.appendChild(previewBtn);
 
+  // Per-agent section
+  if (agents.length > 0) {
+    var agentDivider = document.createElement('div');
+    agentDivider.style.borderTop = '1px solid var(--border)';
+    agentDivider.style.margin = '0';
+    pop.appendChild(agentDivider);
+
+    var agentHdr = document.createElement('div');
+    agentHdr.className = 'pop-row';
+    agentHdr.style.paddingTop = '8px';
+    agentHdr.style.paddingBottom = '2px';
+    var agentHdrLabel = document.createElement('span');
+    agentHdrLabel.style.fontSize = '9px';
+    agentHdrLabel.style.textTransform = 'uppercase';
+    agentHdrLabel.style.letterSpacing = '1px';
+    agentHdrLabel.style.color = 'var(--text-muted)';
+    agentHdrLabel.style.fontWeight = '600';
+    agentHdrLabel.textContent = 'Per Agent';
+    agentHdr.appendChild(agentHdrLabel);
+    pop.appendChild(agentHdr);
+
+    agents.forEach(function(a) {
+      var row = document.createElement('div');
+      row.className = 'pop-row';
+      var lbl = document.createElement('label');
+      lbl.textContent = a.name;
+      lbl.title = a.name;
+      lbl.style.width = '60px';
+      lbl.style.overflow = 'hidden';
+      lbl.style.textOverflow = 'ellipsis';
+      lbl.style.whiteSpace = 'nowrap';
+      lbl.style.color = getSenderColor(a.name);
+      var sel = document.createElement('select');
+      sel.className = 'pop-select';
+      // "default" option uses global setting
+      var defOpt = document.createElement('option');
+      defOpt.value = '';
+      defOpt.textContent = '(global)';
+      if (!soundSettings[a.name]) defOpt.selected = true;
+      sel.appendChild(defOpt);
+      SOUNDS.forEach(function(s) {
+        var opt = document.createElement('option');
+        opt.value = s; opt.textContent = s;
+        if (soundSettings[a.name] === s) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener('change', function() {
+        if (sel.value === '') {
+          delete soundSettings[a.name];
+        } else {
+          soundSettings[a.name] = sel.value;
+        }
+        saveSoundSettings();
+      });
+      row.appendChild(lbl);
+      row.appendChild(sel);
+      pop.appendChild(row);
+    });
+  }
+
+  // Append to body, then position relative to the Config button
   document.body.appendChild(pop);
+  var popRect = pop.getBoundingClientRect();
+
+  if (anchor) {
+    var rect = anchor.getBoundingClientRect();
+    // Position to the right of the sidebar button, aligned to its top
+    var left = rect.right + 6;
+    var top = rect.top;
+    // If it overflows right edge, position to the left of the button instead
+    if (left + popRect.width > window.innerWidth - 8) {
+      left = rect.left - popRect.width - 6;
+    }
+    // If it overflows bottom, shift up
+    if (top + popRect.height > window.innerHeight - 8) {
+      top = window.innerHeight - popRect.height - 8;
+    }
+    // Clamp top
+    top = Math.max(8, top);
+    left = Math.max(8, left);
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+  } else {
+    // Fallback: center of viewport
+    pop.style.top = Math.max(8, (window.innerHeight - popRect.height) / 2) + 'px';
+    pop.style.left = Math.max(8, (window.innerWidth - popRect.width) / 2) + 'px';
+  }
+
   openPopover = pop;
 }
 
@@ -670,6 +896,26 @@ function setupInput() {
     if (atMatch) showMentionMenu(atMatch[1]); else hideMentionMenu();
   });
   input.addEventListener('blur', function() { setTimeout(hideMentionMenu, 150); });
+
+  // Paste handler for images
+  input.addEventListener('paste', function(e) {
+    var items = (e.clipboardData || e.originalEvent.clipboardData).items;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        e.preventDefault();
+        uploadImage(items[i].getAsFile());
+        return;
+      }
+    }
+  });
+
+  // Drop handler for images on chat area
+  var chatArea = document.getElementById('messages');
+  chatArea.addEventListener('dragover', function(e) { e.preventDefault(); chatArea.classList.add('drag-over'); });
+  chatArea.addEventListener('dragleave', function() { chatArea.classList.remove('drag-over'); });
+  chatArea.addEventListener('drop', function(e) { e.preventDefault(); chatArea.classList.remove('drag-over');
+    if (e.dataTransfer.files.length > 0) uploadImage(e.dataTransfer.files[0]);
+  });
 }
 
 function updateSendBtn() {

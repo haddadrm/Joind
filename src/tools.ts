@@ -35,6 +35,7 @@ export function registerTools(server: McpServer, room: ChatRoom): void {
       }),
     },
     async ({ name, pid }) => {
+      room.touch(name);
       const agent = room.join(name, pid);
       const online = room.who();
 
@@ -68,10 +69,13 @@ export function registerTools(server: McpServer, room: ChatRoom): void {
       inputSchema: z.object({
         sender: z.string().describe("Your name"),
         text: z.string().describe("Message text. Use @name to mention agents."),
+        replyTo: z.number().optional().describe("Message ID to reply to"),
       }),
     },
-    async ({ sender, text }) => {
-      const msg = room.send(sender, text);
+    async ({ sender, text, replyTo }) => {
+      room.touch(sender);
+      const msg = room.send(sender, text, { replyTo });
+      room.setTyping(sender, false);
       return {
         content: [{ type: "text" as const, text: `Message #${msg.id} sent` }],
       };
@@ -100,7 +104,10 @@ export function registerTools(server: McpServer, room: ChatRoom): void {
     async ({ since, limit }) => {
       const msgs = room.read(since, limit);
       const formatted = msgs
-        .map((m) => `[#${m.id} ${m.sender}] ${m.text}`)
+        .map((m) => {
+          const prefix = m.replyTo ? `[reply to #${m.replyTo}] ` : "";
+          return `[#${m.id} ${m.sender}] ${prefix}${m.text}`;
+        })
         .join("\n");
       return {
         content: [{ type: "text" as const, text: formatted || "(no messages)" }],
@@ -147,6 +154,36 @@ export function registerTools(server: McpServer, room: ChatRoom): void {
       room.leave(name);
       return {
         content: [{ type: "text" as const, text: `${name} disconnected` }],
+      };
+    }
+  );
+
+  // -----------------------------------------------------------------
+  // chat_typing — Set typing indicator
+  // -----------------------------------------------------------------
+  server.registerTool(
+    "chat_typing",
+    {
+      title: "Set typing indicator",
+      description:
+        "Signal that you are typing (or stopped typing) in the Joind chat room.",
+      inputSchema: z.object({
+        name: z.string().describe("Your name"),
+        typing: z.boolean().describe("true if typing, false if stopped"),
+      }),
+    },
+    async ({ name, typing }) => {
+      room.touch(name);
+      room.setTyping(name, typing);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: typing
+              ? `${name} is now shown as typing`
+              : `${name} typing indicator cleared`,
+          },
+        ],
       };
     }
   );

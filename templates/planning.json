@@ -7,23 +7,27 @@
     {
       "name": "Propose",
       "participants": ["lead"],
-      "prompt": "Present your plan or approach. Include goals, steps, risks."
+      "prompt": "Present your plan or approach. Include goals, steps, risks.",
+      "timeout": 120
     },
     {
       "name": "Analyse",
       "participants": ["analyst", "critic"],
-      "prompt": "Evaluate the plan. What's missing? What could go wrong? Suggest alternatives."
+      "prompt": "Evaluate the plan. What's missing? What could go wrong? Suggest alternatives.",
+      "timeout": 120
     },
     {
       "name": "Refine",
       "participants": ["lead"],
-      "prompt": "Incorporate feedback. Present the refined plan."
+      "prompt": "Incorporate feedback. Present the refined plan.",
+      "timeout": 120
     },
     {
       "name": "Commit",
       "participants": ["analyst", "critic"],
       "prompt": "Final assessment. Do you approve? Any last concerns?",
-      "is_output": true
+      "is_output": true,
+      "timeout": 120
     }
   ]
 }

@@ -32,8 +32,9 @@
           <div class="quick-actions">
             <button class="btn btn-action" onclick="mentionAll()">@all</button>
             <button class="btn btn-action" id="mute-btn" onclick="toggleMute()">Sound</button>
-            <button class="btn btn-action" onclick="openSoundSettings()">Config</button>
+            <button class="btn btn-action" onclick="openSoundSettings(event)">Config</button>
             <button class="btn btn-action" onclick="clearChat()">Clear</button>
+            <button class="btn btn-action" onclick="exportChat()">Export</button>
           </div>
         </div>
 
@@ -81,6 +82,13 @@
         </div>
 
         <div class="mention-menu hidden" id="mention-menu"></div>
+
+        <div class="reply-preview hidden" id="reply-preview">
+          <span class="reply-preview-text" id="reply-preview-text"></span>
+          <span class="reply-preview-cancel" onclick="clearReply()">&#x2715;</span>
+        </div>
+
+        <div class="typing-bar" id="typing-bar"></div>
 
         <footer class="chat-footer">
           <input type="hidden" id="sender-name" value="human" />

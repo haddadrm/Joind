@@ -39,6 +39,7 @@ interface SessionPhase {
   participants: string[];
   prompt: string;
   is_output?: boolean;
+  timeout?: number;
 }
 
 export interface Session {
@@ -53,6 +54,7 @@ export interface Session {
   currentPhase: number;
   currentTurn: number; // index within phase.participants
   waitingFor: string | null; // agent name we're waiting for
+  timeoutHandle?: ReturnType<typeof setTimeout>;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +178,16 @@ function triggerCurrentTurn(session: Session, tmpl: SessionTemplate, room: ChatR
 
   session.waitingFor = agentName;
 
+  // Start turn timeout — auto-advance if the agent doesn't respond
+  const timeoutSec = phase.timeout ?? 120;
+  session.timeoutHandle = setTimeout(() => {
+    if (session.status !== "active" || session.waitingFor !== agentName) return;
+    room.send("system", `${agentName} timed out (${timeoutSec}s) in phase "${phase.name}"`);
+    session.waitingFor = null;
+    session.currentTurn++;
+    triggerCurrentTurn(session, tmpl, room);
+  }, timeoutSec * 1000);
+
   // Build the prompt for this agent
   let prompt = `[joind:session] Your turn in "${tmpl.name}" session.`;
   prompt += ` Phase: ${phase.name}. Your role: ${role}.`;
@@ -211,9 +223,14 @@ export function onMessage(sender: string, room: ChatRoom): void {
     if (session.status !== "active") continue;
     if (session.waitingFor !== sender) continue;
 
-    // This agent responded — advance
+    // This agent responded — clear timeout and advance
     const tmpl = templates.get(session.templateId);
     if (!tmpl) continue;
+
+    if (session.timeoutHandle) {
+      clearTimeout(session.timeoutHandle);
+      session.timeoutHandle = undefined;
+    }
 
     session.waitingFor = null;
     session.currentTurn++;
@@ -234,6 +251,10 @@ export function getActiveSessions(): Session[] {
 export function cancelSession(id: number, room: ChatRoom): boolean {
   const session = activeSessions.get(id);
   if (!session) return false;
+  if (session.timeoutHandle) {
+    clearTimeout(session.timeoutHandle);
+    session.timeoutHandle = undefined;
+  }
   session.status = "cancelled";
   session.waitingFor = null;
   activeSessions.delete(id);

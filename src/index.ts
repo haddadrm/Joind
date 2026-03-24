@@ -7,11 +7,13 @@
  */
 
 import { createServer } from "http";
+import { writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import express from "express";
 import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
+import { ensureDir } from "./persist.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ChatRoom } from "./room.js";
@@ -29,9 +31,10 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.JOIND_PORT ?? 4200);
+const DATA_DIR = join(__dirname, "..", "data");
 
-// --- Chat room (shared across all sessions) ---
-const room = new ChatRoom();
+// --- Chat room (shared across all sessions, persisted to data/) ---
+const room = new ChatRoom(DATA_DIR);
 
 // --- HTTP + WebSocket server ---
 const app = express();
@@ -133,14 +136,32 @@ app.delete("/mcp", async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Image upload ---
+app.post("/api/upload", express.raw({ type: "image/*", limit: "10mb" }), (req, res) => {
+  const ext = (req.headers["content-type"] || "").split("/")[1] || "png";
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const imgDir = join(DATA_DIR, "images");
+  ensureDir(imgDir);
+  writeFileSync(join(imgDir, filename), req.body);
+  res.json({ url: `/data/images/${filename}` });
+});
+
+// --- Serve data directory (images, etc.) ---
+app.use("/data", express.static(DATA_DIR));
+
 // --- REST API ---
 app.post("/api/send", express.json(), (req, res) => {
-  const { sender, text } = req.body as { sender?: string; text?: string };
+  const { sender, text, image, replyTo } = req.body as {
+    sender?: string;
+    text?: string;
+    image?: string;
+    replyTo?: number;
+  };
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text required" });
     return;
   }
-  const msg = room.send(sender, text);
+  const msg = room.send(sender, text, { image, replyTo });
   res.json({ id: msg.id, sender: msg.sender, text: msg.text });
 });
 
@@ -150,6 +171,57 @@ app.get("/api/messages", (_req, res) => {
 
 app.get("/api/who", (_req, res) => {
   res.json(room.who());
+});
+
+// --- Chat Export ---
+app.get("/api/export", (_req, res) => {
+  const messages = room.read(undefined, 10000);
+  const agents = room.who();
+  const now = new Date();
+
+  let md = `# Joind Chat Export\n`;
+  md += `**Date**: ${now.toISOString().split("T")[0]}\n`;
+  md += `**Messages**: ${messages.length}\n`;
+  if (agents.length > 0) {
+    md += `**Participants**: ${agents.map((a) => a.name).join(", ")}\n`;
+  }
+  md += `\n---\n\n`;
+
+  for (const msg of messages) {
+    const time = new Date(msg.timestamp).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+
+    if (msg.sender === "system") {
+      md += `*${time} — ${msg.text}*\n\n`;
+      continue;
+    }
+
+    // Reply context
+    if (msg.replyTo) {
+      const orig = room.getMessageById(msg.replyTo);
+      if (orig) {
+        md += `> *replying to ${orig.sender}*: ${orig.text.slice(0, 80)}${orig.text.length > 80 ? "…" : ""}\n\n`;
+      }
+    }
+
+    md += `**${msg.sender}** (${time}):\n${msg.text}\n`;
+
+    if (msg.image) {
+      md += `\n![image](${msg.image})\n`;
+    }
+
+    md += `\n`;
+  }
+
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="joind-export-${now.toISOString().split("T")[0]}.md"`
+  );
+  res.send(md);
 });
 
 app.post("/api/join", express.json(), (req, res) => {
@@ -184,6 +256,17 @@ app.post("/api/rename", express.json(), (req, res) => {
     return;
   }
   res.json({ name: agent.name, pid: agent.pid });
+});
+
+app.post("/api/heartbeat", express.json(), (req, res) => {
+  const { name } = req.body as { name?: string };
+  if (!name) {
+    res.status(400).json({ error: "name required" });
+    return;
+  }
+  room.touch(name);
+  const agent = room.getAgent(name);
+  res.json({ ok: true, lastSeen: agent?.lastSeen ?? Date.now() });
 });
 
 app.post("/api/role", express.json(), (req, res) => {

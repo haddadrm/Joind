@@ -1075,6 +1075,53 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* ================================================================
+   IMAGE PASTE/DROP
+   ================================================================ */
+.msg-image { max-width: 300px; max-height: 200px; border-radius: 6px; margin-top: 6px; cursor: pointer; border: 1px solid var(--border); transition: transform 0.15s; }
+.msg-image:hover { transform: scale(1.02); }
+.drag-over { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; z-index: 200; cursor: pointer; animation: fade-in 0.15s ease-out; }
+.lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 0 40px rgba(0,0,0,0.5); }
+
+/* ================================================================
+   REPLY/THREAD
+   ================================================================ */
+.reply-quote { font-size: 11px; color: var(--text-dim); padding: 2px 0 2px 8px; border-left: 2px solid var(--text-muted); margin-bottom: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
+.reply-quote:hover { color: var(--text); }
+.reply-preview { display: flex; align-items: center; gap: 8px; padding: 4px 12px; background: var(--bg-elevated); border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
+.reply-preview.hidden { display: none; }
+.reply-preview-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-preview-cancel { cursor: pointer; color: var(--text-muted); font-size: 14px; }
+.reply-preview-cancel:hover { color: var(--error); }
+
+/* ================================================================
+   TYPING INDICATOR
+   ================================================================ */
+.typing-bar {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 16px;
+  font-style: italic;
+  min-height: 0;
+  transition: all 0.15s ease;
+}
+.typing-bar:empty { display: none; }
+.typing-dots { display: inline-block; }
+.typing-dots span {
+  animation: dot-pulse 1.4s infinite;
+  opacity: 0;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-pulse { 0%,60%,100% { opacity: 0; } 30% { opacity: 1; } }
+
+/* ================================================================
+   STALE AGENT
+   ================================================================ */
+.agent-pill.stale { opacity: 0.4; }
+.agent-pill.stale .pill-dot { background: var(--text-muted) !important; box-shadow: none; }
+
 @media (max-width: 700px) {
   .sidebar { width: 180px; min-width: 180px; }
   .you-pill .you-label { display: none; }

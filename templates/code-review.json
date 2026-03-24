@@ -7,23 +7,27 @@
     {
       "name": "Submit",
       "participants": ["builder"],
-      "prompt": "Present the code or feature you want reviewed. Explain what changed and why."
+      "prompt": "Present the code or feature you want reviewed. Explain what changed and why.",
+      "timeout": 120
     },
     {
       "name": "Review",
       "participants": ["reviewer", "red_team"],
-      "prompt": "Review the submission. Identify issues, suggest improvements. Be specific."
+      "prompt": "Review the submission. Identify issues, suggest improvements. Be specific.",
+      "timeout": 120
     },
     {
       "name": "Respond",
       "participants": ["builder"],
-      "prompt": "Address the feedback. What will you change? What do you disagree with?"
+      "prompt": "Address the feedback. What will you change? What do you disagree with?",
+      "timeout": 120
     },
     {
       "name": "Summary",
       "participants": ["synthesiser"],
       "prompt": "Summarise: what was agreed, what changes needed, what remains unresolved.",
-      "is_output": true
+      "is_output": true,
+      "timeout": 120
     }
   ]
 }

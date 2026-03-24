@@ -7,23 +7,27 @@
     {
       "name": "Frame",
       "participants": ["proposer"],
-      "prompt": "State the question or decision to debate. Provide context."
+      "prompt": "State the question or decision to debate. Provide context.",
+      "timeout": 120
     },
     {
       "name": "Opening Arguments",
       "participants": ["for", "against"],
-      "prompt": "Make your opening case. Be specific and evidence-based."
+      "prompt": "Make your opening case. Be specific and evidence-based.",
+      "timeout": 120
     },
     {
       "name": "Rebuttals",
       "participants": ["against", "for"],
-      "prompt": "Respond directly to the opposing argument. Where are they wrong?"
+      "prompt": "Respond directly to the opposing argument. Where are they wrong?",
+      "timeout": 120
     },
     {
       "name": "Verdict",
       "participants": ["moderator"],
       "prompt": "Weigh both sides. Who made the stronger case? What is the recommended decision?",
-      "is_output": true
+      "is_output": true,
+      "timeout": 120
     }
   ]
 }
