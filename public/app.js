@@ -570,6 +570,8 @@ function appendMessage(msg, scroll) {
 
 function renderContent(parent, text) {
   if (typeof marked !== 'undefined') {
+    // Ensure real newlines (WebSocket/JSON may deliver literal \n)
+    text = text.replace(/\\n/g, '\n');
     var html = marked.parse(text);
     html = html.replace(/@(\w[\w-]*)/g, '<span class="mention">@$1</span>');
     parent.innerHTML = html;
@@ -686,6 +688,7 @@ function exportChat() {
 
 // --- Global sound setting (popover, not prompt) ---
 function openSoundSettings(evt) {
+  if (evt) evt.stopPropagation();
   closePopover();
   var anchor = evt ? (evt.currentTarget || evt.target) : null;
   var pop = document.createElement('div');
