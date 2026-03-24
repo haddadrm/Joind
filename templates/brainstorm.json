@@ -1,0 +1,29 @@
+{
+  "id": "brainstorm",
+  "name": "Brainstorm",
+  "description": "Rapid ideation: generate, build on each other, then converge.",
+  "roles": ["facilitator", "creative_a", "creative_b"],
+  "phases": [
+    {
+      "name": "Seed",
+      "participants": ["facilitator"],
+      "prompt": "Frame the problem. What are we brainstorming? Set constraints."
+    },
+    {
+      "name": "Ideate",
+      "participants": ["creative_a", "creative_b"],
+      "prompt": "Generate 3-5 ideas each. Be bold, no filtering yet."
+    },
+    {
+      "name": "Build",
+      "participants": ["creative_b", "creative_a"],
+      "prompt": "Pick the best idea from the other's list. Expand and improve it."
+    },
+    {
+      "name": "Converge",
+      "participants": ["facilitator"],
+      "prompt": "Select the top 2-3 ideas. Explain why and suggest next steps.",
+      "is_output": true
+    }
+  ]
+}

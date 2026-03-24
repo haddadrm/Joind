@@ -1,0 +1,29 @@
+{
+  "id": "code-review",
+  "name": "Code Review",
+  "description": "Structured review with builder, reviewer, and red team.",
+  "roles": ["builder", "reviewer", "red_team", "synthesiser"],
+  "phases": [
+    {
+      "name": "Submit",
+      "participants": ["builder"],
+      "prompt": "Present the code or feature you want reviewed. Explain what changed and why."
+    },
+    {
+      "name": "Review",
+      "participants": ["reviewer", "red_team"],
+      "prompt": "Review the submission. Identify issues, suggest improvements. Be specific."
+    },
+    {
+      "name": "Respond",
+      "participants": ["builder"],
+      "prompt": "Address the feedback. What will you change? What do you disagree with?"
+    },
+    {
+      "name": "Summary",
+      "participants": ["synthesiser"],
+      "prompt": "Summarise: what was agreed, what changes needed, what remains unresolved.",
+      "is_output": true
+    }
+  ]
+}

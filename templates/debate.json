@@ -1,0 +1,29 @@
+{
+  "id": "debate",
+  "name": "Debate",
+  "description": "Two agents argue opposing positions. A moderator delivers a verdict.",
+  "roles": ["proposer", "for", "against", "moderator"],
+  "phases": [
+    {
+      "name": "Frame",
+      "participants": ["proposer"],
+      "prompt": "State the question or decision to debate. Provide context."
+    },
+    {
+      "name": "Opening Arguments",
+      "participants": ["for", "against"],
+      "prompt": "Make your opening case. Be specific and evidence-based."
+    },
+    {
+      "name": "Rebuttals",
+      "participants": ["against", "for"],
+      "prompt": "Respond directly to the opposing argument. Where are they wrong?"
+    },
+    {
+      "name": "Verdict",
+      "participants": ["moderator"],
+      "prompt": "Weigh both sides. Who made the stronger case? What is the recommended decision?",
+      "is_output": true
+    }
+  ]
+}

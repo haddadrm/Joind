@@ -1,0 +1,29 @@
+{
+  "id": "planning",
+  "name": "Planning",
+  "description": "Collaborative planning: propose, critique, refine, commit.",
+  "roles": ["lead", "analyst", "critic"],
+  "phases": [
+    {
+      "name": "Propose",
+      "participants": ["lead"],
+      "prompt": "Present your plan or approach. Include goals, steps, risks."
+    },
+    {
+      "name": "Analyse",
+      "participants": ["analyst", "critic"],
+      "prompt": "Evaluate the plan. What's missing? What could go wrong? Suggest alternatives."
+    },
+    {
+      "name": "Refine",
+      "participants": ["lead"],
+      "prompt": "Incorporate feedback. Present the refined plan."
+    },
+    {
+      "name": "Commit",
+      "participants": ["analyst", "critic"],
+      "prompt": "Final assessment. Do you approve? Any last concerns?",
+      "is_output": true
+    }
+  ]
+}

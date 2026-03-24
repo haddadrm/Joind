@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>Joind</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-left">
+        <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#x2630;</button>
+        <h1 class="logo"><span class="logo-icon">&#x2B22;</span>Joind</h1>
+      </div>
+      <div class="agent-pills" id="agent-pills"></div>
+      <div class="you-pill" id="you-pill" title="Click to change your name">
+        <span class="you-label">you</span>
+        <span class="you-name" id="you-name-display">human</span>
+      </div>
+      <div class="header-right">
+        <span class="connection-dot" id="connection-dot" title="Connected"></span>
+      </div>
+    </header>
+
+    <div class="content">
+      <aside class="sidebar" id="sidebar">
+        <!-- Actions on top -->
+        <div class="sidebar-section">
+          <div class="quick-actions">
+            <button class="btn btn-action" onclick="mentionAll()">@all</button>
+            <button class="btn btn-action" id="mute-btn" onclick="toggleMute()">Sound</button>
+            <button class="btn btn-action" onclick="openSoundSettings()">Config</button>
+            <button class="btn btn-action" onclick="clearChat()">Clear</button>
+          </div>
+        </div>
+
+        <!-- Terminals — collapsible -->
+        <div class="sidebar-section">
+          <div class="section-header" onclick="toggleSection(this)">
+            <h2><span class="section-arrow">&#x25BE;</span> Terminals</h2>
+            <button class="btn btn-sm" id="scan-btn" onclick="event.stopPropagation(); scanTerminals()">
+              <span class="scan-icon">&#x25CE;</span> Scan
+            </button>
+          </div>
+          <div class="section-body">
+            <ul id="terminal-list" class="terminal-list">
+              <li class="empty-state">Click Scan to discover agents</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Sessions — collapsible -->
+        <div class="sidebar-section">
+          <div class="section-header" onclick="toggleSection(this)">
+            <h2><span class="section-arrow">&#x25BE;</span> Sessions</h2>
+          </div>
+          <div class="section-body">
+            <div id="session-status" class="session-status"></div>
+            <div id="template-list" class="template-list"></div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="chat-area">
+        <div class="chat-messages" id="messages">
+          <div class="welcome-message" id="welcome">
+            <div class="welcome-glyph">
+              <span class="welcome-hex">&#x2B22;</span>
+            </div>
+            <h2>Joind</h2>
+            <p class="welcome-sub">universal agent chat via MCP</p>
+            <div class="welcome-steps">
+              <div class="welcome-step"><span class="step-num">1</span>Scan for terminal sessions in the sidebar</div>
+              <div class="welcome-step"><span class="step-num">2</span>Invite agents or let them <code>/join</code> themselves</div>
+              <div class="welcome-step"><span class="step-num">3</span>Use <code>@name</code> to mention &mdash; they'll respond</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mention-menu hidden" id="mention-menu"></div>
+
+        <footer class="chat-footer">
+          <input type="hidden" id="sender-name" value="human" />
+          <div class="input-row">
+            <textarea id="message-input" placeholder="Type a message... @name to mention" rows="1" spellcheck="false"></textarea>
+            <button class="btn btn-send" id="send-btn" onclick="sendMessage()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg>
+            </button>
+          </div>
+          <div class="input-hint">Enter send &middot; Shift+Enter newline &middot; @name mention &middot; @all everyone</div>
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
