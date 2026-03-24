@@ -613,16 +613,29 @@ function scrollToBottom() {
 }
 
 // --- Image upload ---
+var pendingImage = null; // { url } — image attached to current draft
+
 function uploadImage(file) {
   fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': file.type }, body: file })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      var sender = document.getElementById('sender-name').value || 'human';
-      var payload = { sender: sender, text: '[image]', image: data.url };
-      if (replyingTo) { payload.replyTo = replyingTo.id; clearReply(); }
-      fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload) });
+      pendingImage = { url: data.url };
+      showImagePreview(data.url);
     });
+}
+
+function showImagePreview(url) {
+  var bar = document.getElementById('image-preview');
+  var thumb = document.getElementById('image-preview-thumb');
+  thumb.src = url;
+  bar.classList.remove('hidden');
+  document.getElementById('message-input').focus();
+}
+
+function clearImagePreview() {
+  pendingImage = null;
+  document.getElementById('image-preview').classList.add('hidden');
+  document.getElementById('image-preview-thumb').src = '';
 }
 
 function openLightbox(src) {
@@ -666,11 +679,13 @@ function sendMessage() {
   var input = document.getElementById('message-input');
   var sender = document.getElementById('sender-name');
   var text = input.value.trim();
-  if (!text) return;
-  var payload = { sender: sender.value || 'human', text: text };
+  if (!text && !pendingImage) return;
+  var payload = { sender: sender.value || 'human', text: text || '[image]' };
   if (replyingTo) payload.replyTo = replyingTo.id;
+  if (pendingImage) payload.image = pendingImage.url;
   input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
   clearReply();
+  clearImagePreview();
   fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) });
 }

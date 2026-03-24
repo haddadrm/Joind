@@ -94,7 +94,14 @@ app.post("/mcp", express.json({ strict: false }), async (req, res) => {
   let session = sessionId ? sessions.get(sessionId) : undefined;
 
   if (sessionId && !session) {
-    delete req.headers["mcp-session-id"];
+    // Stale session — tell the client to reconnect with a fresh handshake.
+    // Return 404 which signals MCP clients to drop their session and re-init.
+    res.status(404).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Session expired. Please reconnect." },
+      id: null,
+    });
+    return;
   }
 
   if (!session) {
@@ -126,7 +133,7 @@ app.get("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string;
   const session = sessions.get(sessionId);
   if (!session) {
-    res.status(400).json({ error: "No active session" });
+    res.status(404).json({ error: "Session expired. Please reconnect." });
     return;
   }
   await session.transport.handleRequest(req, res);
