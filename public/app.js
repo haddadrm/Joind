@@ -25,6 +25,7 @@ var lastSender = null; // for message grouping
 var lastScanResults = []; // cached scan results for auto-refresh
 var isMuted = JSON.parse(localStorage.getItem('joind-muted') || 'false');
 var allMessages = []; // all messages for reply lookup
+var replyingTo = null; // message we're replying to
 var typingNames = new Set(); // agents currently typing
 var staleNames = new Set(); // agents marked as stale
 var replyingTo = null; // current reply target (message object or null)
@@ -83,8 +84,9 @@ function toggleMute() {
 function updateMuteBtn() {
   var btn = document.getElementById('mute-btn');
   if (btn) {
-    btn.textContent = isMuted ? '\u{1F507} Muted' : '\u{1F50A} Sound';
+    btn.textContent = isMuted ? '\u{1F507}' : '\u{1F50A}';
     btn.style.opacity = isMuted ? '0.5' : '1';
+    btn.title = isMuted ? 'Unmute' : 'Mute';
   }
 }
 
@@ -107,12 +109,28 @@ function connect() {
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         allMessages = event.data.messages.slice();
         renderPills(); renderMessages(event.data.messages);
+        if (event.data.session) activeConversation = event.data.session;
+        if (event.data.conversations) conversationList = event.data.conversations;
+        loadConversations(true);
+        break;
+      case 'session-changed':
+        allMessages = (event.data.messages || []).slice();
+        lastSender = null;
+        renderMessages(event.data.messages || []);
+        activeConversation = event.data.session;
+        loadConversations(true);
         break;
       case 'message':
         hideWelcome();
         allMessages.push(event.data);
         appendMessage(event.data);
         if (event.data.sender !== 'system') playSound(event.data.sender);
+        // Update active conversation message count live
+        if (activeConversation) {
+          activeConversation.messageCount = (activeConversation.messageCount || 0) + 1;
+          var activeEl = document.getElementById('active-session');
+          if (activeEl) activeEl.textContent = activeConversation.name + ' (' + activeConversation.messageCount + ' msgs)';
+        }
         break;
       case 'join':
         onlineNames.add(event.data.name);
@@ -146,7 +164,7 @@ function connect() {
         } else {
           typingNames.delete(event.data.name);
         }
-        renderTypingBar();
+        renderPills();
         break;
       case 'stale':
         staleNames.add(event.data.name);
@@ -163,7 +181,10 @@ function renderPills() {
   c.textContent = '';
   agents.forEach(function(a) {
     var pill = document.createElement('div');
-    pill.className = 'agent-pill' + (staleNames.has(a.name) ? ' stale' : '');
+    var pillClass = 'agent-pill';
+    if (staleNames.has(a.name)) pillClass += ' stale';
+    if (typingNames.has(a.name)) pillClass += ' working';
+    pill.className = pillClass;
     var color = getSenderColor(a.name);
     pill.style.setProperty('--pill-color', color);
     pill.style.borderColor = color + '30';
@@ -530,6 +551,7 @@ function appendMessage(msg, scroll) {
     });
     actions.appendChild(copyBtn);
 
+    el.dataset.id = msg.id;
     el.appendChild(av); el.appendChild(body); el.appendChild(actions);
 
     // Grouped: add hover timestamp
@@ -1127,7 +1149,92 @@ function setupYouPill() {
   syncName();
 }
 
-// --- Sessions ---
+// --- Conversations (persistent chat sessions) ---
+var activeConversation = null;
+var conversationList = [];
+
+function loadConversations(fromCache) {
+  if (fromCache && conversationList.length > 0) {
+    renderConversations(conversationList, activeConversation);
+    return;
+  }
+  fetch('/api/conversations').then(function(r) { return r.json(); }).then(function(data) {
+    activeConversation = data.active;
+    conversationList = data.sessions;
+    renderConversations(data.sessions, data.active);
+  });
+}
+
+function renderConversations(sessions, active) {
+  var list = document.getElementById('conversation-list');
+  var activeEl = document.getElementById('active-session');
+  list.textContent = '';
+
+  if (active) {
+    activeEl.textContent = active.name + ' (' + active.messageCount + ' msgs)';
+    activeEl.title = active.id;
+    activeEl.style.cursor = 'pointer';
+    activeEl.onclick = function() {
+      var newName = prompt('Rename conversation:', active.name);
+      if (newName && newName !== active.name) {
+        fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: active.id, name: newName }) }).then(function() { loadConversations(); });
+      }
+    };
+  }
+
+  var others = sessions.filter(function(s) { return !active || s.id !== active.id; });
+  if (others.length === 0) {
+    var empty = document.createElement('li');
+    empty.className = 'empty-state';
+    empty.textContent = 'No previous conversations';
+    list.appendChild(empty);
+    return;
+  }
+
+  others.slice(0, 10).forEach(function(s) {
+    var li = document.createElement('li');
+    li.className = 'conversation-item';
+
+    var name = document.createElement('span');
+    name.className = 'conv-name';
+    name.textContent = s.name;
+
+    var count = document.createElement('span');
+    count.className = 'conv-count';
+    count.textContent = s.messageCount + ' msgs';
+
+    var switchBtn = document.createElement('button');
+    switchBtn.className = 'terminal-invite';
+    switchBtn.textContent = 'Load';
+    switchBtn.addEventListener('click', function() {
+      fetch('/api/conversations/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: s.id }) }).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.messages) {
+            lastSender = null;
+            renderMessages(data.messages);
+          }
+          loadConversations();
+        });
+    });
+
+    li.appendChild(name);
+    li.appendChild(count);
+    li.appendChild(switchBtn);
+    list.appendChild(li);
+  });
+}
+
+function newConversation() {
+  var name = prompt('New conversation name (optional):');
+  fetch('/api/conversations/new', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name || undefined }) }).then(function() {
+      document.getElementById('messages').textContent = '';
+      loadConversations();
+    });
+}
+
+// --- Workflow Sessions (templates) ---
 var sessionTemplates = [];
 
 function loadTemplates() {

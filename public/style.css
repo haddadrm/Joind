@@ -333,8 +333,8 @@ body {
 .quick-actions { display: flex; gap: 3px; }
 .btn-action {
   flex: 1;
-  padding: 5px 6px;
-  font-size: 10px;
+  padding: 6px 0;
+  font-size: 14px;
   background: var(--bg-elevated);
   color: var(--text-dim);
   border: 1px solid var(--border);
@@ -345,7 +345,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
+  line-height: 1;
 }
 .btn-action:hover {
   background: var(--bg-hover);
@@ -943,6 +943,75 @@ body {
 /* ================================================================
    SESSIONS
    ================================================================ */
+
+/* Conversations */
+.active-session {
+  font-size: 11px;
+  color: var(--accent-bright);
+  font-weight: 500;
+  padding: 4px 6px;
+  background: var(--accent-soft);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.active-session:hover { background: var(--accent-hover); }
+
+.conversation-list { list-style: none; }
+.conversation-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  margin-bottom: 1px;
+  font-size: 11px;
+  transition: background 0.12s;
+}
+.conversation-item:hover { background: var(--bg-hover); }
+.conv-name { flex: 1; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-count { font-size: 9px; color: var(--text-muted); }
+
+/* Reply */
+.reply-quote {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--text-muted);
+  margin-bottom: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 400px;
+}
+.reply-quote:hover { color: var(--text); }
+
+.reply-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.reply-preview.hidden { display: none; }
+.reply-preview-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reply-preview-cancel {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+.reply-preview-cancel:hover { color: var(--error); }
+
 .template-list { display: flex; flex-direction: column; gap: 4px; }
 
 .template-card {

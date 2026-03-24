@@ -30,11 +30,22 @@
         <!-- Actions on top -->
         <div class="sidebar-section">
           <div class="quick-actions">
-            <button class="btn btn-action" onclick="mentionAll()">@all</button>
-            <button class="btn btn-action" id="mute-btn" onclick="toggleMute()">Sound</button>
-            <button class="btn btn-action" onclick="openSoundSettings(event)">Config</button>
-            <button class="btn btn-action" onclick="clearChat()">Clear</button>
-            <button class="btn btn-action" onclick="exportChat()">Export</button>
+            <button class="btn btn-action" id="mute-btn" onclick="toggleMute()" title="Toggle sound">&#x1F50A;</button>
+            <button class="btn btn-action" onclick="openSoundSettings(event)" title="Sound settings">&#x2699;</button>
+            <button class="btn btn-action" onclick="exportChat()" title="Export chat">&#x2913;</button>
+            <button class="btn btn-action" onclick="clearChat()" title="Clear chat view">&#x2715;</button>
+          </div>
+        </div>
+
+        <!-- Conversations — collapsible -->
+        <div class="sidebar-section">
+          <div class="section-header" onclick="toggleSection(this)">
+            <h2><span class="section-arrow">&#x25BE;</span> Conversations</h2>
+            <button class="btn btn-sm" onclick="event.stopPropagation(); newConversation()">+ New</button>
+          </div>
+          <div class="section-body">
+            <div id="active-session" class="active-session"></div>
+            <ul id="conversation-list" class="conversation-list"></ul>
           </div>
         </div>
 

@@ -32,9 +32,10 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.JOIND_PORT ?? 4200);
 const DATA_DIR = join(__dirname, "..", "data");
+const CONTINUE = process.env.JOIND_CONTINUE === "1" || process.argv.includes("--continue");
 
-// --- Chat room (shared across all sessions, persisted to data/) ---
-const room = new ChatRoom(DATA_DIR);
+// --- Chat room (session-aware persistence) ---
+const room = new ChatRoom(DATA_DIR, CONTINUE);
 
 // --- HTTP + WebSocket server ---
 const app = express();
@@ -66,7 +67,12 @@ wss.on("connection", (ws) => {
   ws.send(
     JSON.stringify({
       type: "init",
-      data: { agents: room.who(), messages: room.read(undefined, 100) },
+      data: {
+        agents: room.who(),
+        messages: room.read(undefined, 100),
+        session: room.sessionStore?.getActiveSession() ?? null,
+        conversations: room.sessionStore?.listSessions() ?? [],
+      },
     })
   );
 });
@@ -283,7 +289,49 @@ app.post("/api/role", express.json(), (req, res) => {
   res.json({ name: agent.name, role: agent.role });
 });
 
-// --- Session API ---
+// --- Conversation session management ---
+app.get("/api/conversations", (_req, res) => {
+  if (!room.sessionStore) {
+    res.json({ sessions: [], active: null });
+    return;
+  }
+  res.json({
+    sessions: room.sessionStore.listSessions(),
+    active: room.sessionStore.getActiveSession(),
+  });
+});
+
+app.post("/api/conversations/new", express.json(), (req, res) => {
+  const { name } = (req.body || {}) as { name?: string };
+  room.newSession(name);
+  res.json({ session: room.sessionStore?.getActiveSession() });
+});
+
+app.post("/api/conversations/switch", express.json(), (req, res) => {
+  const { id } = req.body as { id?: string };
+  if (!id) {
+    res.status(400).json({ error: "id required" });
+    return;
+  }
+  const ok = room.switchToSession(id);
+  if (!ok) {
+    res.status(404).json({ error: "Session not found" });
+    return;
+  }
+  res.json({ session: room.sessionStore?.getActiveSession(), messages: room.read(undefined, 100) });
+});
+
+app.post("/api/conversations/rename", express.json(), (req, res) => {
+  const { id, name } = req.body as { id?: string; name?: string };
+  if (!id || !name) {
+    res.status(400).json({ error: "id and name required" });
+    return;
+  }
+  const ok = room.sessionStore?.renameSession(id, name);
+  res.json({ ok: !!ok });
+});
+
+// --- Workflow session API ---
 app.get("/api/templates", (_req, res) => {
   res.json(getTemplates());
 });

@@ -4,9 +4,8 @@
  */
 
 import { EventEmitter } from "events";
-import { join } from "path";
 import { inject } from "./inject.js";
-import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
+import { loadMessages, appendMessage, maxId, SessionStore } from "./persist.js";
 
 export interface ChatMessage {
   id: number;
@@ -35,19 +34,22 @@ export class ChatRoom extends EventEmitter {
   private messages: ChatMessage[] = [];
   private agents = new Map<string, Agent>();
   private nextId = 1;
-  private chatFile: string | null = null;
   private typingState = new Map<string, NodeJS.Timeout>();
+  sessionStore: SessionStore | null = null;
 
-  constructor(dataDir?: string) {
+  constructor(dataDir?: string, continueLastSession = false) {
     super();
     if (dataDir) {
-      ensureDir(dataDir);
-      this.chatFile = join(dataDir, "chat.jsonl");
-      const loaded = loadMessages<ChatMessage>(this.chatFile);
-      this.messages = loaded;
-      this.nextId = maxId(loaded) + 1;
-      if (loaded.length > 0) {
-        console.log(`  Loaded ${loaded.length} messages from disk (next ID: ${this.nextId})`);
+      this.sessionStore = new SessionStore(dataDir);
+      if (continueLastSession) {
+        const last = this.sessionStore.continueLastSession();
+        if (last) {
+          this.loadSession();
+        } else {
+          this.sessionStore.createSession();
+        }
+      } else {
+        this.sessionStore.createSession();
       }
     }
 
@@ -55,9 +57,53 @@ export class ChatRoom extends EventEmitter {
     setInterval(() => this.sweepStale(), 30000);
   }
 
+  /** Load messages from the active session's JSONL file. */
+  private loadSession(): void {
+    const filePath = this.sessionStore?.getActiveFilePath();
+    if (!filePath) return;
+    const loaded = loadMessages<ChatMessage>(filePath);
+    this.messages = loaded;
+    this.nextId = maxId(loaded) + 1;
+    if (loaded.length > 0) {
+      console.log(`  Loaded ${loaded.length} messages from disk (next ID: ${this.nextId})`);
+    }
+  }
+
+  /** Switch to a different session (clear current messages, load new ones). */
+  switchToSession(sessionId: string): boolean {
+    if (!this.sessionStore) return false;
+    const meta = this.sessionStore.switchSession(sessionId);
+    if (!meta) return false;
+    this.messages = [];
+    this.nextId = 1;
+    this.loadSession();
+    // Broadcast to all clients that session changed
+    this.emit("room", {
+      type: "session-changed" as any,
+      data: { session: meta, messages: this.messages },
+    });
+    return true;
+  }
+
+  /** Start a fresh session (clear messages, new file). */
+  newSession(name?: string): void {
+    if (!this.sessionStore) return;
+    this.sessionStore.flush();
+    this.sessionStore.createSession(name);
+    this.messages = [];
+    this.nextId = 1;
+    const meta = this.sessionStore.getActiveSession();
+    this.emit("room", {
+      type: "session-changed" as any,
+      data: { session: meta, messages: [] },
+    });
+  }
+
   private persist(msg: ChatMessage): void {
-    if (this.chatFile) {
-      appendMessage(this.chatFile, msg);
+    const filePath = this.sessionStore?.getActiveFilePath();
+    if (filePath) {
+      appendMessage(filePath, msg);
+      this.sessionStore!.incrementMessageCount();
     }
   }
 
