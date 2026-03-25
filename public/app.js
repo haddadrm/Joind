@@ -84,9 +84,10 @@ function toggleMute() {
 function updateMuteBtn() {
   var btn = document.getElementById('mute-btn');
   if (btn) {
-    btn.textContent = isMuted ? '\u{1F507}' : '\u{1F50A}';
+    btn.innerHTML = isMuted ? '<i data-lucide="volume-x" width="18" height="18"></i>' : '<i data-lucide="volume-2" width="18" height="18"></i>';
     btn.style.opacity = isMuted ? '0.5' : '1';
     btn.title = isMuted ? 'Unmute' : 'Mute';
+    if (window.lucide) lucide.createIcons({ root: btn });
   }
 }
 
@@ -534,19 +535,25 @@ function appendMessage(msg, scroll) {
     // Reply button
     var replyBtn = document.createElement('button');
     replyBtn.className = 'msg-action-btn';
-    replyBtn.textContent = '\u21A9';
+    replyBtn.innerHTML = '<i data-lucide="reply" width="14" height="14"></i>';
     replyBtn.title = 'Reply';
     replyBtn.addEventListener('click', function() { setReplyTo(msg); });
     actions.appendChild(replyBtn);
 
     var copyBtn = document.createElement('button');
-    copyBtn.className = 'msg-action-btn'; copyBtn.textContent = '\u2398';
+    copyBtn.className = 'msg-action-btn';
+    copyBtn.innerHTML = '<i data-lucide="copy" width="14" height="14"></i>';
     copyBtn.title = 'Copy message';
     copyBtn.addEventListener('click', function() {
       navigator.clipboard.writeText(msg.text).then(function() {
-        copyBtn.textContent = '\u2713';
+        copyBtn.innerHTML = '<i data-lucide="check" width="14" height="14"></i>';
         copyBtn.classList.add('copied');
-        setTimeout(function() { copyBtn.textContent = '\u2398'; copyBtn.classList.remove('copied'); }, 1500);
+        if (window.lucide) lucide.createIcons({ root: copyBtn });
+        setTimeout(function() { 
+          copyBtn.innerHTML = '<i data-lucide="copy" width="14" height="14"></i>'; 
+          copyBtn.classList.remove('copied'); 
+          if (window.lucide) lucide.createIcons({ root: copyBtn });
+        }, 1500);
       });
     });
     actions.appendChild(copyBtn);
@@ -564,6 +571,7 @@ function appendMessage(msg, scroll) {
   }
 
   c.appendChild(el);
+  if (window.lucide) lucide.createIcons({ root: el });
   if (scroll) scrollToBottom();
   addCodeCopyButtons(el);
 }
@@ -596,16 +604,24 @@ function addCodeCopyButtons(container) {
   container.querySelectorAll('pre').forEach(function(pre) {
     if (pre.querySelector('.code-copy-btn')) return;
     var btn = document.createElement('button');
-    btn.className = 'code-copy-btn'; btn.textContent = 'copy';
+    btn.className = 'code-copy-btn'; 
+    btn.innerHTML = '<i data-lucide="copy" width="12" height="12"></i>';
     btn.addEventListener('click', function() {
       var code = pre.querySelector('code');
       navigator.clipboard.writeText(code ? code.textContent : pre.textContent).then(function() {
-        btn.textContent = 'copied!'; btn.classList.add('copied');
-        setTimeout(function() { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
+        btn.innerHTML = '<i data-lucide="check" width="12" height="12"></i>'; 
+        btn.classList.add('copied');
+        if (window.lucide) lucide.createIcons({ root: btn });
+        setTimeout(function() { 
+          btn.innerHTML = '<i data-lucide="copy" width="12" height="12"></i>'; 
+          btn.classList.remove('copied');
+          if (window.lucide) lucide.createIcons({ root: btn });
+        }, 1500);
       });
     });
     pre.style.position = 'relative'; pre.appendChild(btn);
   });
+  if (window.lucide) lucide.createIcons({ root: container });
 }
 
 function scrollToBottom() {
@@ -990,9 +1006,10 @@ function renderTerminals(terminals) {
 }
 
 function inviteTerminal(pid, type) {
-  var name = prompt('Name for this ' + type + ' agent:', type);
-  if (!name) return;
-  fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, pid: pid }) });
+  customPrompt('Name for this ' + type + ' agent:', type, function(name) {
+    if (!name) return;
+    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, pid: pid }) });
+  });
 }
 
 function kickAgent(name) {
@@ -1013,6 +1030,72 @@ function toggleSection(header) {
 }
 
 // --- Utils ---
+function customPrompt(message, defaultValue, callback) {
+  var overlay = document.createElement('div');
+  overlay.className = 'session-modal-overlay';
+
+  var modal = document.createElement('div');
+  modal.className = 'session-modal';
+  modal.style.width = '300px';
+
+  var title = document.createElement('div');
+  title.className = 'session-modal-title';
+  title.style.fontSize = '14px';
+  title.textContent = message;
+  modal.appendChild(title);
+
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'pop-input';
+  input.style.width = '100%';
+  input.style.marginTop = '12px';
+  input.style.marginBottom = '16px';
+  input.style.fontSize = '13px';
+  input.style.padding = '8px 12px';
+  input.value = defaultValue || '';
+  modal.appendChild(input);
+
+  var btnRow = document.createElement('div');
+  btnRow.className = 'session-modal-btns';
+  btnRow.style.marginTop = '0';
+  btnRow.style.paddingTop = '0';
+  btnRow.style.borderTop = 'none';
+
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn btn-sm';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', function() {
+    overlay.remove();
+    callback(null);
+  });
+
+  var okBtn = document.createElement('button');
+  okBtn.className = 'btn btn-send';
+  okBtn.style.padding = '6px 16px';
+  okBtn.style.width = 'auto';
+  okBtn.style.height = 'auto';
+  okBtn.style.fontSize = '12px';
+  okBtn.textContent = 'OK';
+  okBtn.addEventListener('click', function() {
+    var val = input.value;
+    overlay.remove();
+    callback(val);
+  });
+
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') okBtn.click();
+    if (e.key === 'Escape') cancelBtn.click();
+  });
+
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(okBtn);
+  modal.appendChild(btnRow);
+  overlay.appendChild(modal);
+
+  document.body.appendChild(overlay);
+  input.focus();
+  input.select();
+}
 function getSenderColor(sender) {
   var lower = sender.toLowerCase();
   if (SENDER_COLORS[lower]) return SENDER_COLORS[lower];
@@ -1193,11 +1276,12 @@ function renderConversations(sessions, active) {
     activeEl.title = active.id;
     activeEl.style.cursor = 'pointer';
     activeEl.onclick = function() {
-      var newName = prompt('Rename conversation:', active.name);
-      if (newName && newName !== active.name) {
-        fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: active.id, name: newName }) }).then(function() { loadConversations(); });
-      }
+      customPrompt('Rename conversation:', active.name, function(newName) {
+        if (newName && newName !== active.name) {
+          fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: active.id, name: newName }) }).then(function() { loadConversations(); });
+        }
+      });
     };
   }
 
@@ -1244,12 +1328,14 @@ function renderConversations(sessions, active) {
 }
 
 function newConversation() {
-  var name = prompt('New conversation name (optional):');
-  fetch('/api/conversations/new', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name || undefined }) }).then(function() {
-      document.getElementById('messages').textContent = '';
-      loadConversations();
-    });
+  customPrompt('New conversation name (optional):', '', function(name) {
+    if (name === null) return;
+    fetch('/api/conversations/new', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name || undefined }) }).then(function() {
+        document.getElementById('messages').textContent = '';
+        loadConversations();
+      });
+  });
 }
 
 // --- Workflow Sessions (templates) ---
