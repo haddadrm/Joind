@@ -150,10 +150,17 @@ app.post("/mcp", express.json({ strict: false }), async (req, res) => {
 
 app.get("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string;
+  if (!sessionId) {
+    // No session ID — client hasn't initialized yet. Return 400 per spec.
+    res.status(400).json({ error: "No session. Send POST /mcp to initialize first." });
+    return;
+  }
   const session = mcpSessions.get(sessionId);
   if (!session) {
-    // Don't 404 — just end the SSE stream cleanly so client can reconnect
-    res.status(204).end();
+    // Stale session — soft close so client retries initialization
+    res.status(200).setHeader("Content-Type", "text/event-stream");
+    res.write("event: error\ndata: session expired\n\n");
+    res.end();
     return;
   }
   await session.transport.handleRequest(req, res);
