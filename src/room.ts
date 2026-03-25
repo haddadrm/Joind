@@ -1,11 +1,11 @@
 /**
- * Joind Chat Room — persistent message store + agent registry + @mention → injection.
- * Messages persist to JSONL and survive server restarts.
+ * ChatRoom — a single conversation with its own messages, agents, and JSONL file.
+ * Multiple ChatRoom instances exist simultaneously, managed by ConversationManager.
  */
 
 import { EventEmitter } from "events";
 import { inject } from "./inject.js";
-import { loadMessages, appendMessage, maxId, SessionStore } from "./persist.js";
+import { loadMessages, appendMessage, maxId } from "./persist.js";
 
 export interface ChatMessage {
   id: number;
@@ -35,75 +35,26 @@ export class ChatRoom extends EventEmitter {
   private agents = new Map<string, Agent>();
   private nextId = 1;
   private typingState = new Map<string, NodeJS.Timeout>();
-  sessionStore: SessionStore | null = null;
+  private chatFile: string | null = null;
+  private staleInterval: ReturnType<typeof setInterval> | null = null;
 
-  constructor(dataDir?: string, continueLastSession = false) {
+  constructor(chatFilePath?: string) {
     super();
-    if (dataDir) {
-      this.sessionStore = new SessionStore(dataDir);
-      if (continueLastSession) {
-        const last = this.sessionStore.continueLastSession();
-        if (last) {
-          this.loadSession();
-        } else {
-          this.sessionStore.createSession();
-        }
-      } else {
-        this.sessionStore.createSession();
+    if (chatFilePath) {
+      this.chatFile = chatFilePath;
+      const loaded = loadMessages<ChatMessage>(chatFilePath);
+      this.messages = loaded;
+      this.nextId = maxId(loaded) + 1;
+      if (loaded.length > 0) {
+        console.log(`  Loaded ${loaded.length} messages (next ID: ${this.nextId})`);
       }
     }
-
-    // Sweep stale agents every 30 seconds
-    setInterval(() => this.sweepStale(), 30000);
-  }
-
-  /** Load messages from the active session's JSONL file. */
-  private loadSession(): void {
-    const filePath = this.sessionStore?.getActiveFilePath();
-    if (!filePath) return;
-    const loaded = loadMessages<ChatMessage>(filePath);
-    this.messages = loaded;
-    this.nextId = maxId(loaded) + 1;
-    if (loaded.length > 0) {
-      console.log(`  Loaded ${loaded.length} messages from disk (next ID: ${this.nextId})`);
-    }
-  }
-
-  /** Switch to a different session (clear current messages, load new ones). */
-  switchToSession(sessionId: string): boolean {
-    if (!this.sessionStore) return false;
-    const meta = this.sessionStore.switchSession(sessionId);
-    if (!meta) return false;
-    this.messages = [];
-    this.nextId = 1;
-    this.loadSession();
-    // Broadcast to all clients that session changed
-    this.emit("room", {
-      type: "session-changed" as any,
-      data: { session: meta, messages: this.messages },
-    });
-    return true;
-  }
-
-  /** Start a fresh session (clear messages, new file). */
-  newSession(name?: string): void {
-    if (!this.sessionStore) return;
-    this.sessionStore.flush();
-    this.sessionStore.createSession(name);
-    this.messages = [];
-    this.nextId = 1;
-    const meta = this.sessionStore.getActiveSession();
-    this.emit("room", {
-      type: "session-changed" as any,
-      data: { session: meta, messages: [] },
-    });
+    this.staleInterval = setInterval(() => this.sweepStale(), 30000);
   }
 
   private persist(msg: ChatMessage): void {
-    const filePath = this.sessionStore?.getActiveFilePath();
-    if (filePath) {
-      appendMessage(filePath, msg);
-      this.sessionStore!.incrementMessageCount();
+    if (this.chatFile) {
+      appendMessage(this.chatFile, msg);
     }
   }
 
@@ -154,11 +105,12 @@ export class ChatRoom extends EventEmitter {
     this.persist(msg);
     this.emit("room", { type: "message", data: msg } as RoomEvent);
 
-    // Update lastSeen for the sender
+    // Update lastSeen + clear typing
     const senderAgent = this.agents.get(sender);
     if (senderAgent) senderAgent.lastSeen = Date.now();
+    this.setTyping(sender, false);
 
-    // Detect @mentions → inject into mentioned agent's terminal
+    // Detect @mentions → inject into agents IN THIS CONVERSATION
     const mentions = this.extractMentions(text);
     const targets = mentions.includes("all")
       ? [...this.agents.keys()].filter((n) => n !== sender)
@@ -205,13 +157,11 @@ export class ChatRoom extends EventEmitter {
     return this.agents.get(name);
   }
 
-  /** Touch lastSeen for an agent (called on any MCP tool use). */
   touch(name: string): void {
     const agent = this.agents.get(name);
     if (agent) agent.lastSeen = Date.now();
   }
 
-  /** Set or clear typing indicator for an agent. Auto-clears after 30s. */
   setTyping(name: string, isTyping: boolean): void {
     const existing = this.typingState.get(name);
     if (existing) {
@@ -222,34 +172,21 @@ export class ChatRoom extends EventEmitter {
     if (isTyping) {
       const timeout = setTimeout(() => {
         this.typingState.delete(name);
-        this.emit("room", {
-          type: "typing",
-          data: { name, typing: false },
-        } as RoomEvent);
+        this.emit("room", { type: "typing", data: { name, typing: false } } as RoomEvent);
       }, 30000);
       this.typingState.set(name, timeout);
-      this.emit("room", {
-        type: "typing",
-        data: { name, typing: true },
-      } as RoomEvent);
-    } else {
-      this.emit("room", {
-        type: "typing",
-        data: { name, typing: false },
-      } as RoomEvent);
     }
+
+    this.emit("room", { type: "typing", data: { name, typing: isTyping } } as RoomEvent);
   }
 
-  /** Sweep stale agents: emit stale at 2min, auto-leave at 5min. */
   private sweepStale(): void {
     const now = Date.now();
     for (const [name, agent] of this.agents) {
       const elapsed = now - agent.lastSeen;
       if (elapsed > 300000) {
-        // 5 minutes — auto-remove
         this.leave(name);
       } else if (elapsed > 120000) {
-        // 2 minutes — mark stale
         this.emit("room", { type: "stale", data: agent } as RoomEvent);
       }
     }
@@ -279,6 +216,10 @@ export class ChatRoom extends EventEmitter {
     return agent;
   }
 
+  messageCount(): number {
+    return this.messages.length;
+  }
+
   private addSystem(text: string): void {
     const msg: ChatMessage = {
       id: this.nextId++,
@@ -296,5 +237,10 @@ export class ChatRoom extends EventEmitter {
     const matches = text.match(/@(\w[\w-]*)/g);
     if (!matches) return [];
     return matches.map((m) => m.slice(1));
+  }
+
+  destroy(): void {
+    if (this.staleInterval) clearInterval(this.staleInterval);
+    for (const t of this.typingState.values()) clearTimeout(t);
   }
 }

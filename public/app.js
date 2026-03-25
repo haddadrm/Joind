@@ -108,18 +108,21 @@ function connect() {
       case 'init':
         agents = event.data.agents;
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
-        allMessages = event.data.messages.slice();
-        renderPills(); renderMessages(event.data.messages);
-        if (event.data.session) activeConversation = event.data.session;
-        if (event.data.conversations) conversationList = event.data.conversations;
-        loadConversations(true);
-        break;
-      case 'session-changed':
         allMessages = (event.data.messages || []).slice();
-        lastSender = null;
-        renderMessages(event.data.messages || []);
-        activeConversation = event.data.session;
-        loadConversations(true);
+        activeConversation = event.data.activeConversation || null;
+        conversationList = event.data.conversations || [];
+        if (activeConversation) {
+          renderPills();
+          renderMessages(event.data.messages || []);
+        } else {
+          showNoConversation();
+        }
+        renderConversationList();
+        break;
+      case 'conversation-created':
+      case 'conversation-renamed':
+      case 'conversation-deleted':
+        loadConversations();
         break;
       case 'message':
         hideWelcome();
@@ -129,8 +132,11 @@ function connect() {
         // Update active conversation message count live
         if (activeConversation) {
           activeConversation.messageCount = (activeConversation.messageCount || 0) + 1;
-          var activeEl = document.getElementById('active-session');
-          if (activeEl) activeEl.textContent = activeConversation.name + ' (' + activeConversation.messageCount + ' msgs)';
+        }
+        // Only process messages for the active conversation
+        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) {
+          // Message is for a different conversation — don't render
+          return;
         }
         break;
       case 'join':
@@ -1250,92 +1256,190 @@ function setupYouPill() {
   syncName();
 }
 
-// --- Conversations (persistent chat sessions) ---
+// --- Conversations ---
 var activeConversation = null;
 var conversationList = [];
+var convSearchQuery = '';
 
-function loadConversations(fromCache) {
-  if (fromCache && conversationList.length > 0) {
-    renderConversations(conversationList, activeConversation);
-    return;
-  }
+function loadConversations() {
   fetch('/api/conversations').then(function(r) { return r.json(); }).then(function(data) {
     activeConversation = data.active;
-    conversationList = data.sessions;
-    renderConversations(data.sessions, data.active);
+    conversationList = data.conversations || [];
+    renderConversationList();
   });
 }
 
-function renderConversations(sessions, active) {
+function selectConversation(id) {
+  fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: id }) }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.conversation) {
+        activeConversation = data.conversation;
+        allMessages = (data.messages || []).slice();
+        agents = data.agents || [];
+        onlineNames = new Set(agents.map(function(a) { return a.name; }));
+        lastSender = null;
+        renderPills();
+        renderMessages(data.messages || []);
+        renderConversationList();
+      }
+    });
+}
+
+function newConversation() {
+  fetch('/api/conversations/new', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}) }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.conversation) {
+        selectConversation(data.conversation.id);
+      }
+    });
+}
+
+function showNoConversation() {
+  var c = document.getElementById('messages');
+  c.textContent = '';
+  var empty = document.createElement('div');
+  empty.className = 'welcome-message';
+  empty.id = 'welcome';
+  empty.innerHTML = '<div class="welcome-glyph"><span class="welcome-hex">&#x2B22;</span></div>' +
+    '<h2>Joind</h2>' +
+    '<p class="welcome-sub">Select a conversation or start a new one</p>';
+  c.appendChild(empty);
+  agents = [];
+  renderPills();
+}
+
+function renderConversationList() {
   var list = document.getElementById('conversation-list');
   var activeEl = document.getElementById('active-session');
   list.textContent = '';
 
-  if (active) {
-    activeEl.textContent = active.name + ' (' + active.messageCount + ' msgs)';
-    activeEl.title = active.id;
-    activeEl.style.cursor = 'pointer';
+  // Active conversation indicator
+  if (activeConversation) {
+    activeEl.textContent = activeConversation.name;
+    activeEl.className = 'active-session';
+    activeEl.title = 'Click to rename';
     activeEl.onclick = function() {
-      customPrompt('Rename conversation:', active.name, function(newName) {
-        if (newName && newName !== active.name) {
+      customPrompt('Rename conversation:', activeConversation.name, function(newName) {
+        if (newName && newName !== activeConversation.name) {
           fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: active.id, name: newName }) }).then(function() { loadConversations(); });
+            body: JSON.stringify({ id: activeConversation.id, name: newName }) }).then(function() { loadConversations(); });
         }
       });
     };
+  } else {
+    activeEl.textContent = 'No conversation selected';
+    activeEl.className = 'active-session empty';
+    activeEl.onclick = null;
   }
 
-  var others = sessions.filter(function(s) { return !active || s.id !== active.id; });
-  if (others.length === 0) {
+  // Filter
+  var items = conversationList;
+  if (convSearchQuery) {
+    var q = convSearchQuery.toLowerCase();
+    items = items.filter(function(c) { return c.name.toLowerCase().indexOf(q) >= 0; });
+  }
+
+  if (items.length === 0) {
     var empty = document.createElement('li');
     empty.className = 'empty-state';
-    empty.textContent = 'No previous conversations';
+    empty.textContent = convSearchQuery ? 'No matches' : 'No conversations yet';
     list.appendChild(empty);
     return;
   }
 
-  others.slice(0, 10).forEach(function(s) {
+  items.forEach(function(conv) {
     var li = document.createElement('li');
-    li.className = 'conversation-item';
+    li.className = 'conversation-item' + (activeConversation && conv.id === activeConversation.id ? ' active' : '');
+
+    // Star indicator
+    if (conv.starred) {
+      var star = document.createElement('span');
+      star.className = 'conv-star';
+      star.textContent = '\u2605';
+      li.appendChild(star);
+    }
 
     var name = document.createElement('span');
     name.className = 'conv-name';
-    name.textContent = s.name;
+    name.textContent = conv.name;
 
     var count = document.createElement('span');
     count.className = 'conv-count';
-    count.textContent = s.messageCount + ' msgs';
+    count.textContent = conv.messageCount || '';
 
-    var switchBtn = document.createElement('button');
-    switchBtn.className = 'terminal-invite';
-    switchBtn.textContent = 'Load';
-    switchBtn.addEventListener('click', function() {
-      fetch('/api/conversations/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: s.id }) }).then(function(r) { return r.json(); }).then(function(data) {
-          if (data.messages) {
-            lastSender = null;
-            renderMessages(data.messages);
-          }
-          loadConversations();
-        });
+    // Three-dot menu button
+    var menuBtn = document.createElement('button');
+    menuBtn.className = 'conv-menu-btn';
+    menuBtn.textContent = '\u22EE';
+    menuBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      showConvMenu(e, conv);
     });
 
     li.appendChild(name);
     li.appendChild(count);
-    li.appendChild(switchBtn);
+    li.appendChild(menuBtn);
+
+    // Click to select
+    li.addEventListener('click', function() {
+      selectConversation(conv.id);
+    });
+
     list.appendChild(li);
   });
 }
 
-function newConversation() {
-  customPrompt('New conversation name (optional):', '', function(name) {
-    if (name === null) return;
-    fetch('/api/conversations/new', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name || undefined }) }).then(function() {
-        document.getElementById('messages').textContent = '';
-        loadConversations();
+function showConvMenu(evt, conv) {
+  closePopover();
+  var pop = document.createElement('div');
+  pop.className = 'conv-context-menu';
+  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+
+  var actions = [
+    { label: (conv.starred ? '\u2606 Unstar' : '\u2605 Star'), action: function() {
+      fetch('/api/conversations/star', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: conv.id, starred: !conv.starred }) }).then(function() { loadConversations(); });
+      closePopover();
+    }},
+    { label: '\u270E Rename', action: function() {
+      closePopover();
+      customPrompt('Rename:', conv.name, function(newName) {
+        if (newName && newName !== conv.name) {
+          fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: conv.id, name: newName }) }).then(function() { loadConversations(); });
+        }
       });
+    }},
+    { label: '\u2715 Delete', danger: true, action: function() {
+      if (confirm('Delete "' + conv.name + '"? This cannot be undone.')) {
+        fetch('/api/conversations/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: conv.id }) }).then(function() {
+            if (activeConversation && activeConversation.id === conv.id) {
+              activeConversation = null;
+              showNoConversation();
+            }
+            loadConversations();
+          });
+      }
+      closePopover();
+    }},
+  ];
+
+  actions.forEach(function(a) {
+    var item = document.createElement('div');
+    item.className = 'conv-menu-item' + (a.danger ? ' danger' : '');
+    item.textContent = a.label;
+    item.addEventListener('click', a.action);
+    pop.appendChild(item);
   });
+
+  // Position near click
+  var rect = evt.target.getBoundingClientRect();
+  pop.style.top = rect.bottom + 4 + 'px';
+  pop.style.left = Math.min(rect.left, window.innerWidth - 140) + 'px';
+
+  document.body.appendChild(pop);
+  openPopover = pop;
 }
 
 // --- Workflow Sessions (templates) ---
@@ -1564,6 +1668,14 @@ document.addEventListener('DOMContentLoaded', function() {
   updateMuteBtn();
   connect();
   loadTemplates();
+  // Wire conversation search
+  var convSearch = document.getElementById('conv-search');
+  if (convSearch) {
+    convSearch.addEventListener('input', function() {
+      convSearchQuery = this.value;
+      renderConversationList();
+    });
+  }
   // Restore sidebar state
   if (localStorage.getItem('joind-sidebar') === 'hidden') {
     document.getElementById('sidebar').classList.add('hidden');

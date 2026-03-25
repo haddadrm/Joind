@@ -45,7 +45,8 @@
             <button class="btn btn-sm" onclick="event.stopPropagation(); newConversation()">+ New</button>
           </div>
           <div class="section-body">
-            <div id="active-session" class="active-session"></div>
+            <div id="active-session" class="active-session">No conversation selected</div>
+            <input type="text" class="conv-search" id="conv-search" placeholder="Search conversations..." spellcheck="false" />
             <ul id="conversation-list" class="conversation-list"></ul>
           </div>
         </div>
