@@ -125,21 +125,20 @@ function connect() {
         loadConversations();
         break;
       case 'message':
+        // Filter: only render messages for the active conversation
+        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) {
+          break;
+        }
         hideWelcome();
         allMessages.push(event.data);
         appendMessage(event.data);
         if (event.data.sender !== 'system') playSound(event.data.sender);
-        // Update active conversation message count live
         if (activeConversation) {
           activeConversation.messageCount = (activeConversation.messageCount || 0) + 1;
         }
-        // Only process messages for the active conversation
-        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) {
-          // Message is for a different conversation — don't render
-          return;
-        }
         break;
       case 'join':
+        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) break;
         onlineNames.add(event.data.name);
         staleNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
@@ -147,6 +146,7 @@ function connect() {
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
       case 'leave':
+        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) break;
         onlineNames.delete(event.data.name);
         staleNames.delete(event.data.name);
         typingNames.delete(event.data.name);
