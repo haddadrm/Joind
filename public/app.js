@@ -707,6 +707,7 @@ function sendMessage() {
   if (replyingTo) payload.replyTo = replyingTo.id;
   if (pendingImage) payload.image = pendingImage.url;
   input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
+  syncHighlight();
   clearReply();
   clearImagePreview();
   fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -925,9 +926,19 @@ function hideMentionMenu() { document.getElementById('mention-menu').classList.a
 
 function selectMention(name) {
   var input = document.getElementById('message-input');
-  var atPos = input.value.lastIndexOf('@');
-  if (atPos >= 0) input.value = input.value.slice(0, atPos) + '@' + name + ' ';
+  var cursor = input.selectionStart;
+  var val = input.value;
+  // Find the @ that triggered the menu (search backwards from cursor)
+  var before = val.slice(0, cursor);
+  var atPos = before.lastIndexOf('@');
+  if (atPos >= 0) {
+    var after = val.slice(cursor);
+    input.value = before.slice(0, atPos) + '@' + name + ' ' + after;
+    var newCursor = atPos + name.length + 2; // after "@name "
+    input.setSelectionRange(newCursor, newCursor);
+  }
   hideMentionMenu(); input.focus();
+  syncHighlight();
 }
 
 // --- Input ---
@@ -954,10 +965,12 @@ function setupInput() {
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 120) + 'px';
     updateSendBtn();
+    syncHighlight();
     var before = this.value.slice(0, this.selectionStart);
     var atMatch = before.match(/@(\w*)$/);
     if (atMatch) showMentionMenu(atMatch[1]); else hideMentionMenu();
   });
+  input.addEventListener('scroll', syncHighlightScroll);
   input.addEventListener('blur', function() { setTimeout(hideMentionMenu, 150); });
 
   // Paste handler for images
@@ -979,6 +992,30 @@ function setupInput() {
   chatArea.addEventListener('drop', function(e) { e.preventDefault(); chatArea.classList.remove('drag-over');
     if (e.dataTransfer.files.length > 0) uploadImage(e.dataTransfer.files[0]);
   });
+}
+
+function syncHighlight() {
+  var input = document.getElementById('message-input');
+  var highlight = document.getElementById('input-highlight');
+  if (!highlight) return;
+
+  var text = input.value;
+  // Escape HTML, then highlight @mentions with colored spans
+  var escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  var html = escaped.replace(/@(\w[\w-]*)/g, function(match, name) {
+    var color = getSenderColor(name);
+    return '<span class="hl-mention" style="color:' + color + '">' + match + '</span>';
+  });
+  // Add trailing space so highlight div matches textarea height
+  highlight.innerHTML = html + '\n';
+  // Sync scroll
+  highlight.scrollTop = input.scrollTop;
+}
+
+function syncHighlightScroll() {
+  var input = document.getElementById('message-input');
+  var highlight = document.getElementById('input-highlight');
+  if (highlight) highlight.scrollTop = input.scrollTop;
 }
 
 function updateSendBtn() {

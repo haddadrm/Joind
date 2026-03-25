@@ -112,7 +112,10 @@
         <footer class="chat-footer">
           <input type="hidden" id="sender-name" value="human" />
           <div class="input-row">
-            <textarea id="message-input" placeholder="Type a message... @name to mention" rows="1" spellcheck="false"></textarea>
+            <div class="input-wrapper">
+              <div class="input-highlight" id="input-highlight"></div>
+              <textarea id="message-input" placeholder="Type a message... @name to mention" rows="1" spellcheck="false"></textarea>
+            </div>
             <button class="btn btn-send" id="send-btn" onclick="sendMessage()">
               <i data-lucide="send" width="20" height="20"></i>
             </button>
