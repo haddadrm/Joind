@@ -1004,7 +1004,7 @@ function syncHighlight() {
   var escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   var html = escaped.replace(/@(\w[\w-]*)/g, function(match, name) {
     var color = getSenderColor(name);
-    return '<span class="hl-mention" style="color:' + color + '">' + match + '</span>';
+    return '<span class="hl-mention" style="background:' + color + '55; box-shadow: 0 0 0 2px ' + color + '30">' + match + '</span>';
   });
   // Add trailing space so highlight div matches textarea height
   highlight.innerHTML = html + '\n';
