@@ -9,17 +9,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ConversationManager } from "./manager.js";
 
-// Track which MCP session is bound to which conversation
+// Session bindings are a FALLBACK — agent name bindings are primary.
+// This means MCP reconnects don't break routing as long as the agent
+// previously joined via chat_join (which sets the name binding).
 const sessionBindings = new Map<string | undefined, string>(); // sessionId → conversationId
 
 function getRoom(manager: ConversationManager, extra: { sessionId?: string }, senderHint?: string) {
-  // Try session binding first
-  const convId = sessionBindings.get(extra.sessionId);
-  if (convId) {
-    const room = manager.getRoom(convId);
-    if (room) return { room, convId };
-  }
-  // Try agent binding
+  // 1. Agent name binding (survives MCP reconnects)
   if (senderHint) {
     const agentConvId = manager.getAgentConversationId(senderHint);
     if (agentConvId) {
@@ -27,7 +23,13 @@ function getRoom(manager: ConversationManager, extra: { sessionId?: string }, se
       if (room) return { room, convId: agentConvId };
     }
   }
-  // Fallback to active conversation
+  // 2. MCP session binding (set on chat_join, lost on reconnect)
+  const convId = sessionBindings.get(extra.sessionId);
+  if (convId) {
+    const room = manager.getRoom(convId);
+    if (room) return { room, convId };
+  }
+  // 3. Fallback to active conversation
   const activeId = manager.getActiveId();
   if (activeId) {
     const room = manager.getRoom(activeId);
@@ -121,12 +123,13 @@ export function registerTools(server: McpServer, manager: ConversationManager): 
       title: "Read chat messages",
       description: "Read recent messages from your current conversation.",
       inputSchema: z.object({
+        sender: z.string().optional().describe("Your name (for routing to your conversation)"),
         since: z.number().optional().describe("Message ID to read from (exclusive). Omit for latest."),
         limit: z.number().optional().describe("Max messages to return (default 50)"),
       }),
     },
-    async ({ since, limit }, extra) => {
-      const target = getRoom(manager, extra);
+    async ({ sender, since, limit }, extra) => {
+      const target = getRoom(manager, extra, sender);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
@@ -146,10 +149,12 @@ export function registerTools(server: McpServer, manager: ConversationManager): 
     {
       title: "See who is in the conversation",
       description: "List agents in your current conversation.",
-      inputSchema: z.object({}),
+      inputSchema: z.object({
+        sender: z.string().optional().describe("Your name (for routing to your conversation)"),
+      }),
     },
-    async (_args, extra) => {
-      const target = getRoom(manager, extra);
+    async ({ sender }, extra) => {
+      const target = getRoom(manager, extra, sender);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation." }] };
       }

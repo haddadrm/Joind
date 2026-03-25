@@ -453,13 +453,14 @@ document.addEventListener('click', closePopover);
 function hideWelcome() { var w = document.getElementById('welcome'); if (w) w.remove(); }
 
 function renderMessages(msgs) {
-  if (msgs.length > 0) hideWelcome();
+  hideWelcome();
   var c = document.getElementById('messages');
-  if (msgs.length === 0) return;
   c.textContent = '';
   lastSender = null;
-  msgs.forEach(function(m) { appendMessage(m, false); });
-  scrollToBottom();
+  if (msgs.length > 0) {
+    msgs.forEach(function(m) { appendMessage(m, false); });
+    scrollToBottom();
+  }
 }
 
 function appendMessage(msg, scroll) {
@@ -1279,7 +1280,13 @@ function selectConversation(id) {
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         lastSender = null;
         renderPills();
-        renderMessages(data.messages || []);
+        // Always clear messages container first
+        var c = document.getElementById('messages');
+        c.textContent = '';
+        if (allMessages.length > 0) {
+          allMessages.forEach(function(m) { appendMessage(m, false); });
+          scrollToBottom();
+        }
         renderConversationList();
       }
     });
