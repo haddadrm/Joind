@@ -106,10 +106,19 @@ app.post("/mcp", express.json({ strict: false }), async (req, res) => {
   let session = sessionId ? mcpSessions.get(sessionId) : undefined;
 
   if (sessionId && !session) {
-    res.status(404).json({
+    // Return JSON-RPC error on HTTP 200 (not 404).
+    // HTTP 404 kills the MCP transport entirely. HTTP 200 with a JSON-RPC error
+    // lets the tool layer handle it gracefully — the agent sees a tool error,
+    // not a transport failure. This prevents one Claude Code instance's
+    // /mcp reconnect from crashing another instance's session.
+    const rpcId = req.body?.id ?? null;
+    res.status(200).json({
       jsonrpc: "2.0",
-      error: { code: -32000, message: "Session expired. Please reconnect." },
-      id: null,
+      error: {
+        code: -32000,
+        message: "MCP session expired — run /mcp to reconnect, or your next chat_join will re-establish.",
+      },
+      id: rpcId,
     });
     return;
   }
@@ -143,7 +152,8 @@ app.get("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string;
   const session = mcpSessions.get(sessionId);
   if (!session) {
-    res.status(404).json({ error: "Session expired. Please reconnect." });
+    // Don't 404 — just end the SSE stream cleanly so client can reconnect
+    res.status(204).end();
     return;
   }
   await session.transport.handleRequest(req, res);
