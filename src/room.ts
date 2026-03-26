@@ -49,7 +49,7 @@ export class ChatRoom extends EventEmitter {
         console.log(`  Loaded ${loaded.length} messages (next ID: ${this.nextId})`);
       }
     }
-    this.staleInterval = setInterval(() => this.sweepStale(), 30000);
+    this.staleInterval = setInterval(() => this.sweepStale(), 5000);
   }
 
   private persist(msg: ChatMessage): void {
@@ -159,7 +159,14 @@ export class ChatRoom extends EventEmitter {
 
   touch(name: string): void {
     const agent = this.agents.get(name);
-    if (agent) agent.lastSeen = Date.now();
+    if (agent) {
+      const wasStale = (Date.now() - agent.lastSeen) > 120000;
+      agent.lastSeen = Date.now();
+      if (wasStale) {
+        // Agent came back from stale — emit join event to refresh pill state
+        this.emit("room", { type: "join", data: agent } as RoomEvent);
+      }
+    }
   }
 
   setTyping(name: string, isTyping: boolean): void {
