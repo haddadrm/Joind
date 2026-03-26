@@ -55,20 +55,21 @@ export class ConversationManager extends EventEmitter {
         /* fresh start */
       }
     }
-    // Discover orphan JSONL files not in index
+    // Discover orphan JSONL files not in index (fast — no file parsing)
     try {
       for (const file of readdirSync(this.dataDir)) {
         if (!file.endsWith(".jsonl")) continue;
         const id = file.replace(".jsonl", "");
         if (!this.meta.has(id)) {
           const fullPath = join(this.dataDir, file);
-          const msgs = loadMessages<{ id: number }>(fullPath);
           const stat = statSync(fullPath);
+          // Estimate message count from file size (~150 bytes per message avg)
+          const estimatedCount = Math.max(1, Math.round(stat.size / 150));
           this.meta.set(id, {
             id,
             name: id,
             createdAt: stat.birthtimeMs || Date.now(),
-            messageCount: msgs.length,
+            messageCount: estimatedCount,
             starred: false,
           });
         }

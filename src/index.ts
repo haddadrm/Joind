@@ -75,15 +75,18 @@ manager.on("global", (event) => {
 
 // Send current state on new WebSocket connection
 wss.on("connection", (ws) => {
-  const activeRoom = manager.getActiveRoom();
+  // Lazy loading: only send conversation index on connect.
+  // Messages load when the user selects a conversation.
+  const activeMeta = manager.getActiveMeta();
+  const activeRoom = activeMeta ? manager.getActiveRoom() : undefined;
   ws.send(
     JSON.stringify({
       type: "init",
       data: {
         agents: activeRoom?.who() ?? [],
-        messages: activeRoom?.read(undefined, 100) ?? [],
+        messages: activeRoom ? activeRoom.read(undefined, 100) : [],
         conversations: manager.listConversations(),
-        activeConversation: manager.getActiveMeta(),
+        activeConversation: activeMeta,
       },
     })
   );

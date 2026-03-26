@@ -1308,6 +1308,22 @@ function loadConversations() {
 }
 
 function selectConversation(id) {
+  // Optimistic: immediately highlight the selected conversation + clear chat
+  var meta = conversationList.find(function(c) { return c.id === id; });
+  if (meta) {
+    activeConversation = meta;
+    renderConversationList();
+  }
+  var c = document.getElementById('messages');
+  c.textContent = '';
+  // Show loading indicator
+  var loader = document.createElement('div');
+  loader.className = 'empty-state';
+  loader.style.textAlign = 'center';
+  loader.style.padding = '24px';
+  loader.textContent = 'Loading...';
+  c.appendChild(loader);
+
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id }) }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.conversation) {
@@ -1317,8 +1333,6 @@ function selectConversation(id) {
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         lastSender = null;
         renderPills();
-        // Always clear messages container first
-        var c = document.getElementById('messages');
         c.textContent = '';
         if (allMessages.length > 0) {
           allMessages.forEach(function(m) { appendMessage(m, false); });
