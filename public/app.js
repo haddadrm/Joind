@@ -197,7 +197,8 @@ function renderPills() {
     pill.style.borderColor = color + '30';
 
     var dot = document.createElement('span');
-    dot.className = 'pill-dot'; dot.style.background = color;
+    dot.className = 'pill-dot';
+    // Green = online (default CSS), agent color only when stale
 
     var name = document.createElement('span');
     name.className = 'pill-name'; name.style.color = color;
@@ -588,7 +589,10 @@ function renderContent(parent, text) {
     // Ensure real newlines (WebSocket/JSON may deliver literal \n)
     text = text.replace(/\\n/g, '\n');
     var html = marked.parse(text);
-    html = html.replace(/@(\w[\w-]*)/g, '<span class="mention">@$1</span>');
+    html = html.replace(/@(\w[\w-]*)/g, function(match, name) {
+      var c = getSenderColor(name);
+      return '<span class="mention" style="color:' + c + ';background:' + c + '20">@' + name + '</span>';
+    });
     parent.innerHTML = html;
   } else {
     renderTextWithMentions(parent, text);
