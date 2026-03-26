@@ -184,10 +184,16 @@ export class ChatRoom extends EventEmitter {
     const now = Date.now();
     for (const [name, agent] of this.agents) {
       const elapsed = now - agent.lastSeen;
-      if (elapsed > 300000) {
-        this.leave(name);
-      } else if (elapsed > 120000) {
-        this.emit("room", { type: "stale", data: agent } as RoomEvent);
+      if (elapsed > 120000) {
+        // Check if the process is still alive before marking stale
+        try {
+          process.kill(agent.pid, 0); // signal 0 = existence check, doesn't kill
+          // Process alive but idle — mark stale (pill dims)
+          this.emit("room", { type: "stale", data: agent } as RoomEvent);
+        } catch {
+          // Process is dead — remove the agent
+          this.leave(name);
+        }
       }
     }
   }
