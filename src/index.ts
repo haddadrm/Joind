@@ -109,21 +109,13 @@ app.post("/mcp", express.json({ strict: false }), async (req, res) => {
   let session = sessionId ? mcpSessions.get(sessionId) : undefined;
 
   if (sessionId && !session) {
-    // Return JSON-RPC error on HTTP 200 (not 404).
-    // HTTP 404 kills the MCP transport entirely. HTTP 200 with a JSON-RPC error
-    // lets the tool layer handle it gracefully — the agent sees a tool error,
-    // not a transport failure. This prevents one Claude Code instance's
-    // /mcp reconnect from crashing another instance's session.
-    const rpcId = req.body?.id ?? null;
-    res.status(200).json({
-      jsonrpc: "2.0",
-      error: {
-        code: -32000,
-        message: "MCP session expired — run /mcp to reconnect, or your next chat_join will re-establish.",
-      },
-      id: rpcId,
-    });
-    return;
+    // Stale session (e.g. after server restart).
+    // Strip the header so the transport treats this as a fresh connection.
+    // If the request body is "initialize" → new session created seamlessly.
+    // If it's a tool call → transport returns standard "not initialized"
+    // error which Claude Code handles by auto-reinitializing.
+    console.log(`  Stale session ${sessionId.slice(0, 8)}… stripped, falling through`);
+    delete req.headers["mcp-session-id"];
   }
 
   if (!session) {
@@ -153,17 +145,10 @@ app.post("/mcp", express.json({ strict: false }), async (req, res) => {
 
 app.get("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string;
-  if (!sessionId) {
-    // No session ID — client hasn't initialized yet. Return 400 per spec.
-    res.status(400).json({ error: "No session. Send POST /mcp to initialize first." });
-    return;
-  }
-  const session = mcpSessions.get(sessionId);
+  const session = sessionId ? mcpSessions.get(sessionId) : undefined;
   if (!session) {
-    // Stale session — soft close so client retries initialization
-    res.status(200).setHeader("Content-Type", "text/event-stream");
-    res.write("event: error\ndata: session expired\n\n");
-    res.end();
+    // No session or stale — return 400 so client re-initializes
+    res.status(400).json({ error: "Session not found. POST /mcp to initialize." });
     return;
   }
   await session.transport.handleRequest(req, res);
