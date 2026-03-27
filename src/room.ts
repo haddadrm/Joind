@@ -121,8 +121,10 @@ export class ChatRoom extends EventEmitter {
       if (agent?.active && agent.name !== sender) {
         const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
         const prompt =
-          `[joind] You were @mentioned by ${sender}.${roleHint} ` +
-          `Use the joind MCP tools: chat_read to see messages, chat_send to respond.`;
+          `[joind] @${name} mentioned by ${sender}.${roleHint} ` +
+          `Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${name}&since=0" — ` +
+          `Reply: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" ` +
+          `-d '{"sender":"${name}","text":"YOUR_REPLY"}'`;
         console.log(`  → Injecting into ${name} (PID ${agent.pid})...`);
         inject(agent.pid, prompt).catch((err) => {
           console.error(`  ✗ Injection failed for ${name}: ${err}`);

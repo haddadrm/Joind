@@ -359,6 +359,135 @@ app.get("/api/conversations/search", (req, res) => {
   res.json(manager.searchConversations(q));
 });
 
+// --- Agent REST API (MCP-free path for Claude Code agents) ---
+
+/** Helper: get agent's room by name binding */
+function agentRoom(name: string, res: express.Response) {
+  const convId = manager.getAgentBinding(name);
+  if (convId) {
+    const room = manager.getRoom(convId);
+    if (room) return { room, convId };
+  }
+  // Fallback to active conversation
+  const activeId = manager.getActiveId();
+  if (activeId) {
+    const room = manager.getRoom(activeId);
+    if (room) return { room, convId: activeId };
+  }
+  res.status(400).json({ error: "Not in a conversation. Call /api/agent/join first." });
+  return null;
+}
+
+app.post("/api/agent/join", express.json(), async (req, res) => {
+  let { name, pid, conversation } = req.body as {
+    name?: string; pid?: number; conversation?: string;
+  };
+  if (!name) { res.status(400).json({ error: "name required" }); return; }
+
+  // Auto-detect PID if not provided
+  if (!pid || pid === 0) {
+    try {
+      const terminals = await discoverTerminals();
+      const allRooms = manager.listConversations().map(c => manager.getRoom(c.id)).filter(Boolean);
+      const takenPids = new Set<number>();
+      for (const r of allRooms) { if (r) for (const a of r.who()) takenPids.add(a.pid); }
+      const available = terminals.filter(t => t.type === "claude" && !takenPids.has(t.pid));
+      if (available.length === 1) {
+        pid = available[0].pid;
+      } else if (available.length > 1) {
+        res.status(300).json({
+          error: "Multiple Claude Code processes found. Specify pid.",
+          terminals: available,
+        });
+        return;
+      }
+    } catch { /* ignore discovery errors */ }
+  }
+
+  // Resolve conversation
+  let convId = conversation;
+  if (!convId) {
+    convId = manager.getActiveId() ?? undefined;
+  }
+  if (!convId) {
+    const meta = manager.createConversation();
+    convId = meta.id;
+  }
+
+  const room = manager.getRoom(convId);
+  if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
+
+  const agent = room.join(name, pid || 0);
+  manager.bindAgent(name, convId);
+  room.touch(name);
+
+  const meta = manager.getMeta(convId);
+  const msgs = room.read(undefined, 1);
+  const lastId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
+
+  res.json({
+    ok: true,
+    conversation: { id: convId, name: meta?.name ?? convId },
+    online: room.whoNames(),
+    lastMessageId: lastId,
+  });
+});
+
+app.get("/api/agent/read", (req, res) => {
+  const sender = req.query.sender as string;
+  if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
+  const ctx = agentRoom(sender, res);
+  if (!ctx) return;
+  const since = req.query.since != null ? Number(req.query.since) : undefined;
+  const limit = Number(req.query.limit ?? 50);
+  ctx.room.touch(sender);
+  const messages = ctx.room.read(since, limit);
+  const lastId = messages.length > 0 ? messages[messages.length - 1].id : (since ?? 0);
+  res.json({ messages, lastId });
+});
+
+app.post("/api/agent/send", express.json(), (req, res) => {
+  const { sender, text, replyTo } = req.body as {
+    sender?: string; text?: string; replyTo?: number;
+  };
+  if (!sender || !text) { res.status(400).json({ error: "sender and text required" }); return; }
+  const ctx = agentRoom(sender, res);
+  if (!ctx) return;
+  ctx.room.touch(sender);
+  ctx.room.setTyping(sender, false);
+  manager.autoName(ctx.convId, text);
+  const msg = ctx.room.send(sender, text, { replyTo });
+  res.json({ id: msg.id, sender: msg.sender, text: msg.text });
+});
+
+app.post("/api/agent/leave", express.json(), (req, res) => {
+  const { name } = req.body as { name?: string };
+  if (!name) { res.status(400).json({ error: "name required" }); return; }
+  const convId = manager.getAgentBinding(name);
+  const room = convId ? manager.getRoom(convId) : manager.getActiveRoom();
+  if (room) room.leave(name);
+  manager.unbindAgent(name);
+  res.json({ ok: true });
+});
+
+app.post("/api/agent/typing", express.json(), (req, res) => {
+  const { name, typing } = req.body as { name?: string; typing?: boolean };
+  if (!name) { res.status(400).json({ error: "name required" }); return; }
+  const ctx = agentRoom(name, res);
+  if (!ctx) return;
+  ctx.room.setTyping(name, typing ?? true);
+  res.json({ ok: true });
+});
+
+app.post("/api/agent/heartbeat", express.json(), (req, res) => {
+  const { name } = req.body as { name?: string };
+  if (!name) { res.status(400).json({ error: "name required" }); return; }
+  const ctx = agentRoom(name, res);
+  if (!ctx) return;
+  ctx.room.touch(name);
+  res.json({ ok: true });
+});
+
 // --- Workflow sessions ---
 app.get("/api/templates", (_req, res) => {
   res.json(getTemplates());

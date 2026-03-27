@@ -198,7 +198,8 @@ function triggerCurrentTurn(session: Session, tmpl: SessionTemplate, room: ChatR
     prompt += ` ${DISSENT_LINE}`;
   }
 
-  prompt += ` Use chat_read to see context, then respond with chat_send.`;
+  prompt += ` Read context: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${agentName}&since=0&limit=30" — ` +
+    `Respond: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" -d '{"sender":"${agentName}","text":"YOUR_RESPONSE"}'`;
 
   // Inject into the agent's terminal
   const agent = room.getAgent(agentName);
