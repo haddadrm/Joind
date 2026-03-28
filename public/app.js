@@ -410,6 +410,7 @@ function showPopover(anchor, agent) {
     dot.addEventListener('click', function() {
       SENDER_COLORS[agent.name.toLowerCase()] = c;
       localStorage.setItem('joind-colors', JSON.stringify(SENDER_COLORS));
+      recolorMessages(agent.name, c);
       renderPills();
       closePopover();
     });
@@ -483,6 +484,7 @@ function appendMessage(msg, scroll) {
     el.appendChild(t);
   } else {
     el.className = 'message' + (isGrouped ? ' grouped' : '');
+    el.dataset.sender = msg.sender.toLowerCase();
     lastSender = msg.sender;
     var color = getSenderColor(msg.sender);
     el.style.setProperty('--bubble-color', color);
@@ -1187,6 +1189,19 @@ function getSenderColor(sender) {
   for (var i = 0; i < sender.length; i++) hash = sender.charCodeAt(i) + ((hash << 5) - hash);
   return 'hsl(' + (Math.abs(hash) % 360) + ', 55%, 60%)';
 }
+
+function recolorMessages(name, color) {
+  var lower = name.toLowerCase();
+  document.querySelectorAll('.message[data-sender="' + lower + '"]').forEach(function(el) {
+    el.style.setProperty('--bubble-color', color);
+    var av = el.querySelector('.msg-avatar');
+    if (av) { av.style.background = color; av.style.setProperty('--avatar-color', color); }
+    var sn = el.querySelector('.msg-sender');
+    if (sn) sn.style.color = color;
+    var badge = el.querySelector('.msg-role-badge');
+    if (badge) { badge.style.color = color; badge.style.borderColor = color + '40'; }
+  });
+}
 function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
@@ -1279,6 +1294,7 @@ function setupYouPill() {
         var name = (nameInput.value.trim() || 'human').toLowerCase();
         SENDER_COLORS[name] = c;
         localStorage.setItem('joind-colors', JSON.stringify(SENDER_COLORS));
+        recolorMessages(name, c);
         syncName();
         closePopover();
       });
