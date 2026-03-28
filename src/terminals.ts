@@ -257,6 +257,11 @@ function correlateTabTitles(
 ): Map<number, string> {
   const result = new Map<number, string>();
 
+  // All tab names across every WT window (for global exact-match fallback)
+  const allTabNames = new Set<string>();
+  for (const names of uiaTabs.values()) for (const n of names) allTabNames.add(n);
+
+  // Pass A: per-window HWND correlation
   const byWtHwnd = new Map<number, number[]>();
   for (const [pid, info] of consoleInfo) {
     if (info.wtHwnd) {
@@ -269,7 +274,7 @@ function correlateTabTitles(
     const tabNames = uiaTabs.get(wtHwnd) ?? [];
     const claimed = new Set<string>();
 
-    // Pass 1: exact process title → UIA tab name match
+    // Exact process title → UIA tab name
     for (const pid of pids) {
       const pt = consoleInfo.get(pid)!.processTitle;
       if (pt && tabNames.includes(pt)) {
@@ -278,20 +283,23 @@ function correlateTabTitles(
       }
     }
 
-    // Pass 2: sole unmatched PID ↔ sole unmatched tab name (user-renamed tab)
+    // Sole unmatched PID ↔ sole unmatched tab (user-renamed tab)
     const unPids = pids.filter((p) => !result.has(p));
     const unTabs = tabNames.filter((t) => !claimed.has(t));
     if (unPids.length === 1 && unTabs.length === 1) {
       result.set(unPids[0], unTabs[0]);
-    } else {
-      for (const pid of unPids) {
-        const pt = consoleInfo.get(pid)!.processTitle;
-        if (pt) result.set(pid, pt);
-      }
     }
   }
 
-  // PIDs not hosted in any detected WT window
+  // Pass B: global exact match — works when GetAncestor returns 0 (ConPTY pseudo-HWND)
+  // After renameTabTitle(pid, name), processTitle === name === tab title → matches here
+  for (const [pid, info] of consoleInfo) {
+    if (!result.has(pid) && info.processTitle && allTabNames.has(info.processTitle)) {
+      result.set(pid, info.processTitle);
+    }
+  }
+
+  // Pass C: fallback to process title (at least shows something)
   for (const [pid, info] of consoleInfo) {
     if (!result.has(pid) && info.processTitle) {
       result.set(pid, info.processTitle);

@@ -1085,8 +1085,10 @@ function renderTerminals(terminals) {
     var li = document.createElement('li'); li.className = 'terminal-item';
     var type = document.createElement('span'); type.className = 'terminal-type ' + t.type; type.textContent = t.type;
     var info = document.createElement('div'); info.className = 'terminal-info';
-    if (t.tabTitle) {
-      var title = document.createElement('span'); title.className = 'terminal-tab-title'; title.textContent = t.tabTitle;
+    var joinedAgent = agents.find(function(a) { return a.pid === t.pid; });
+    var displayTitle = t.tabTitle || (joinedAgent ? joinedAgent.name : null);
+    if (displayTitle) {
+      var title = document.createElement('span'); title.className = 'terminal-tab-title'; title.textContent = displayTitle;
       info.appendChild(title);
     }
     var pid = document.createElement('span'); pid.className = 'terminal-pid'; pid.textContent = 'PID ' + t.pid;

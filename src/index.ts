@@ -547,10 +547,16 @@ app.post("/api/session/cancel", express.json(), (req, res) => {
 app.get("/api/terminals", async (_req, res) => {
   try {
     const terminals = await discoverTerminals();
-    // Apply WT_SESSION→name fallback for tabs whose title was reset by shell prompt
+    // Build pid→name from all rooms (most reliable — room already knows invited agents)
+    const pidToName = new Map<number, string>();
+    for (const conv of manager.listConversations()) {
+      const r = manager.getRoom(conv.id);
+      if (r) for (const a of r.who()) if (a.pid) pidToName.set(a.pid, a.name);
+    }
     for (const t of terminals) {
-      if (!t.tabTitle && t.wtSession && tabNames[t.wtSession]) {
-        t.tabTitle = tabNames[t.wtSession];
+      if (!t.tabTitle) {
+        if (t.wtSession && tabNames[t.wtSession]) t.tabTitle = tabNames[t.wtSession];
+        else if (pidToName.has(t.pid)) t.tabTitle = pidToName.get(t.pid);
       }
     }
     res.json(terminals);
