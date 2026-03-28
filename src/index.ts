@@ -8,7 +8,7 @@
  */
 
 import { createServer } from "http";
-import { writeFileSync } from "fs";
+import { writeFileSync, readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import express from "express";
@@ -33,6 +33,24 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.JOIND_PORT ?? 4200);
 const DATA_DIR = join(__dirname, "..", "data");
+
+// --- WT_SESSION → agent name persistence (survives shell prompt title resets) ---
+const TAB_NAMES_FILE = join(DATA_DIR, "tab-names.json");
+
+function loadTabNames(): Record<string, string> {
+  try {
+    if (existsSync(TAB_NAMES_FILE)) {
+      return JSON.parse(readFileSync(TAB_NAMES_FILE, "utf8"));
+    }
+  } catch { /* ignore */ }
+  return {};
+}
+
+function saveTabNames(names: Record<string, string>): void {
+  try { writeFileSync(TAB_NAMES_FILE, JSON.stringify(names, null, 2)); } catch { /* ignore */ }
+}
+
+const tabNames = loadTabNames();
 
 // --- Conversation manager ---
 const manager = new ConversationManager(DATA_DIR);
@@ -254,12 +272,13 @@ app.get("/api/export", (_req, res) => {
 app.post("/api/join", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
-  const { name, pid } = req.body as { name?: string; pid?: number };
+  const { name, pid, wtSession } = req.body as { name?: string; pid?: number; wtSession?: string };
   if (!name || !pid) { res.status(400).json({ error: "name and pid required" }); return; }
   const agent = room.join(name, pid);
   const activeId = manager.getActiveId();
   if (activeId) manager.bindAgent(name, activeId);
   if (pid) renameTabTitle(pid, name).catch(() => {});
+  if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
   res.json({ name: agent.name, pid: agent.pid, online: room.whoNames() });
 });
 
@@ -380,8 +399,8 @@ function agentRoom(name: string, res: express.Response) {
 }
 
 app.post("/api/agent/join", express.json(), async (req, res) => {
-  let { name, pid, conversation } = req.body as {
-    name?: string; pid?: number; conversation?: string;
+  let { name, pid, conversation, wtSession } = req.body as {
+    name?: string; pid?: number; conversation?: string; wtSession?: string;
   };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
 
@@ -421,6 +440,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   const agent = room.join(name, pid || 0);
   manager.bindAgent(name, convId);
   room.touch(name);
+  if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
   const meta = manager.getMeta(convId);
   const msgs = room.read(undefined, 1);
@@ -525,7 +545,16 @@ app.post("/api/session/cancel", express.json(), (req, res) => {
 });
 
 app.get("/api/terminals", async (_req, res) => {
-  try { res.json(await discoverTerminals()); } catch { res.json([]); }
+  try {
+    const terminals = await discoverTerminals();
+    // Apply WT_SESSION→name fallback for tabs whose title was reset by shell prompt
+    for (const t of terminals) {
+      if (!t.tabTitle && t.wtSession && tabNames[t.wtSession]) {
+        t.tabTitle = tabNames[t.wtSession];
+      }
+    }
+    res.json(terminals);
+  } catch { res.json([]); }
 });
 
 // --- Static files ---

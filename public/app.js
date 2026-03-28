@@ -1103,7 +1103,9 @@ function inviteTerminal(t) {
   var defaultName = t.tabTitle || t.type;
   customPrompt('Name for this ' + t.type + ' agent:', defaultName, function(name) {
     if (!name) return;
-    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, pid: t.pid }) });
+    var payload = { name: name, pid: t.pid };
+    if (t.wtSession) payload.wtSession = t.wtSession;
+    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   });
 }
 

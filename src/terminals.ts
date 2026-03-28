@@ -3,9 +3,11 @@
  *
  * Tab title strategy (Windows):
  *  1. AttachConsole(pid) + GetConsoleTitleW  → process-set title + pseudo-HWND + WT root HWND
- *  2. PowerShell UIAutomation               → all WT tab names keyed by WT window HWND
- *  3. Correlation heuristic                 → exact match first, then sole-unmatched fallback
- *  4. After invite: SetConsoleTitleW(name)  → future scans auto-match by exact title
+ *  2. NtQueryInformationProcess             → WT_SESSION GUID from process env (best-effort)
+ *  3. PowerShell UIAutomation               → all WT tab names keyed by WT window HWND
+ *  4. Correlation heuristic                 → exact match first, then sole-unmatched fallback
+ *  5. After invite: SetConsoleTitleW(name)  → future scans auto-match by exact title
+ *     + WT_SESSION→name stored in data/tab-names.json for shell-prompt-override recovery
  *
  * Deduplication: openclaw double-spawns (cmd → node → node). We keep only
  * the outermost process of each same-type parent-child chain.
@@ -23,6 +25,7 @@ export interface TerminalInfo {
   command: string;
   type: "claude" | "codex" | "gemini" | "openclaw" | "unknown";
   tabTitle?: string;
+  wtSession?: string;
 }
 
 interface RawProcess {
@@ -36,6 +39,7 @@ interface ConsoleInfo {
   processTitle: string;
   pseudoHwnd: number;
   wtHwnd: number;
+  wtSession?: string;
 }
 
 const AGENT_PATTERNS: Array<{
@@ -60,7 +64,7 @@ const SKIP_PATTERNS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Step 1: AttachConsole per PID — process title + pseudo-HWND + WT HWND
+// Step 1: AttachConsole per PID — process title, HWND data, WT_SESSION GUID
 // ---------------------------------------------------------------------------
 
 async function readConsoleInfo(pids: number[]): Promise<Map<number, ConsoleInfo>> {
@@ -69,24 +73,68 @@ async function readConsoleInfo(pids: number[]): Promise<Map<number, ConsoleInfo>
 
   const pidList = pids.join(",");
   const script = `
-import ctypes
+import ctypes, struct
 from ctypes import wintypes
 import json
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-user32 = ctypes.WinDLL('user32', use_last_error=True)
+ntdll    = ctypes.WinDLL('ntdll',    use_last_error=True)
+user32   = ctypes.WinDLL('user32',   use_last_error=True)
 
-kernel32.FreeConsole.restype = wintypes.BOOL
-kernel32.AttachConsole.restype = wintypes.BOOL
+kernel32.FreeConsole.restype    = wintypes.BOOL
+kernel32.AttachConsole.restype  = wintypes.BOOL
 kernel32.AttachConsole.argtypes = [wintypes.DWORD]
-kernel32.GetConsoleTitleW.restype = wintypes.DWORD
+kernel32.GetConsoleTitleW.restype  = wintypes.DWORD
 kernel32.GetConsoleTitleW.argtypes = [wintypes.LPWSTR, wintypes.DWORD]
 user32.GetConsoleWindow.restype = wintypes.HWND
-user32.GetAncestor.restype = wintypes.HWND
-user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetAncestor.restype      = wintypes.HWND
+user32.GetAncestor.argtypes     = [wintypes.HWND, wintypes.UINT]
 
-GA_ROOTOWNER = 3
-ATTACH_PARENT = 0xFFFFFFFF
+GA_ROOTOWNER   = 3
+ATTACH_PARENT  = 0xFFFFFFFF
+PROCESS_QI_VM  = 0x0410  # QUERY_INFORMATION | VM_READ
+
+class PBI(ctypes.Structure):
+    _fields_ = [
+        ('ExitStatus',                   ctypes.c_long),
+        ('PebBaseAddress',               ctypes.c_size_t),
+        ('AffinityMask',                 ctypes.c_size_t),
+        ('BasePriority',                 ctypes.c_long),
+        ('UniqueProcessId',              ctypes.c_size_t),
+        ('InheritedFromUniqueProcessId', ctypes.c_size_t),
+    ]
+
+def get_wt_session(pid):
+    try:
+        h = kernel32.OpenProcess(PROCESS_QI_VM, False, pid)
+        if not h:
+            return None
+        def rdmem(addr, size):
+            buf = (ctypes.c_byte * size)()
+            rd  = ctypes.c_size_t()
+            kernel32.ReadProcessMemory(h, ctypes.c_void_p(addr), buf, size, ctypes.byref(rd))
+            return bytes(buf[:int(rd.value)])
+        pbi = PBI()
+        ntdll.NtQueryInformationProcess(h, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None)
+        if not pbi.PebBaseAddress:
+            kernel32.CloseHandle(h); return None
+        # PEB+0x20 → RTL_USER_PROCESS_PARAMETERS* (64-bit)
+        pp_ptr = struct.unpack('<Q', rdmem(pbi.PebBaseAddress + 0x20, 8))[0]
+        if not pp_ptr:
+            kernel32.CloseHandle(h); return None
+        # ProcessParameters+0x80 → Environment* (64-bit)
+        env_ptr = struct.unpack('<Q', rdmem(pp_ptr + 0x80, 8))[0]
+        if not env_ptr:
+            kernel32.CloseHandle(h); return None
+        env_data = rdmem(env_ptr, 32768)
+        kernel32.CloseHandle(h)
+        for entry in env_data.decode('utf-16-le', errors='ignore').split('\\x00'):
+            if entry.startswith('WT_SESSION='):
+                return entry[len('WT_SESSION='):]
+        return None
+    except:
+        return None
+
 results = {}
 
 for pid in [${pidList}]:
@@ -101,12 +149,18 @@ for pid in [${pidList}]:
             root = user32.GetAncestor(pseudo_hwnd, GA_ROOTOWNER)
             if root and root != pseudo_hwnd:
                 wt_hwnd = root
-        results[str(pid)] = {
-            'processTitle': process_title,
-            'pseudoHwnd': pseudo_hwnd,
-            'wtHwnd': wt_hwnd
-        }
         kernel32.FreeConsole()
+    else:
+        process_title = ''
+        pseudo_hwnd = 0
+        wt_hwnd = 0
+    wt_session = get_wt_session(pid)
+    results[str(pid)] = {
+        'processTitle': process_title,
+        'pseudoHwnd':   pseudo_hwnd,
+        'wtHwnd':       wt_hwnd,
+        'wtSession':    wt_session
+    }
 
 kernel32.AttachConsole(ATTACH_PARENT)
 print(json.dumps(results))
@@ -114,12 +168,20 @@ print(json.dumps(results))
 
   try {
     const { stdout } = await execFileAsync("python", ["-c", script], {
-      timeout: 10000,
+      timeout: 12000,
     });
-    const data = JSON.parse(stdout.trim()) as Record<string, ConsoleInfo>;
+    const data = JSON.parse(stdout.trim()) as Record<
+      string,
+      ConsoleInfo & { wtSession: string | null }
+    >;
     for (const [pidStr, info] of Object.entries(data)) {
       const pid = parseInt(pidStr, 10);
-      if (!isNaN(pid)) result.set(pid, info);
+      if (!isNaN(pid)) {
+        result.set(pid, {
+          ...info,
+          wtSession: info.wtSession ?? undefined,
+        });
+      }
     }
   } catch {
     /* best-effort */
@@ -195,7 +257,6 @@ function correlateTabTitles(
 ): Map<number, string> {
   const result = new Map<number, string>();
 
-  // Group PIDs by WT window HWND
   const byWtHwnd = new Map<number, number[]>();
   for (const [pid, info] of consoleInfo) {
     if (info.wtHwnd) {
@@ -223,7 +284,6 @@ function correlateTabTitles(
     if (unPids.length === 1 && unTabs.length === 1) {
       result.set(unPids[0], unTabs[0]);
     } else {
-      // Multiple ambiguous: fall back to process title
       for (const pid of unPids) {
         const pt = consoleInfo.get(pid)!.processTitle;
         if (pt) result.set(pid, pt);
@@ -231,7 +291,7 @@ function correlateTabTitles(
     }
   }
 
-  // PIDs not in any detected WT window (plain cmd, defterm edge case)
+  // PIDs not hosted in any detected WT window
   for (const [pid, info] of consoleInfo) {
     if (!result.has(pid) && info.processTitle) {
       result.set(pid, info.processTitle);
@@ -241,12 +301,22 @@ function correlateTabTitles(
   return result;
 }
 
-async function readTabTitles(pids: number[]): Promise<Map<number, string>> {
+interface TabReadResult {
+  titles: Map<number, string>;
+  wtSessions: Map<number, string>;
+}
+
+async function readTabInfo(pids: number[]): Promise<TabReadResult> {
   const [consoleInfo, uiaTabs] = await Promise.all([
     readConsoleInfo(pids),
     readWtUiaTabs(),
   ]);
-  return correlateTabTitles(consoleInfo, uiaTabs);
+  const titles = correlateTabTitles(consoleInfo, uiaTabs);
+  const wtSessions = new Map<number, string>();
+  for (const [pid, info] of consoleInfo) {
+    if (info.wtSession) wtSessions.set(pid, info.wtSession);
+  }
+  return { titles, wtSessions };
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +373,6 @@ async function discoverWindows(): Promise<TerminalInfo[]> {
       { timeout: 10000 }
     );
 
-    // Parse all processes
     const allProcs = new Map<number, RawProcess>();
     for (const line of stdout.trim().split("\n")) {
       const parts = line.split(",");
@@ -316,7 +385,6 @@ async function discoverWindows(): Promise<TerminalInfo[]> {
       allProcs.set(pid, { pid, ppid: ppid || 0, name, commandline });
     }
 
-    // Find matching agent processes
     const matches: Array<{
       proc: RawProcess;
       pattern: (typeof AGENT_PATTERNS)[0];
@@ -333,7 +401,6 @@ async function discoverWindows(): Promise<TerminalInfo[]> {
       }
     }
 
-    // Deduplicate parent-child chains (same agent type)
     const childPids = new Set<number>();
     for (const m of matches) {
       for (const other of matches) {
@@ -356,11 +423,10 @@ async function discoverWindows(): Promise<TerminalInfo[]> {
     }
 
     const rootMatches = matches.filter((m) => !childPids.has(m.proc.pid));
+    const { titles, wtSessions } = await readTabInfo(
+      rootMatches.map((m) => m.proc.pid)
+    );
 
-    // Read tab titles for all root matches
-    const tabTitles = await readTabTitles(rootMatches.map((m) => m.proc.pid));
-
-    // Build results
     const results: TerminalInfo[] = [];
     for (const m of rootMatches) {
       results.push({
@@ -372,7 +438,8 @@ async function discoverWindows(): Promise<TerminalInfo[]> {
             ? m.proc.commandline.slice(0, 120) + "\u2026"
             : m.proc.commandline,
         type: m.pattern.type,
-        tabTitle: tabTitles.get(m.proc.pid),
+        tabTitle: titles.get(m.proc.pid),
+        wtSession: wtSessions.get(m.proc.pid),
       });
     }
 
