@@ -305,7 +305,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 5px 8px;
   border-radius: 6px;
   margin-bottom: 2px;
   font-size: 12px;
@@ -327,6 +327,15 @@ body {
 .terminal-type.gemini { background: rgba(66,133,244,0.12); color: #4285f4; }
 .terminal-type.openclaw { background: rgba(155,89,182,0.12); color: #9b59b6; }
 
+.terminal-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.terminal-tab-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .terminal-pid { font-size: 10px; color: var(--text-muted); }
 
 .terminal-invite {

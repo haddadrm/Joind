@@ -1077,24 +1077,33 @@ function scanTerminals() {
 function renderTerminals(terminals) {
   var list = document.getElementById('terminal-list');
   list.textContent = '';
-  if (terminals.length === 0) { var e = document.createElement('li'); e.className = 'empty-state'; e.textContent = 'No agents found'; list.appendChild(e); return; }
+  if (terminals.length === 0) {
+    var e = document.createElement('li'); e.className = 'empty-state'; e.textContent = 'No agents found';
+    list.appendChild(e); return;
+  }
   terminals.forEach(function(t) {
     var li = document.createElement('li'); li.className = 'terminal-item';
     var type = document.createElement('span'); type.className = 'terminal-type ' + t.type; type.textContent = t.type;
-    var pid = document.createElement('span'); pid.className = 'terminal-pid';
-    pid.textContent = 'PID ' + t.pid;
+    var info = document.createElement('div'); info.className = 'terminal-info';
+    if (t.tabTitle) {
+      var title = document.createElement('span'); title.className = 'terminal-tab-title'; title.textContent = t.tabTitle;
+      info.appendChild(title);
+    }
+    var pid = document.createElement('span'); pid.className = 'terminal-pid'; pid.textContent = 'PID ' + t.pid;
+    info.appendChild(pid);
     var joined = agents.some(function(a) { return a.pid === t.pid; });
     var inv = document.createElement('button'); inv.className = 'terminal-invite';
     inv.textContent = joined ? 'Joined' : 'Invite'; inv.disabled = joined;
-    if (!joined) inv.addEventListener('click', function() { inviteTerminal(t.pid, t.type); });
-    li.appendChild(type); li.appendChild(pid); li.appendChild(inv); list.appendChild(li);
+    if (!joined) inv.addEventListener('click', function() { inviteTerminal(t); });
+    li.appendChild(type); li.appendChild(info); li.appendChild(inv); list.appendChild(li);
   });
 }
 
-function inviteTerminal(pid, type) {
-  customPrompt('Name for this ' + type + ' agent:', type, function(name) {
+function inviteTerminal(t) {
+  var defaultName = t.tabTitle || t.type;
+  customPrompt('Name for this ' + t.type + ' agent:', defaultName, function(name) {
     if (!name) return;
-    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, pid: pid }) });
+    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, pid: t.pid }) });
   });
 }
 
