@@ -19,7 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
 import { registerTools } from "./tools.js";
-import { discoverTerminals } from "./terminals.js";
+import { discoverTerminals, renameTabTitle } from "./terminals.js";
 import {
   loadTemplates,
   getTemplates,
@@ -259,6 +259,7 @@ app.post("/api/join", express.json(), (req, res) => {
   const agent = room.join(name, pid);
   const activeId = manager.getActiveId();
   if (activeId) manager.bindAgent(name, activeId);
+  if (pid) renameTabTitle(pid, name).catch(() => {});
   res.json({ name: agent.name, pid: agent.pid, online: room.whoNames() });
 });
 

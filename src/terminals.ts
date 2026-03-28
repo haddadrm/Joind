@@ -1,8 +1,11 @@
 /**
  * Terminal session discovery — finds running CLI agent processes.
  *
- * Tab title: Uses AttachConsole(pid) + GetConsoleTitleW() to read the exact
- * title Windows Terminal displays in the tab strip. Simple, reliable, direct.
+ * Tab title strategy (Windows):
+ *  1. AttachConsole(pid) + GetConsoleTitleW  → process-set title + pseudo-HWND + WT root HWND
+ *  2. PowerShell UIAutomation               → all WT tab names keyed by WT window HWND
+ *  3. Correlation heuristic                 → exact match first, then sole-unmatched fallback
+ *  4. After invite: SetConsoleTitleW(name)  → future scans auto-match by exact title
  *
  * Deduplication: openclaw double-spawns (cmd → node → node). We keep only
  * the outermost process of each same-type parent-child chain.
@@ -29,6 +32,12 @@ interface RawProcess {
   commandline: string;
 }
 
+interface ConsoleInfo {
+  processTitle: string;
+  pseudoHwnd: number;
+  wtHwnd: number;
+}
+
 const AGENT_PATTERNS: Array<{
   nameMatch?: RegExp;
   cmdMatch?: RegExp;
@@ -51,29 +60,32 @@ const SKIP_PATTERNS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Tab title: AttachConsole + GetConsoleTitleW (the only approach that works)
+// Step 1: AttachConsole per PID — process title + pseudo-HWND + WT HWND
 // ---------------------------------------------------------------------------
 
-async function readConsoleTitles(pids: number[]): Promise<Map<number, string>> {
-  const titles = new Map<number, string>();
-  if (pids.length === 0) return titles;
+async function readConsoleInfo(pids: number[]): Promise<Map<number, ConsoleInfo>> {
+  const result = new Map<number, ConsoleInfo>();
+  if (pids.length === 0) return result;
 
   const pidList = pids.join(",");
-
-  // Python script — AttachConsole per PID, read title, reattach.
-  // Uses CONIN$ pattern (proven in inject.ts). Brief console detach per PID.
   const script = `
 import ctypes
 from ctypes import wintypes
-import sys, json
+import json
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+
 kernel32.FreeConsole.restype = wintypes.BOOL
 kernel32.AttachConsole.restype = wintypes.BOOL
 kernel32.AttachConsole.argtypes = [wintypes.DWORD]
 kernel32.GetConsoleTitleW.restype = wintypes.DWORD
 kernel32.GetConsoleTitleW.argtypes = [wintypes.LPWSTR, wintypes.DWORD]
+user32.GetConsoleWindow.restype = wintypes.HWND
+user32.GetAncestor.restype = wintypes.HWND
+user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 
+GA_ROOTOWNER = 3
 ATTACH_PARENT = 0xFFFFFFFF
 results = {}
 
@@ -82,11 +94,20 @@ for pid in [${pidList}]:
     if kernel32.AttachConsole(pid):
         buf = ctypes.create_unicode_buffer(1024)
         length = kernel32.GetConsoleTitleW(buf, 1024)
-        if length > 0:
-            results[str(pid)] = buf.value
+        process_title = buf.value if length > 0 else ''
+        pseudo_hwnd = user32.GetConsoleWindow() or 0
+        wt_hwnd = 0
+        if pseudo_hwnd:
+            root = user32.GetAncestor(pseudo_hwnd, GA_ROOTOWNER)
+            if root and root != pseudo_hwnd:
+                wt_hwnd = root
+        results[str(pid)] = {
+            'processTitle': process_title,
+            'pseudoHwnd': pseudo_hwnd,
+            'wtHwnd': wt_hwnd
+        }
         kernel32.FreeConsole()
 
-# Reattach to parent
 kernel32.AttachConsole(ATTACH_PARENT)
 print(json.dumps(results))
 `;
@@ -95,18 +116,167 @@ print(json.dumps(results))
     const { stdout } = await execFileAsync("python", ["-c", script], {
       timeout: 10000,
     });
-    const data = JSON.parse(stdout.trim());
-    for (const [pidStr, title] of Object.entries(data)) {
+    const data = JSON.parse(stdout.trim()) as Record<string, ConsoleInfo>;
+    for (const [pidStr, info] of Object.entries(data)) {
       const pid = parseInt(pidStr, 10);
-      if (!isNaN(pid) && typeof title === "string" && title) {
-        titles.set(pid, title);
+      if (!isNaN(pid)) result.set(pid, info);
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Step 2: PowerShell UIAutomation — WT tab names keyed by WT window HWND
+// ---------------------------------------------------------------------------
+
+async function readWtUiaTabs(): Promise<Map<number, string[]>> {
+  const result = new Map<number, string[]>();
+
+  const psScript = `
+try {
+  Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+  Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+  $root = [System.Windows.Automation.AutomationElement]::RootElement
+  $classCond = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ClassNameProperty,
+    'CASCADIA_HOSTING_WINDOW_CLASS'
+  )
+  $wtWindows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $classCond)
+  $out = @{}
+  foreach ($wt in $wtWindows) {
+    $hwnd = [string]$wt.Current.NativeWindowHandle
+    $tabCond = New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::TabItem
+    )
+    $tabs = $wt.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCond)
+    $out[$hwnd] = @($tabs | ForEach-Object { $_.Current.Name })
+  }
+  $out | ConvertTo-Json -Compress
+} catch { Write-Output '{}' }
+`;
+
+  try {
+    const encoded = Buffer.from(psScript, "utf16le").toString("base64");
+    const { stdout } = await execFileAsync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+      { timeout: 8000 }
+    );
+    const raw = stdout.trim();
+    if (!raw || raw === "{}") return result;
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    for (const [hwndStr, names] of Object.entries(data)) {
+      const hwnd = parseInt(hwndStr, 10);
+      if (!isNaN(hwnd) && Array.isArray(names)) {
+        result.set(
+          hwnd,
+          (names as unknown[]).filter((n): n is string => typeof n === "string")
+        );
       }
     }
   } catch {
     /* best-effort */
   }
 
-  return titles;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Step 3: Correlate console info + UIA tab names → best title per PID
+// ---------------------------------------------------------------------------
+
+function correlateTabTitles(
+  consoleInfo: Map<number, ConsoleInfo>,
+  uiaTabs: Map<number, string[]>
+): Map<number, string> {
+  const result = new Map<number, string>();
+
+  // Group PIDs by WT window HWND
+  const byWtHwnd = new Map<number, number[]>();
+  for (const [pid, info] of consoleInfo) {
+    if (info.wtHwnd) {
+      if (!byWtHwnd.has(info.wtHwnd)) byWtHwnd.set(info.wtHwnd, []);
+      byWtHwnd.get(info.wtHwnd)!.push(pid);
+    }
+  }
+
+  for (const [wtHwnd, pids] of byWtHwnd) {
+    const tabNames = uiaTabs.get(wtHwnd) ?? [];
+    const claimed = new Set<string>();
+
+    // Pass 1: exact process title → UIA tab name match
+    for (const pid of pids) {
+      const pt = consoleInfo.get(pid)!.processTitle;
+      if (pt && tabNames.includes(pt)) {
+        result.set(pid, pt);
+        claimed.add(pt);
+      }
+    }
+
+    // Pass 2: sole unmatched PID ↔ sole unmatched tab name (user-renamed tab)
+    const unPids = pids.filter((p) => !result.has(p));
+    const unTabs = tabNames.filter((t) => !claimed.has(t));
+    if (unPids.length === 1 && unTabs.length === 1) {
+      result.set(unPids[0], unTabs[0]);
+    } else {
+      // Multiple ambiguous: fall back to process title
+      for (const pid of unPids) {
+        const pt = consoleInfo.get(pid)!.processTitle;
+        if (pt) result.set(pid, pt);
+      }
+    }
+  }
+
+  // PIDs not in any detected WT window (plain cmd, defterm edge case)
+  for (const [pid, info] of consoleInfo) {
+    if (!result.has(pid) && info.processTitle) {
+      result.set(pid, info.processTitle);
+    }
+  }
+
+  return result;
+}
+
+async function readTabTitles(pids: number[]): Promise<Map<number, string>> {
+  const [consoleInfo, uiaTabs] = await Promise.all([
+    readConsoleInfo(pids),
+    readWtUiaTabs(),
+  ]);
+  return correlateTabTitles(consoleInfo, uiaTabs);
+}
+
+// ---------------------------------------------------------------------------
+// Rename a terminal tab by setting the console title via AttachConsole
+// (works for tabs without a user-set custom rename; silently no-ops otherwise)
+// ---------------------------------------------------------------------------
+
+export async function renameTabTitle(pid: number, title: string): Promise<void> {
+  if (process.platform !== "win32" || !pid) return;
+  const safe = title.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const script = `
+import ctypes
+from ctypes import wintypes
+k = ctypes.WinDLL('kernel32', use_last_error=True)
+k.FreeConsole.restype = wintypes.BOOL
+k.AttachConsole.restype = wintypes.BOOL
+k.AttachConsole.argtypes = [wintypes.DWORD]
+k.SetConsoleTitleW.restype = wintypes.BOOL
+k.SetConsoleTitleW.argtypes = [wintypes.LPCWSTR]
+k.FreeConsole()
+if k.AttachConsole(${pid}):
+    k.SetConsoleTitleW("${safe}")
+    k.FreeConsole()
+k.AttachConsole(0xFFFFFFFF)
+`;
+  try {
+    await execFileAsync("python", ["-c", script], { timeout: 5000 });
+  } catch {
+    /* best-effort */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,10 +357,8 @@ async function discoverWindows(): Promise<TerminalInfo[]> {
 
     const rootMatches = matches.filter((m) => !childPids.has(m.proc.pid));
 
-    // Read console titles for all root matches
-    const consoleTitles = await readConsoleTitles(
-      rootMatches.map((m) => m.proc.pid)
-    );
+    // Read tab titles for all root matches
+    const tabTitles = await readTabTitles(rootMatches.map((m) => m.proc.pid));
 
     // Build results
     const results: TerminalInfo[] = [];
@@ -204,7 +372,7 @@ async function discoverWindows(): Promise<TerminalInfo[]> {
             ? m.proc.commandline.slice(0, 120) + "\u2026"
             : m.proc.commandline,
         type: m.pattern.type,
-        tabTitle: consoleTitles.get(m.proc.pid),
+        tabTitle: tabTitles.get(m.proc.pid),
       });
     }
 
