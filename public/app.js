@@ -512,9 +512,18 @@ function appendMessage(msg, scroll) {
     hdr.className = 'msg-header';
     var sn = document.createElement('span');
     sn.className = 'msg-sender'; sn.style.color = color; sn.textContent = msg.sender;
+    var mid = document.createElement('span');
+    mid.className = 'msg-id'; mid.textContent = '#' + msg.id;
+    mid.title = 'Click to copy message ID';
+    mid.addEventListener('click', function() {
+      navigator.clipboard.writeText('#' + msg.id).then(function() {
+        mid.classList.add('copied');
+        setTimeout(function() { mid.classList.remove('copied'); }, 800);
+      });
+    });
     var tm = document.createElement('span');
     tm.className = 'msg-time'; tm.textContent = formatTime(msg.timestamp);
-    hdr.appendChild(sn); hdr.appendChild(tm);
+    hdr.appendChild(sn); hdr.appendChild(mid); hdr.appendChild(tm);
 
     // Show role badge if agent has one
     var agent = agents.find(function(a) { return a.name === msg.sender; });
@@ -572,11 +581,11 @@ function appendMessage(msg, scroll) {
     el.dataset.id = msg.id;
     el.appendChild(av); el.appendChild(body); el.appendChild(actions);
 
-    // Grouped: add hover timestamp
+    // Grouped: add hover timestamp + id
     if (isGrouped) {
       var hoverTime = document.createElement('span');
       hoverTime.className = 'msg-time-hover';
-      hoverTime.textContent = formatTimeShort(msg.timestamp);
+      hoverTime.textContent = '#' + msg.id + ' · ' + formatTimeShort(msg.timestamp);
       el.appendChild(hoverTime);
     }
   }

@@ -597,6 +597,18 @@ body {
   letter-spacing: 0.2px;
 }
 .msg-time { font-size: 10px; color: var(--text-muted); font-weight: 400; }
+.msg-id {
+  font-size: 9px;
+  font-family: 'SF Mono', ui-monospace, monospace;
+  color: var(--text-muted);
+  opacity: 0.45;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+  transition: opacity 0.15s, color 0.15s;
+  user-select: none;
+}
+.msg-id:hover { opacity: 0.9; }
+.msg-id.copied { opacity: 1; color: var(--accent); }
 
 .msg-role-badge {
   font-size: 8px;
