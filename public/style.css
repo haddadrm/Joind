@@ -793,14 +793,13 @@ body {
   word-wrap: break-word;
   overflow: hidden;
   pointer-events: none;
-  color: transparent;
+  color: var(--text);
   border: 1px solid transparent;
   border-radius: 12px;
   z-index: 1;
 }
 .input-highlight .hl-mention {
-  border-radius: 4px;
-  padding: 1px 2px;
+  font-weight: 600;
 }
 
 #message-input {
@@ -811,7 +810,8 @@ body {
   background: transparent;
   border: none;
   border-radius: 12px;
-  color: var(--text);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
   caret-color: var(--text);
   font-family: inherit;
   font-size: 14px;
@@ -829,7 +829,10 @@ body {
 }
   background: var(--bg-elevated);
 }
-#message-input::placeholder { color: var(--text-muted); }
+#message-input::placeholder {
+  color: var(--text-muted);
+  -webkit-text-fill-color: var(--text-muted);
+}
 
 .input-hint {
   font-size: 9px;

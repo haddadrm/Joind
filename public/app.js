@@ -3,7 +3,10 @@
  * Features: markdown, code copy, @mention autocomplete, rename, roles, sound notifications
  */
 
+var ALL_MENTION_COLOR = '#7c3aed';
+
 var SENDER_COLORS = {
+  all: ALL_MENTION_COLOR,
   system: '#555570', human: '#4ecdc4', rami: '#4ecdc4',
   claude: '#da7756', commander: '#da7756', 'commander-claude': '#da7756',
   codex: '#10a37f', gemini: '#4285f4', paris: '#4285f4',
@@ -720,7 +723,12 @@ function sendMessage() {
 
 function mentionAll() {
   var input = document.getElementById('message-input');
-  input.value = '@all '; input.focus();
+  input.value = '@all ';
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  input.focus();
+  updateSendBtn();
+  syncHighlight();
 }
 
 function clearChat() { document.getElementById('messages').textContent = ''; }
@@ -910,7 +918,7 @@ function showMentionMenu(query) {
     item.className = 'mention-item' + (i === 0 ? ' active' : '');
     var dot = document.createElement('span');
     dot.className = 'mention-item-dot';
-    dot.style.background = a.name === 'all' ? '#7c3aed' : getSenderColor(a.name);
+    dot.style.background = getSenderColor(a.name);
     var nm = document.createElement('span');
     nm.className = 'mention-item-name';
     nm.textContent = a.name === 'all' ? '@all (everyone)' : a.name;
@@ -998,17 +1006,36 @@ function setupInput() {
   });
 }
 
+function resolveMentionColor(name) {
+  var lower = name.toLowerCase();
+  if (!lower) return null;
+  if ('all'.indexOf(lower) === 0) return getSenderColor('all');
+
+  var exact = agents.find(function(agent) {
+    return agent.name.toLowerCase() === lower;
+  });
+  if (exact) return getSenderColor(exact.name);
+
+  var matches = agents.filter(function(agent) {
+    return agent.name.toLowerCase().indexOf(lower) === 0;
+  });
+  if (matches.length === 1) return getSenderColor(matches[0].name);
+
+  return null;
+}
+
 function syncHighlight() {
   var input = document.getElementById('message-input');
   var highlight = document.getElementById('input-highlight');
   if (!highlight) return;
 
   var text = input.value;
-  // Escape HTML, then highlight @mentions with colored spans
+  // Escape HTML, then color exact or uniquely identifiable @mentions inline.
   var escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   var html = escaped.replace(/@(\w[\w-]*)/g, function(match, name) {
-    var color = getSenderColor(name);
-    return '<span class="hl-mention" style="background:' + color + '55; box-shadow: 0 0 0 2px ' + color + '30">' + match + '</span>';
+    var color = resolveMentionColor(name);
+    if (!color) return match;
+    return '<span class="hl-mention" style="color:' + color + '">' + match + '</span>';
   });
   // Add trailing space so highlight div matches textarea height
   highlight.innerHTML = html + '\n';
