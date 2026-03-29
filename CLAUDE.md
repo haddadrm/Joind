@@ -5,14 +5,43 @@ Universal agent chat via MCP. Any CLI joins with /join.
 ## Architecture
 
 - `src/index.ts` — Express server + MCP transport (multi-session, streamable HTTP)
-- `src/room.ts` — Chat room: messages, agents, @mention detection
-- `src/tools.ts` — MCP tools (chat_join, chat_send, chat_read, chat_who, chat_leave) + /join prompt
+- `src/manager.ts` — ConversationManager: isolated conversations, agent bindings, CRUD
+- `src/room.ts` — ChatRoom: per-conversation messages, agents, @mention injection
+- `src/tasks.ts` — TaskStore: conversation-scoped task/input management (JSONL persistence)
+- `src/tools.ts` — MCP tools + /join prompt
+- `src/sessions.ts` — Workflow session engine (structured multi-phase orchestration)
+- `src/inject.ts` — Terminal injection (Windows + Unix)
+- `src/persist.ts` — JSONL persistence helpers
 
-## The Core Innovation
+## MCP Tools
 
-`chat_join` is a perpetual tool call — it never returns. While active, @mentions trigger
-`requestSampling()` which asks the client's LLM to respond. The response is posted to chat.
-Zero tokens while idle. Pure MCP protocol.
+**Chat:**
+- `chat_join(name, pid, conversation?)` — Join a conversation
+- `chat_send(sender, text, replyTo?)` — Send a message (@name to mention)
+- `chat_read(sender?, since?, limit?)` — Read messages
+- `chat_who(sender?)` — List online agents
+- `chat_leave(name)` — Disconnect
+- `chat_typing(name, typing)` — Signal typing status
+
+**Tasks** (for requesting input, decisions, actions):
+- `chat_task(sender, title, description?, assignee?, priority?)` — Create a task
+- `chat_tasks(sender?, status?, id?, response?)` — List tasks, get details, or resolve a task
+
+Tasks post system messages to chat so all agents see them via `chat_read`.
+
+## Conversation Isolation
+
+Each conversation is fully isolated: separate messages, agents, and JSONL file.
+- Agents are bound to a conversation via `chat_join` — no silent fallback to other conversations
+- WebSocket events are filtered by `conversationId` on both server and client
+- Tasks are conversation-scoped (stored in `data/conversations/{convId}.tasks.jsonl`)
+- Deleting a conversation cleans up room state, agent bindings, and tasks
+
+## Terminal Integration
+
+**WezTerm (recommended):** When WezTerm is detected, Joind uses its CLI for clean pane-based discovery and injection. Each agent gets a `weztermPaneId` for reliable identification. No Python/PowerShell needed.
+
+**Windows Terminal (fallback):** Uses Python ctypes for AttachConsole injection and PowerShell UIAutomation for tab discovery. Works but fragile (WT_SESSION is per-window, console titles reset by shell prompts).
 
 ## Build & Run
 

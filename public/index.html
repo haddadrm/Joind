@@ -17,6 +17,10 @@
         <h1 class="logo"><span class="logo-icon"><i data-lucide="hexagon" width="18" height="18"></i></span>Joind</h1>
       </div>
       <div class="agent-pills" id="agent-pills"></div>
+      <button class="task-badge" id="task-badge" onclick="toggleTaskPanel()" title="Tasks">
+        <i data-lucide="clipboard-list" width="16" height="16"></i>
+        <span class="task-badge-count" id="task-badge-count">0</span>
+      </button>
       <div class="you-pill" id="you-pill" title="Click to change your name">
         <span class="you-label">you</span>
         <span class="you-name" id="you-name-display">human</span>
@@ -35,6 +39,16 @@
             <button class="btn btn-action" onclick="openSoundSettings(event)" title="Sound settings"><i data-lucide="settings" width="18" height="18"></i></button>
             <button class="btn btn-action" onclick="exportChat()" title="Export chat"><i data-lucide="download" width="18" height="18"></i></button>
             <button class="btn btn-action" onclick="clearChat()" title="Clear chat view"><i data-lucide="trash-2" width="18" height="18"></i></button>
+          </div>
+          <div class="turn-guard-row" id="turn-guard-row">
+            <label class="turn-guard-label" title="Limit consecutive agent turns before requiring human input">
+              <span class="turn-guard-text">Turn limit</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="turn-guard-toggle" onchange="toggleTurnGuard(this.checked)" />
+                <span class="toggle-slider"></span>
+              </label>
+            </label>
+            <input type="number" class="turn-guard-spinner" id="turn-guard-limit" min="1" max="100" value="20" disabled onchange="setTurnGuardLimit(this.value)" title="Max agent turns" />
           </div>
         </div>
 
@@ -108,6 +122,23 @@
         </div>
 
         <div class="typing-bar" id="typing-bar"></div>
+
+        <div class="task-panel hidden" id="task-panel">
+          <div class="task-panel-header">
+            <h3>Tasks</h3>
+            <div class="task-panel-tabs">
+              <button class="task-tab active" data-filter="open" onclick="setTaskFilter('open', this)">Open</button>
+              <button class="task-tab" data-filter="done" onclick="setTaskFilter('done', this)">Done</button>
+            </div>
+            <button class="task-panel-close" onclick="toggleTaskPanel()" title="Close">
+              <i data-lucide="x" width="16" height="16"></i>
+            </button>
+          </div>
+          <div class="task-panel-body" id="task-panel-body"></div>
+          <div class="task-panel-footer">
+            <button class="btn btn-sm" onclick="showCreateTaskForm()">+ New Task</button>
+          </div>
+        </div>
 
         <footer class="chat-footer">
           <input type="hidden" id="sender-name" value="human" />

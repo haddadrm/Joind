@@ -5,6 +5,7 @@
 
 import { EventEmitter } from "events";
 import { inject } from "./inject.js";
+import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId } from "./persist.js";
 
 export interface ChatMessage {
@@ -23,6 +24,7 @@ export interface Agent {
   active: boolean;
   role?: string;
   lastSeen: number;
+  weztermPaneId?: number;
 }
 
 export interface RoomEvent {
@@ -37,6 +39,8 @@ export class ChatRoom extends EventEmitter {
   private typingState = new Map<string, NodeJS.Timeout>();
   private chatFile: string | null = null;
   private staleInterval: ReturnType<typeof setInterval> | null = null;
+  private agentTurnCount = 0; // consecutive agent turns since last human message
+  turnGuard: { enabled: boolean; limit: number } | null = null;
 
   constructor(chatFilePath?: string) {
     super();
@@ -58,11 +62,12 @@ export class ChatRoom extends EventEmitter {
     }
   }
 
-  join(name: string, pid: number): Agent {
+  join(name: string, pid: number, weztermPaneId?: number): Agent {
     const existing = this.agents.get(name);
     if (existing) {
       existing.active = true;
       existing.pid = pid;
+      if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
       existing.lastSeen = Date.now();
       this.emit("room", { type: "join", data: existing } as RoomEvent);
       return existing;
@@ -74,6 +79,7 @@ export class ChatRoom extends EventEmitter {
       joinedAt: Date.now(),
       active: true,
       lastSeen: Date.now(),
+      weztermPaneId,
     };
     this.agents.set(name, agent);
     this.addSystem(`${name} joined the chat`);
@@ -110,12 +116,39 @@ export class ChatRoom extends EventEmitter {
     if (senderAgent) senderAgent.lastSeen = Date.now();
     this.setTyping(sender, false);
 
+    // Turn guard: track consecutive agent turns
+    if (sender !== "system") {
+      if (this.agents.has(sender)) {
+        this.agentTurnCount++;
+      } else {
+        // Human message resets the counter
+        this.agentTurnCount = 0;
+      }
+    }
+
     // Detect @mentions → inject into agents IN THIS CONVERSATION
     const mentions = this.extractMentions(text);
     const targets = mentions.includes("all")
       ? [...this.agents.keys()].filter((n) => n !== sender)
       : mentions;
 
+    // Turn guard: suppress injection if limit reached
+    if (this.turnGuard && this.turnGuard.enabled && this.agentTurnCount >= this.turnGuard.limit) {
+      if (targets.length > 0 && sender !== "system") {
+        this.addSystem(`Turn limit reached (${this.turnGuard.limit} turns). Send a message to continue.`);
+        this.emit("room", { type: "turn-guard", data: { count: this.agentTurnCount, limit: this.turnGuard.limit } } as unknown as RoomEvent);
+      }
+    } else {
+      this.injectMentions(sender, targets).catch((err) => {
+        console.error(`  ✗ Mention injection error: ${err}`);
+      });
+    }
+
+    console.log(`  [#${msg.id} ${sender}] ${text}`);
+    return msg;
+  }
+
+  private async injectMentions(sender: string, targets: string[]): Promise<void> {
     for (const name of targets) {
       const agent = this.agents.get(name);
       if (agent?.active && agent.name !== sender) {
@@ -125,15 +158,19 @@ export class ChatRoom extends EventEmitter {
           `Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${name}&since=0" — ` +
           `Reply: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" ` +
           `-d '{"sender":"${name}","text":"YOUR_REPLY"}'`;
-        console.log(`  → Injecting into ${name} (PID ${agent.pid})...`);
-        inject(agent.pid, prompt).catch((err) => {
+        const target = agent.weztermPaneId != null ? `pane:${agent.weztermPaneId}` : `PID:${agent.pid}`;
+        console.log(`  → Injecting into ${name} (${target})...`);
+        try {
+          await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv());
+          // Brief delay between injections to let Windows console state settle
+          if (process.platform === "win32") {
+            await new Promise((r) => setTimeout(r, 300));
+          }
+        } catch (err) {
           console.error(`  ✗ Injection failed for ${name}: ${err}`);
-        });
+        }
       }
     }
-
-    console.log(`  [#${msg.id} ${sender}] ${text}`);
-    return msg;
   }
 
   read(since?: number, limit = 50): ChatMessage[] {
@@ -233,6 +270,14 @@ export class ChatRoom extends EventEmitter {
 
   messageCount(): number {
     return this.messages.length;
+  }
+
+  getAgentTurnCount(): number {
+    return this.agentTurnCount;
+  }
+
+  resetTurnCount(): void {
+    this.agentTurnCount = 0;
   }
 
   private addSystem(text: string): void {

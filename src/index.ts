@@ -9,9 +9,13 @@
 
 import { createServer } from "http";
 import { writeFileSync, readFileSync, existsSync } from "fs";
+import { execFile } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { promisify } from "util";
 import express from "express";
+
+const execFileAsync = promisify(execFile);
 import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { ensureDir } from "./persist.js";
@@ -19,7 +23,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
 import { registerTools } from "./tools.js";
-import { discoverTerminals, renameTabTitle } from "./terminals.js";
+import { TaskStore } from "./tasks.js";
+import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv } from "./terminals.js";
 import {
   loadTemplates,
   getTemplates,
@@ -52,8 +57,40 @@ function saveTabNames(names: Record<string, string>): void {
 
 const tabNames = loadTabNames();
 
-// --- Conversation manager ---
+// --- Turn guard settings (global) ---
+const TURN_GUARD_FILE = join(DATA_DIR, "turn-guard.json");
+
+interface TurnGuardSettings {
+  enabled: boolean;
+  limit: number;
+}
+
+function loadTurnGuard(): TurnGuardSettings {
+  try {
+    if (existsSync(TURN_GUARD_FILE)) {
+      return JSON.parse(readFileSync(TURN_GUARD_FILE, "utf8"));
+    }
+  } catch { /* ignore */ }
+  return { enabled: false, limit: 20 };
+}
+
+function saveTurnGuard(settings: TurnGuardSettings): void {
+  try { writeFileSync(TURN_GUARD_FILE, JSON.stringify(settings, null, 2)); } catch { /* ignore */ }
+}
+
+let turnGuard = loadTurnGuard();
+
+/** Push turn guard settings to all loaded rooms */
+function applyTurnGuard(): void {
+  for (const conv of manager.listConversations()) {
+    const room = manager.getRoom(conv.id);
+    if (room) room.turnGuard = turnGuard.enabled ? turnGuard : null;
+  }
+}
+
+// --- Conversation manager + task store ---
 const manager = new ConversationManager(DATA_DIR);
+const taskStore = new TaskStore(DATA_DIR);
 
 // --- HTTP + WebSocket server ---
 const app = express();
@@ -62,6 +99,12 @@ const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
 // Load session templates
 loadTemplates();
+
+// Apply turn guard to existing and future rooms
+applyTurnGuard();
+manager.on("room-created", (room) => {
+  if (turnGuard.enabled) room.turnGuard = turnGuard;
+});
 
 // Forward conversation room events to WebSocket clients (scoped by active conversation)
 manager.on("room", (event) => {
@@ -81,6 +124,16 @@ manager.on("room", (event) => {
   }
 });
 
+// Forward task events to WebSocket clients
+taskStore.on("task", (event) => {
+  const msg = JSON.stringify(event);
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(msg);
+    }
+  }
+});
+
 // Forward global events (conversation created/renamed/deleted)
 manager.on("global", (event) => {
   const msg = JSON.stringify(event);
@@ -97,6 +150,7 @@ wss.on("connection", (ws) => {
   // Messages load when the user selects a conversation.
   const activeMeta = manager.getActiveMeta();
   const activeRoom = activeMeta ? manager.getActiveRoom() : undefined;
+  const activeId = activeMeta?.id;
   ws.send(
     JSON.stringify({
       type: "init",
@@ -105,6 +159,9 @@ wss.on("connection", (ws) => {
         messages: activeRoom ? activeRoom.read(undefined, 100) : [],
         conversations: manager.listConversations(),
         activeConversation: activeMeta,
+        openTaskCount: activeId ? taskStore.countOpen(activeId) : 0,
+        hasUrgentTask: activeId ? taskStore.hasUrgent(activeId) : false,
+        turnGuard,
       },
     })
   );
@@ -118,7 +175,7 @@ const mcpSessions = new Map<
 
 function createMcpServer(): McpServer {
   const server = new McpServer({ name: "joind", version: "0.2.0" });
-  registerTools(server, manager);
+  registerTools(server, manager, taskStore);
   return server;
 }
 
@@ -272,14 +329,16 @@ app.get("/api/export", (_req, res) => {
 app.post("/api/join", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
-  const { name, pid, wtSession } = req.body as { name?: string; pid?: number; wtSession?: string };
-  if (!name || !pid) { res.status(400).json({ error: "name and pid required" }); return; }
-  const agent = room.join(name, pid);
+  const { name, pid, wtSession, weztermPaneId } = req.body as {
+    name?: string; pid?: number; wtSession?: string; weztermPaneId?: number;
+  };
+  if (!name || (!pid && weztermPaneId == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
+  const agent = room.join(name, pid || 0, weztermPaneId);
   const activeId = manager.getActiveId();
   if (activeId) manager.bindAgent(name, activeId);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
-  res.json({ name: agent.name, pid: agent.pid, online: room.whoNames() });
+  res.json({ name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, online: room.whoNames() });
 });
 
 app.post("/api/leave", express.json(), (req, res) => {
@@ -371,12 +430,98 @@ app.post("/api/conversations/delete", express.json(), (req, res) => {
   const { id } = req.body as { id?: string };
   if (!id) { res.status(400).json({ error: "id required" }); return; }
   const ok = manager.deleteConversation(id);
+  if (ok) taskStore.deleteForConversation(id);
   res.json({ ok });
 });
 
 app.get("/api/conversations/search", (req, res) => {
   const q = (req.query.q as string) || "";
   res.json(manager.searchConversations(q));
+});
+
+// --- Task management ---
+
+app.get("/api/tasks", (req, res) => {
+  const convId = (req.query.conversation as string) || manager.getActiveId();
+  if (!convId) { res.json([]); return; }
+  const status = (req.query.status as string) || "open";
+  const assignee = req.query.assignee as string | undefined;
+  res.json(taskStore.list(convId, { status, assignee }));
+});
+
+app.get("/api/tasks/count", (req, res) => {
+  const convId = (req.query.conversation as string) || manager.getActiveId();
+  if (!convId) { res.json({ count: 0, hasUrgent: false }); return; }
+  res.json({
+    count: taskStore.countOpen(convId),
+    hasUrgent: taskStore.hasUrgent(convId),
+  });
+});
+
+app.post("/api/tasks", express.json(), (req, res) => {
+  const { title, description, creator, assignee, priority, conversation } = req.body as {
+    title?: string; description?: string; creator?: string;
+    assignee?: string; priority?: "normal" | "urgent"; conversation?: string;
+  };
+  if (!title || !creator) { res.status(400).json({ error: "title and creator required" }); return; }
+  const convId = conversation || manager.getActiveId();
+  if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
+
+  const task = taskStore.create(convId, { title, description, creator, assignee, priority });
+
+  // Post system message to chat
+  const room = manager.getRoom(convId);
+  if (room) {
+    const assignText = task.assignee ? ` for ${task.assignee}` : "";
+    const urgentText = task.priority === "urgent" ? " (urgent)" : "";
+    room.send("system", `[Task #${task.id}${assignText}] ${creator} needs: ${task.title}${urgentText}`);
+  }
+
+  res.json(task);
+});
+
+app.post("/api/tasks/update", express.json(), (req, res) => {
+  const { id, status, response, respondedBy, assignee, priority, conversation } = req.body as {
+    id?: number; status?: "open" | "done"; response?: string;
+    respondedBy?: string; assignee?: string; priority?: "normal" | "urgent";
+    conversation?: string;
+  };
+  if (id == null) { res.status(400).json({ error: "id required" }); return; }
+  const convId = conversation || manager.getActiveId();
+  if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
+
+  const task = taskStore.update(convId, id, { status, response, respondedBy, assignee, priority });
+  if (!task) { res.status(404).json({ error: "Task not found" }); return; }
+
+  // Post system message if task was resolved
+  if (status === "done" && response) {
+    const room = manager.getRoom(convId);
+    if (room) {
+      room.send("system", `[Task #${task.id} done] ${respondedBy ?? "someone"} responded: ${response.slice(0, 200)}`);
+    }
+  }
+
+  res.json(task);
+});
+
+// --- Turn guard settings ---
+
+app.get("/api/turn-guard", (_req, res) => {
+  res.json(turnGuard);
+});
+
+app.post("/api/turn-guard", express.json(), (req, res) => {
+  const { enabled, limit } = req.body as { enabled?: boolean; limit?: number };
+  if (enabled !== undefined) turnGuard.enabled = enabled;
+  if (limit !== undefined) turnGuard.limit = Math.max(1, Math.min(100, Math.round(limit)));
+  saveTurnGuard(turnGuard);
+  applyTurnGuard();
+  // Broadcast to all WS clients
+  const msg = JSON.stringify({ type: "turn-guard", data: turnGuard });
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+  res.json(turnGuard);
 });
 
 // --- Agent REST API (MCP-free path for Claude Code agents) ---
@@ -388,35 +533,38 @@ function agentRoom(name: string, res: express.Response) {
     const room = manager.getRoom(convId);
     if (room) return { room, convId };
   }
-  // Fallback to active conversation
-  const activeId = manager.getActiveId();
-  if (activeId) {
-    const room = manager.getRoom(activeId);
-    if (room) return { room, convId: activeId };
-  }
+  // No fallback — agent must join first to avoid cross-conversation pollution
   res.status(400).json({ error: "Not in a conversation. Call /api/agent/join first." });
   return null;
 }
 
 app.post("/api/agent/join", express.json(), async (req, res) => {
-  let { name, pid, conversation, wtSession } = req.body as {
-    name?: string; pid?: number; conversation?: string; wtSession?: string;
+  let { name, pid, conversation, wtSession, weztermPaneId } = req.body as {
+    name?: string; pid?: number; conversation?: string; wtSession?: string; weztermPaneId?: number;
   };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
 
-  // Auto-detect PID if not provided
-  if (!pid || pid === 0) {
+  // Auto-detect PID/paneId if not provided
+  if (!pid && weztermPaneId == null) {
     try {
       const terminals = await discoverTerminals();
       const allRooms = manager.listConversations().map(c => manager.getRoom(c.id)).filter(Boolean);
       const takenPids = new Set<number>();
-      for (const r of allRooms) { if (r) for (const a of r.who()) takenPids.add(a.pid); }
-      const available = terminals.filter(t => t.type === "claude" && !takenPids.has(t.pid));
+      const takenPanes = new Set<number>();
+      for (const r of allRooms) { if (r) for (const a of r.who()) {
+        if (a.pid) takenPids.add(a.pid);
+        if (a.weztermPaneId != null) takenPanes.add(a.weztermPaneId);
+      }}
+      const available = terminals.filter(t =>
+        t.type === "claude" &&
+        (t.weztermPaneId != null ? !takenPanes.has(t.weztermPaneId) : !takenPids.has(t.pid))
+      );
       if (available.length === 1) {
         pid = available[0].pid;
+        weztermPaneId = available[0].weztermPaneId;
       } else if (available.length > 1) {
         res.status(300).json({
-          error: "Multiple Claude Code processes found. Specify pid.",
+          error: "Multiple Claude Code processes found. Specify pid or weztermPaneId.",
           terminals: available,
         });
         return;
@@ -432,25 +580,52 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   if (!convId) {
     const meta = manager.createConversation();
     convId = meta.id;
+    manager.setActive(convId); // First conversation — make it active for web UI
   }
 
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
 
-  const agent = room.join(name, pid || 0);
+  // Auto-detect WezTerm pane if not provided
+  if (weztermPaneId == null && await checkWezTerm()) {
+    try {
+      const panes = await discoverWezTerm();
+      const claimedPanes = new Set<number>();
+      for (const c of manager.listConversations()) {
+        const r = manager.getRoom(c.id);
+        if (r) for (const a of r.who()) if (a.weztermPaneId != null) claimedPanes.add(a.weztermPaneId);
+      }
+      const unclaimed = panes.filter(p => p.weztermPaneId != null && !claimedPanes.has(p.weztermPaneId!) && p.type !== "unknown");
+      if (unclaimed.length === 1) {
+        weztermPaneId = unclaimed[0].weztermPaneId;
+        console.log(`  [wezterm] Auto-detected pane ${weztermPaneId} for ${name}`);
+      }
+    } catch { /* best effort */ }
+  }
+
+  const agent = room.join(name, pid || 0, weztermPaneId);
   manager.bindAgent(name, convId);
   room.touch(name);
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
+  // Name the WezTerm tab if available
+  if (weztermPaneId != null) {
+    const wtEnv = Object.keys(getWeztermEnv()).length > 0 ? { ...process.env, ...getWeztermEnv() } : undefined;
+    execFileAsync(getWeztermPath(), ["cli", "set-tab-title", name, "--pane-id", String(weztermPaneId)], { env: wtEnv })
+      .catch(() => {});
+  }
+
   const meta = manager.getMeta(convId);
-  const msgs = room.read(undefined, 1);
-  const lastId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
+  const recent = room.read(undefined, 15);
+  const lastId = recent.length > 0 ? recent[recent.length - 1].id : 0;
 
   res.json({
     ok: true,
     conversation: { id: convId, name: meta?.name ?? convId },
     online: room.whoNames(),
     lastMessageId: lastId,
+    recentMessages: recent,
+    totalMessages: room.messageCount(),
   });
 });
 
@@ -485,7 +660,7 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
   const { name } = req.body as { name?: string };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
   const convId = manager.getAgentBinding(name);
-  const room = convId ? manager.getRoom(convId) : manager.getActiveRoom();
+  const room = convId ? manager.getRoom(convId) : undefined;
   if (room) room.leave(name);
   manager.unbindAgent(name);
   res.json({ ok: true });

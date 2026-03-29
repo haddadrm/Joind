@@ -15,6 +15,9 @@
 
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { join } from "path";
+import { readdirSync, existsSync } from "fs";
+import { homedir } from "os";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,6 +29,7 @@ export interface TerminalInfo {
   type: "claude" | "codex" | "gemini" | "openclaw" | "unknown";
   tabTitle?: string;
   wtSession?: string;
+  weztermPaneId?: number;
 }
 
 interface RawProcess {
@@ -358,14 +362,186 @@ k.AttachConsole(0xFFFFFFFF)
 }
 
 // ---------------------------------------------------------------------------
+// WezTerm discovery — clean pane enumeration via CLI
+// ---------------------------------------------------------------------------
+
+interface WezTermPane {
+  pane_id: number;
+  tab_id: number;
+  window_id: number;
+  workspace: string;
+  title: string;      // process title (e.g. "claude.exe")
+  tab_title: string;  // user/programmatic tab title (empty if not set)
+  cwd: string;        // URI format: "file:///C:/Users/..."
+  cursor_x: number;
+  cursor_y: number;
+  cursor_shape: string;
+  cursor_visibility: string;
+  is_active: boolean;
+  is_zoomed: boolean;
+  tty_name: string | null; // always null on Windows
+}
+
+let weztermAvailable: boolean | null = null;
+let weztermPath: string = "wezterm";
+let weztermEnv: Record<string, string> = {}; // extra env vars needed (WEZTERM_UNIX_SOCKET)
+let weztermLastCheck = 0;
+const WEZTERM_CHECK_INTERVAL = 30_000;
+
+/** Find the WezTerm GUI socket path (needed when running outside WezTerm). */
+function findWeztermSocket(): string | undefined {
+  // Already set in environment (inside WezTerm)
+  if (process.env.WEZTERM_UNIX_SOCKET) return process.env.WEZTERM_UNIX_SOCKET;
+  // Search the standard location for gui-sock-* files
+  const sockDir = join(homedir(), ".local", "share", "wezterm");
+  try {
+    if (!existsSync(sockDir)) return undefined;
+    const files = readdirSync(sockDir).filter(f => f.startsWith("gui-sock-"));
+    if (files.length === 1) return join(sockDir, files[0]);
+    // Multiple sockets — pick the most recent
+    if (files.length > 1) {
+      return join(sockDir, files[files.length - 1]);
+    }
+  } catch { /* ignore */ }
+  return undefined;
+}
+
+/** Resolve the wezterm executable path. */
+function findWezTermExe(): string[] {
+  const candidates = ["wezterm"];
+  if (process.platform === "win32") {
+    candidates.push(
+      "C:\\Program Files\\WezTerm\\wezterm.exe",
+      join(process.env.LOCALAPPDATA || "", "Programs", "WezTerm", "wezterm.exe"),
+    );
+    if (process.env.WEZTERM_EXECUTABLE) {
+      candidates.unshift(process.env.WEZTERM_EXECUTABLE.replace(/wezterm-gui\.exe$/i, "wezterm.exe"));
+    }
+  }
+  return candidates;
+}
+
+async function checkWezTerm(): Promise<boolean> {
+  const now = Date.now();
+  if (weztermAvailable !== null && (now - weztermLastCheck) < WEZTERM_CHECK_INTERVAL) {
+    return weztermAvailable;
+  }
+  weztermLastCheck = now;
+
+  // Build env with socket path if needed
+  const socketPath = findWeztermSocket();
+  const env = socketPath ? { ...process.env, WEZTERM_UNIX_SOCKET: socketPath } : undefined;
+
+  for (const candidate of findWezTermExe()) {
+    try {
+      await execFileAsync(candidate, ["cli", "list", "--format", "json"], {
+        timeout: 3000,
+        env,
+      });
+      if (!weztermAvailable) {
+        console.log(`  WezTerm detected at ${candidate}${socketPath ? ` (socket: ${socketPath})` : ""}`);
+      }
+      weztermPath = candidate;
+      weztermEnv = socketPath ? { WEZTERM_UNIX_SOCKET: socketPath } : {};
+      weztermAvailable = true;
+      return true;
+    } catch { /* try next */ }
+  }
+
+  if (weztermAvailable !== false) {
+    console.log("  WezTerm not found in PATH or common locations");
+  }
+  weztermAvailable = false;
+  return false;
+}
+
+/** Get the resolved wezterm executable path. */
+export function getWeztermPath(): string { return weztermPath; }
+
+/** Get extra env vars needed for wezterm CLI (socket path). */
+export function getWeztermEnv(): Record<string, string> { return weztermEnv; }
+
+export async function discoverWezTerm(): Promise<TerminalInfo[]> {
+  try {
+    const env = Object.keys(weztermEnv).length > 0 ? { ...process.env, ...weztermEnv } : undefined;
+    const { stdout } = await execFileAsync(
+      weztermPath, ["cli", "list", "--format", "json"],
+      { timeout: 5000, env }
+    );
+    const panes = JSON.parse(stdout.trim()) as WezTermPane[];
+    const results: TerminalInfo[] = [];
+
+    for (const pane of panes) {
+      const title = pane.title || "";
+      const displayTitle = pane.tab_title || title; // prefer user-set tab title
+      // Match against agent patterns using the pane title (which shows the running command)
+      let matched = false;
+      for (const pattern of AGENT_PATTERNS) {
+        const byName = pattern.nameMatch?.test(title) ?? false;
+        const byCmd = pattern.cmdMatch?.test(title) ?? false;
+        if (!byName && !byCmd) continue;
+        if (SKIP_PATTERNS.some((skip) => skip.test(title))) continue;
+
+        results.push({
+          pid: 0, // WezTerm pane_id is the primary identifier, not PID
+          ppid: 0,
+          name: pattern.label,
+          command: title.length > 120 ? title.slice(0, 120) + "\u2026" : title,
+          type: pattern.type,
+          tabTitle: displayTitle,
+          weztermPaneId: pane.pane_id,
+        });
+        matched = true;
+        break;
+      }
+
+      // Also include panes that don't match agent patterns — they might be
+      // manually started agents or shells the user wants to invite
+      if (!matched) {
+        results.push({
+          pid: 0,
+          ppid: 0,
+          name: displayTitle || title.split(/[\s\\\/]/).pop()?.replace(/\.exe$/i, "") || "shell",
+          command: title.length > 120 ? title.slice(0, 120) + "\u2026" : title,
+          type: "unknown",
+          tabTitle: displayTitle || title,
+          weztermPaneId: pane.pane_id,
+        });
+      }
+    }
+
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+/** Check if WezTerm is available (cached). */
+export { checkWezTerm };
+
+// ---------------------------------------------------------------------------
 // Main discovery
 // ---------------------------------------------------------------------------
 
 export async function discoverTerminals(): Promise<TerminalInfo[]> {
-  if (process.platform === "win32") {
-    return discoverWindows();
+  const results: TerminalInfo[] = [];
+
+  // WezTerm panes (if available)
+  if (await checkWezTerm()) {
+    results.push(...await discoverWezTerm());
   }
-  return discoverUnix();
+
+  // Also discover Windows Terminal / native processes
+  if (process.platform === "win32") {
+    const native = await discoverWindows();
+    // Deduplicate: skip native entries that share a PID with a WezTerm pane
+    // (WezTerm panes have pid=0 so no overlap in practice)
+    results.push(...native);
+  } else {
+    results.push(...await discoverUnix());
+  }
+
+  return results;
 }
 
 async function discoverWindows(): Promise<TerminalInfo[]> {

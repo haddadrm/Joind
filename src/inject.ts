@@ -10,12 +10,74 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
+/** Default delays (ms) between text injection and Enter keystroke */
+const DEFAULT_DELAY_MS = 50;
+const CODEX_DELAY_MS = 300;
+
+/**
+ * Detect the process name for a given PID (Windows only).
+ * Returns lowercase process name (e.g. "codex.exe", "claude.exe") or null.
+ */
+async function getProcessName(pid: number): Promise<string | null> {
+  if (process.platform !== "win32") return null;
+  try {
+    const { stdout } = await execFileAsync(
+      "wmic",
+      ["process", "where", `ProcessId=${pid}`, "get", "Name", "/value"],
+      { timeout: 5000 }
+    );
+    const match = stdout.match(/Name=(.+)/i);
+    return match ? match[1].trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Inject text into a WezTerm pane by pane ID. Clean and reliable.
+ * Must pipe text+\r via stdin because \r in CLI args is literal, not interpreted.
+ */
+export async function injectWezTerm(paneId: number, text: string, weztermExe?: string, extraEnv?: Record<string, string>): Promise<void> {
+  const exe = weztermExe || "wezterm";
+  console.log(`  [inject:wezterm] pane=${paneId} len=${text.length}`);
+  const { spawn } = await import("child_process");
+  const env = extraEnv && Object.keys(extraEnv).length > 0 ? { ...process.env, ...extraEnv } : undefined;
+  return new Promise((resolve, reject) => {
+    const proc = spawn(exe, ["cli", "send-text", "--pane-id", String(paneId), "--no-paste"], {
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+      env,
+    });
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`wezterm send-text exit ${code}: ${stderr}`));
+    });
+    proc.on("error", reject);
+    // Pipe text + carriage return (Enter) via stdin
+    proc.stdin.write(text + "\r");
+    proc.stdin.end();
+  });
+}
+
 /**
  * Inject a text prompt + Enter into the terminal of a running process.
+ * Prefer WezTerm pane injection when paneId is provided.
  */
-export async function inject(pid: number, text: string): Promise<void> {
+export async function inject(pid: number, text: string, weztermPaneId?: number, weztermExe?: string, weztermEnv?: Record<string, string>): Promise<void> {
+  // WezTerm path — clean, no Python/ctypes needed
+  if (weztermPaneId != null) {
+    return injectWezTerm(weztermPaneId, text, weztermExe, weztermEnv);
+  }
+
   if (process.platform === "win32") {
-    await injectWindows(pid, text);
+    const procName = await getProcessName(pid);
+    const isCodex = procName === "codex.exe";
+    const delayMs = isCodex ? CODEX_DELAY_MS : DEFAULT_DELAY_MS;
+    const doubleEnter = isCodex;
+    console.log(`  [inject] target=${procName ?? "unknown"} delay=${delayMs}ms doubleEnter=${doubleEnter}`);
+    await injectWindows(pid, text, delayMs, doubleEnter);
   } else {
     await injectUnix(pid, text);
   }
@@ -25,7 +87,7 @@ export async function inject(pid: number, text: string): Promise<void> {
 // Windows: Python + ctypes (proven pattern from agentchattr)
 // ---------------------------------------------------------------------------
 
-async function injectWindows(pid: number, text: string): Promise<void> {
+async function injectWindows(pid: number, text: string, delayMs = DEFAULT_DELAY_MS, doubleEnter = false): Promise<void> {
   // Escape for Python string literal
   const escaped = text
     .replace(/\\/g, "\\\\")
@@ -112,9 +174,12 @@ for ch in text:
 written = wintypes.DWORD(0)
 kernel32.WriteConsoleInputW(handle, records, n_events, ctypes.byref(written))
 
-# Small delay then Enter
+# Configurable delay, scaled with text length (from agentchattr)
 import time
-time.sleep(0.05)
+base_delay = ${delayMs / 1000}
+delay_s = max(base_delay, len(text) * 0.001)
+double_enter = ${doubleEnter ? "True" : "False"}
+time.sleep(delay_s)
 
 def write_key(h, char, key_down, vk=0, scan=0):
     rec = _INPUT_RECORD()
@@ -131,8 +196,13 @@ def write_key(h, char, key_down, vk=0, scan=0):
 write_key(handle, '\\r', True, vk=VK_RETURN, scan=0x1C)
 write_key(handle, '\\r', False, vk=VK_RETURN, scan=0x1C)
 
+if double_enter:
+    time.sleep(delay_s)
+    write_key(handle, '\\r', True, vk=VK_RETURN, scan=0x1C)
+    write_key(handle, '\\r', False, vk=VK_RETURN, scan=0x1C)
+
 kernel32.FreeConsole()
-print(f'Injected {len(text)} chars + Enter into PID {pid}')
+print(f'Injected {len(text)} chars + Enter (delay={delay_s}s, double={double_enter}) into PID {pid}')
 `;
 
   const { stdout, stderr } = await execFileAsync("python", ["-c", script], {

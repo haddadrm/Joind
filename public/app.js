@@ -28,10 +28,9 @@ var lastSender = null; // for message grouping
 var lastScanResults = []; // cached scan results for auto-refresh
 var isMuted = JSON.parse(localStorage.getItem('joind-muted') || 'false');
 var allMessages = []; // all messages for reply lookup
-var replyingTo = null; // message we're replying to
+var replyingTo = null; // current reply target (message object or null)
 var typingNames = new Set(); // agents currently typing
 var staleNames = new Set(); // agents marked as stale
-var replyingTo = null; // current reply target (message object or null)
 
 if (typeof marked !== 'undefined') { marked.setOptions({ breaks: true, gfm: true }); }
 
@@ -114,11 +113,16 @@ function connect() {
         allMessages = (event.data.messages || []).slice();
         activeConversation = event.data.activeConversation || null;
         conversationList = event.data.conversations || [];
+        initTaskCount = event.data.openTaskCount || 0;
+        initHasUrgent = event.data.hasUrgentTask || false;
+        if (event.data.turnGuard) initTurnGuard(event.data.turnGuard);
         if (activeConversation) {
           renderPills();
           renderMessages(event.data.messages || []);
+          renderTaskBadgeFromCount(initTaskCount, initHasUrgent);
         } else {
           showNoConversation();
+          renderTaskBadgeFromCount(0, false);
         }
         renderConversationList();
         break;
@@ -129,7 +133,7 @@ function connect() {
         break;
       case 'message':
         // Filter: only render messages for the active conversation
-        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) {
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) {
           break;
         }
         hideWelcome();
@@ -141,7 +145,7 @@ function connect() {
         }
         break;
       case 'join':
-        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) break;
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         onlineNames.add(event.data.name);
         staleNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
@@ -149,7 +153,7 @@ function connect() {
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
       case 'leave':
-        if (event.conversationId && activeConversation && event.conversationId !== activeConversation.id) break;
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         onlineNames.delete(event.data.name);
         staleNames.delete(event.data.name);
         typingNames.delete(event.data.name);
@@ -159,16 +163,19 @@ function connect() {
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
       case 'rename':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         var d = event.data;
         onlineNames.delete(d.oldName); onlineNames.add(d.newName);
         agents = agents.filter(function(a) { return a.name !== d.oldName; });
         agents.push(d.agent); renderPills();
         break;
       case 'role':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         agents = agents.map(function(a) { return a.name === event.data.name ? event.data : a; });
         renderPills();
         break;
       case 'typing':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         if (event.data.typing) {
           typingNames.add(event.data.name);
         } else {
@@ -177,8 +184,25 @@ function connect() {
         renderPills();
         break;
       case 'stale':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         staleNames.add(event.data.name);
         renderPills();
+        break;
+      case 'task-created':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        tasks.push(event.data);
+        renderTaskBadge();
+        if (taskPanelOpen) renderTaskPanel();
+        if (event.data.priority === 'urgent') playSound('alert-tone');
+        break;
+      case 'task-updated':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        tasks = tasks.map(function(t) { return t.id === event.data.id ? event.data : t; });
+        renderTaskBadge();
+        if (taskPanelOpen) renderTaskPanel();
+        break;
+      case 'turn-guard':
+        initTurnGuard(event.data);
         break;
     }
   };
@@ -605,7 +629,10 @@ function renderContent(parent, text) {
     var html = marked.parse(text);
     html = html.replace(/@(\w[\w-]*)/g, function(match, name) {
       var c = getSenderColor(name);
-      return '<span class="mention" style="color:' + c + ';background:' + c + '20">@' + name + '</span>';
+      var safe = name.replace(/[<>"'&]/g, function(ch) {
+        return {'<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;",'&':'&amp;'}[ch] || ch;
+      });
+      return '<span class="mention" style="color:' + c + ';background:' + c + '20">@' + safe + '</span>';
     });
     parent.innerHTML = html;
   } else {
@@ -1085,15 +1112,19 @@ function renderTerminals(terminals) {
     var li = document.createElement('li'); li.className = 'terminal-item';
     var type = document.createElement('span'); type.className = 'terminal-type ' + t.type; type.textContent = t.type;
     var info = document.createElement('div'); info.className = 'terminal-info';
-    var joinedAgent = agents.find(function(a) { return a.pid === t.pid; });
+    var joinedAgent = agents.find(function(a) {
+      if (t.weztermPaneId != null && a.weztermPaneId != null) return a.weztermPaneId === t.weztermPaneId;
+      return t.pid && a.pid === t.pid;
+    });
     var displayTitle = t.tabTitle || (joinedAgent ? joinedAgent.name : null);
     if (displayTitle) {
       var title = document.createElement('span'); title.className = 'terminal-tab-title'; title.textContent = displayTitle;
       info.appendChild(title);
     }
-    var pid = document.createElement('span'); pid.className = 'terminal-pid'; pid.textContent = 'PID ' + t.pid;
+    var idLabel = t.weztermPaneId != null ? 'Pane ' + t.weztermPaneId : 'PID ' + t.pid;
+    var pid = document.createElement('span'); pid.className = 'terminal-pid'; pid.textContent = idLabel;
     info.appendChild(pid);
-    var joined = agents.some(function(a) { return a.pid === t.pid; });
+    var joined = !!joinedAgent;
     var inv = document.createElement('button'); inv.className = 'terminal-invite';
     inv.textContent = joined ? 'Joined' : 'Invite'; inv.disabled = joined;
     if (!joined) inv.addEventListener('click', function() { inviteTerminal(t); });
@@ -1107,6 +1138,7 @@ function inviteTerminal(t) {
     if (!name) return;
     var payload = { name: name, pid: t.pid };
     if (t.wtSession) payload.wtSession = t.wtSession;
+    if (t.weztermPaneId != null) payload.weztermPaneId = t.weztermPaneId;
     fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   });
 }
@@ -1408,6 +1440,10 @@ function selectConversation(id) {
           scrollToBottom();
         }
         renderConversationList();
+        // Refresh tasks for the new conversation
+        tasks = [];
+        loadTaskCount(activeConversation.id);
+        if (taskPanelOpen) loadTasks(activeConversation.id);
       }
     });
 }
@@ -1786,6 +1822,370 @@ function refreshSessionStatus() {
 
 // Poll session status while active
 setInterval(refreshSessionStatus, 3000);
+
+// --- Task System ---
+var tasks = [];
+var taskFilter = 'open';
+var taskPanelOpen = false;
+var initTaskCount = 0;
+var initHasUrgent = false;
+
+function renderTaskBadge() {
+  var openCount = tasks.filter(function(t) { return t.status === 'open'; }).length;
+  var hasUrgent = tasks.some(function(t) { return t.status === 'open' && t.priority === 'urgent'; });
+  renderTaskBadgeFromCount(openCount, hasUrgent);
+}
+
+function renderTaskBadgeFromCount(count, hasUrgent) {
+  var badge = document.getElementById('task-badge');
+  var countEl = document.getElementById('task-badge-count');
+  if (!badge || !countEl) return;
+  countEl.textContent = count;
+  badge.classList.toggle('has-tasks', count > 0);
+  badge.classList.toggle('has-urgent', hasUrgent);
+}
+
+function loadTaskCount(convId) {
+  fetch('/api/tasks/count?conversation=' + encodeURIComponent(convId))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      renderTaskBadgeFromCount(data.count || 0, data.hasUrgent || false);
+    })
+    .catch(function() { /* leave badge as-is on failure */ });
+}
+
+function loadTasks(convId) {
+  var status = taskFilter === 'all' ? 'all' : taskFilter;
+  fetch('/api/tasks?conversation=' + encodeURIComponent(convId) + '&status=' + status)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      tasks = data || [];
+      renderTaskBadge();
+      renderTaskPanel();
+    });
+}
+
+function toggleTaskPanel() {
+  var panel = document.getElementById('task-panel');
+  taskPanelOpen = !taskPanelOpen;
+  panel.classList.toggle('hidden', !taskPanelOpen);
+  if (taskPanelOpen && activeConversation) {
+    loadTasks(activeConversation.id);
+  }
+  if (window.lucide) lucide.createIcons({ root: panel });
+}
+
+function setTaskFilter(filter, btn) {
+  taskFilter = filter;
+  var tabs = document.querySelectorAll('.task-tab');
+  tabs.forEach(function(t) { t.classList.toggle('active', t.getAttribute('data-filter') === filter); });
+  if (activeConversation) loadTasks(activeConversation.id);
+}
+
+function renderTaskPanel() {
+  var body = document.getElementById('task-panel-body');
+  if (!body) return;
+  body.textContent = '';
+
+  var filtered = tasks.filter(function(t) {
+    if (taskFilter === 'all') return true;
+    return t.status === taskFilter;
+  });
+
+  if (filtered.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'task-panel-empty';
+    empty.textContent = taskFilter === 'open' ? 'No open tasks' : 'No completed tasks';
+    body.appendChild(empty);
+    return;
+  }
+
+  filtered.sort(function(a, b) {
+    if (a.status === 'open' && b.status === 'open') {
+      if (a.priority === 'urgent' && b.priority !== 'urgent') return -1;
+      if (b.priority === 'urgent' && a.priority !== 'urgent') return 1;
+    }
+    return b.createdAt - a.createdAt;
+  });
+
+  filtered.forEach(function(task) {
+    body.appendChild(renderTaskCard(task));
+  });
+
+  if (window.lucide) lucide.createIcons({ root: body });
+}
+
+function renderTaskCard(task) {
+  var card = document.createElement('div');
+  card.className = 'task-card' + (task.priority === 'urgent' && task.status === 'open' ? ' urgent' : '') + (task.status === 'done' ? ' done' : '');
+
+  var header = document.createElement('div');
+  header.className = 'task-card-header';
+
+  var idEl = document.createElement('span');
+  idEl.className = 'task-card-id';
+  idEl.textContent = '#' + task.id;
+  header.appendChild(idEl);
+
+  var title = document.createElement('span');
+  title.className = 'task-card-title';
+  title.textContent = task.title;
+  title.title = task.title;
+  header.appendChild(title);
+
+  if (task.priority === 'urgent' && task.status === 'open') {
+    var pri = document.createElement('span');
+    pri.className = 'task-card-priority urgent';
+    pri.textContent = 'urgent';
+    header.appendChild(pri);
+  }
+
+  card.appendChild(header);
+
+  var meta = document.createElement('div');
+  meta.className = 'task-card-meta';
+  var ago = timeAgo(task.createdAt);
+  var parts = ['from: ' + task.creator];
+  if (task.assignee) parts.push('for: ' + task.assignee);
+  if (task.status === 'done' && task.respondedBy) parts.push('answered: ' + task.respondedBy);
+  parts.push(ago);
+  meta.textContent = parts.join(' \u00b7 ');
+  card.appendChild(meta);
+
+  if (task.description) {
+    var desc = document.createElement('div');
+    desc.className = 'task-card-desc';
+    desc.textContent = task.description;
+    card.appendChild(desc);
+  }
+
+  if (task.status === 'done' && task.response) {
+    var resp = document.createElement('div');
+    resp.className = 'task-card-response';
+    resp.textContent = task.response;
+    card.appendChild(resp);
+  }
+
+  if (task.status === 'open') {
+    var respond = document.createElement('div');
+    respond.className = 'task-respond';
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'task-respond-input';
+    input.placeholder = 'Your response...';
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        submitTaskResponse(task.id, input.value);
+      }
+    });
+
+    var btn = document.createElement('button');
+    btn.className = 'task-respond-btn';
+    btn.title = 'Complete task';
+    var checkIcon = document.createElement('i');
+    checkIcon.setAttribute('data-lucide', 'check');
+    checkIcon.setAttribute('width', '14');
+    checkIcon.setAttribute('height', '14');
+    btn.appendChild(checkIcon);
+    btn.addEventListener('click', function() {
+      submitTaskResponse(task.id, input.value);
+    });
+
+    respond.appendChild(input);
+    respond.appendChild(btn);
+    card.appendChild(respond);
+  }
+
+  return card;
+}
+
+function submitTaskResponse(taskId, response) {
+  if (!activeConversation) return;
+  var text = (response || '').trim();
+  if (!text) {
+    // Focus the input to hint the user should type something
+    var input = document.querySelector('.task-card .task-respond-input');
+    if (input) { input.focus(); input.placeholder = 'Type a response first...'; }
+    return;
+  }
+  var senderName = document.getElementById('sender-name').value || 'human';
+  fetch('/api/tasks/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: taskId,
+      status: 'done',
+      response: text,
+      respondedBy: senderName,
+      conversation: activeConversation.id
+    })
+  }).then(function(r) { return r.json(); }).then(function(task) {
+    if (task.error) return;
+    tasks = tasks.map(function(t) { return t.id === task.id ? task : t; });
+    renderTaskBadge();
+    renderTaskPanel();
+  });
+}
+
+function showCreateTaskForm() {
+  var body = document.getElementById('task-panel-body');
+  if (!body || body.querySelector('.task-create-form')) return;
+
+  var form = document.createElement('div');
+  form.className = 'task-create-form';
+
+  // Title
+  var titleLabel = document.createElement('label');
+  titleLabel.textContent = 'Title';
+  form.appendChild(titleLabel);
+  var titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'task-create-title';
+  titleInput.placeholder = 'What do you need?';
+  form.appendChild(titleInput);
+
+  // Description
+  var descLabel = document.createElement('label');
+  descLabel.textContent = 'Details (optional)';
+  form.appendChild(descLabel);
+  var descInput = document.createElement('textarea');
+  descInput.className = 'task-create-desc';
+  descInput.placeholder = 'Context or question...';
+  descInput.rows = 2;
+  form.appendChild(descInput);
+
+  // Assignee
+  var assignLabel = document.createElement('label');
+  assignLabel.textContent = 'Assign to';
+  form.appendChild(assignLabel);
+  var assignSelect = document.createElement('select');
+  assignSelect.className = 'task-create-assignee';
+  var anyOpt = document.createElement('option');
+  anyOpt.value = '';
+  anyOpt.textContent = '(anyone)';
+  assignSelect.appendChild(anyOpt);
+  agents.forEach(function(a) {
+    var opt = document.createElement('option');
+    opt.value = a.name;
+    opt.textContent = a.name;
+    assignSelect.appendChild(opt);
+  });
+  form.appendChild(assignSelect);
+
+  // Priority
+  var priRow = document.createElement('div');
+  priRow.className = 'task-priority-row';
+  ['normal', 'urgent'].forEach(function(val) {
+    var label = document.createElement('label');
+    var radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'task-priority';
+    radio.value = val;
+    if (val === 'normal') radio.checked = true;
+    label.appendChild(radio);
+    label.appendChild(document.createTextNode(' ' + val));
+    priRow.appendChild(label);
+  });
+  form.appendChild(priRow);
+
+  // Buttons
+  var btnRow = document.createElement('div');
+  btnRow.className = 'task-create-btns';
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn btn-sm task-create-cancel';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', function() { form.remove(); });
+  var submitBtn = document.createElement('button');
+  submitBtn.className = 'btn btn-send';
+  submitBtn.style.cssText = 'padding:4px 12px;width:auto;height:auto;font-size:11px;';
+  submitBtn.textContent = 'Create';
+  submitBtn.addEventListener('click', function() {
+    var title = titleInput.value.trim();
+    if (!title) { titleInput.focus(); return; }
+    createTask({
+      title: title,
+      description: descInput.value.trim() || undefined,
+      assignee: assignSelect.value || undefined,
+      priority: form.querySelector('input[name="task-priority"]:checked').value
+    });
+    form.remove();
+  });
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(submitBtn);
+  form.appendChild(btnRow);
+
+  body.insertBefore(form, body.firstChild);
+  titleInput.focus();
+
+  titleInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); submitBtn.click(); }
+  });
+}
+
+function createTask(opts) {
+  if (!activeConversation) return;
+  var senderName = document.getElementById('sender-name').value || 'human';
+  fetch('/api/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: opts.title,
+      description: opts.description,
+      creator: senderName,
+      assignee: opts.assignee,
+      priority: opts.priority || 'normal',
+      conversation: activeConversation.id
+    })
+  });
+}
+
+// --- Turn Guard ---
+var turnGuardState = { enabled: false, limit: 20 };
+
+function initTurnGuard(settings) {
+  if (!settings) return;
+  turnGuardState = settings;
+  var toggle = document.getElementById('turn-guard-toggle');
+  var spinner = document.getElementById('turn-guard-limit');
+  if (toggle) toggle.checked = settings.enabled;
+  if (spinner) {
+    spinner.value = settings.limit;
+    spinner.disabled = !settings.enabled;
+  }
+}
+
+function toggleTurnGuard(enabled) {
+  turnGuardState.enabled = enabled;
+  var spinner = document.getElementById('turn-guard-limit');
+  if (spinner) spinner.disabled = !enabled;
+  saveTurnGuard();
+}
+
+function setTurnGuardLimit(val) {
+  var n = Math.max(1, Math.min(100, parseInt(val) || 20));
+  turnGuardState.limit = n;
+  var spinner = document.getElementById('turn-guard-limit');
+  if (spinner) spinner.value = n;
+  saveTurnGuard();
+}
+
+function saveTurnGuard() {
+  fetch('/api/turn-guard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(turnGuardState)
+  });
+}
+
+function timeAgo(ts) {
+  var diff = Math.floor((Date.now() - ts) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
 
 // --- Init ---
 document.addEventListener('DOMContentLoaded', function() {

@@ -63,13 +63,13 @@ export class ConversationManager extends EventEmitter {
         if (!this.meta.has(id)) {
           const fullPath = join(this.dataDir, file);
           const stat = statSync(fullPath);
-          // Estimate message count from file size (~150 bytes per message avg)
-          const estimatedCount = Math.max(1, Math.round(stat.size / 150));
+          // Count actual lines for accurate message count (only runs at startup for orphan files)
+          const lineCount = Math.max(1, readFileSync(fullPath, "utf-8").split("\n").filter((l: string) => l.trim()).length);
           this.meta.set(id, {
             id,
             name: id,
             createdAt: stat.birthtimeMs || Date.now(),
-            messageCount: estimatedCount,
+            messageCount: lineCount,
             starred: false,
           });
         }
@@ -91,19 +91,26 @@ export class ConversationManager extends EventEmitter {
   // Conversation lifecycle
   // -----------------------------------------------------------------------
 
+  private validateName(name: string): string {
+    const cleaned = name.trim().replace(/\s+/g, " ");
+    if (cleaned.length === 0) return "New conversation";
+    if (cleaned.length > 100) return cleaned.slice(0, 100);
+    return cleaned;
+  }
+
   createConversation(name?: string): ConversationMeta {
     const now = new Date();
     const id = "c-" + now.toISOString().replace(/[:.]/g, "-").replace("Z", "").slice(0, 19) +
       "-" + Math.random().toString(36).slice(2, 6);
     const meta: ConversationMeta = {
       id,
-      name: name || "New conversation",
+      name: this.validateName(name || "New conversation"),
       createdAt: now.getTime(),
       messageCount: 0,
       starred: false,
     };
     this.meta.set(id, meta);
-    this.activeId = id;
+    // Don't auto-switch active — callers choose when to switch
     this.getOrCreateRoom(id); // ensure room exists
     this.saveIndex();
     this.emitGlobal("conversation-created", meta);
@@ -129,6 +136,7 @@ export class ConversationManager extends EventEmitter {
         }
       });
       this.conversations.set(id, room);
+      this.emit("room-created", room);
     }
     return room;
   }
@@ -137,12 +145,13 @@ export class ConversationManager extends EventEmitter {
   autoName(id: string, text: string): void {
     const m = this.meta.get(id);
     if (!m || m.name !== "New conversation") return;
-    m.name = text.slice(0, 60).replace(/\n/g, " ").trim() || "New conversation";
+    m.name = this.validateName(text.slice(0, 60));
     this.saveIndex();
     this.emitGlobal("conversation-renamed", m);
   }
 
   getRoom(id: string): ChatRoom | undefined {
+    if (!this.meta.has(id)) return undefined; // Prevent ghost-room resurrection
     return this.getOrCreateRoom(id);
   }
 
@@ -205,7 +214,7 @@ export class ConversationManager extends EventEmitter {
   renameConversation(id: string, name: string): boolean {
     const m = this.meta.get(id);
     if (!m) return false;
-    m.name = name;
+    m.name = this.validateName(name);
     this.saveIndex();
     this.emitGlobal("conversation-renamed", m);
     return true;
@@ -222,6 +231,9 @@ export class ConversationManager extends EventEmitter {
   deleteConversation(id: string): boolean {
     const m = this.meta.get(id);
     if (!m) return false;
+    // Destroy room (clears stale-sweep interval + typing timeouts)
+    const room = this.conversations.get(id);
+    if (room) room.destroy();
     // Remove JSONL file
     const filePath = join(this.dataDir, id + ".jsonl");
     try { unlinkSync(filePath); } catch { /* ok */ }
