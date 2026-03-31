@@ -190,6 +190,19 @@ function connect() {
         staleNames.add(event.data.name);
         renderPills();
         break;
+      case 'message-deleted':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        var delId = event.data.id;
+        allMessages = allMessages.filter(function(m) { return m.id !== delId; });
+        var delEl = document.querySelector('.message[data-id="' + delId + '"]');
+        if (delEl) {
+          delEl.style.transition = 'opacity 0.2s, max-height 0.3s';
+          delEl.style.opacity = '0';
+          delEl.style.maxHeight = delEl.offsetHeight + 'px';
+          setTimeout(function() { delEl.style.maxHeight = '0'; delEl.style.padding = '0'; delEl.style.margin = '0'; }, 200);
+          setTimeout(function() { delEl.remove(); }, 500);
+        }
+        break;
       case 'task-created':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         tasks.push(event.data);
@@ -605,6 +618,24 @@ function appendMessage(msg, scroll) {
       });
     });
     actions.appendChild(copyBtn);
+
+    var delBtn = document.createElement('button');
+    delBtn.className = 'msg-action-btn msg-action-delete';
+    delBtn.title = 'Delete message';
+    var delIcon = document.createElement('i');
+    delIcon.setAttribute('data-lucide', 'trash-2');
+    delIcon.setAttribute('width', '14');
+    delIcon.setAttribute('height', '14');
+    delBtn.appendChild(delIcon);
+    delBtn.addEventListener('click', function() {
+      if (!confirm('Delete message #' + msg.id + '?')) return;
+      fetch('/api/messages/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: msg.id })
+      });
+    });
+    actions.appendChild(delBtn);
 
     el.dataset.id = msg.id;
     el.appendChild(av); el.appendChild(body); el.appendChild(actions);

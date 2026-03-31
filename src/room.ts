@@ -4,9 +4,11 @@
  */
 
 import { EventEmitter } from "events";
+import { writeFileSync } from "fs";
+import { dirname } from "path";
 import { inject } from "./inject.js";
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
-import { loadMessages, appendMessage, maxId } from "./persist.js";
+import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
 export interface ChatMessage {
   id: number;
@@ -182,6 +184,21 @@ export class ChatRoom extends EventEmitter {
 
   getMessageById(id: number): ChatMessage | undefined {
     return this.messages.find((m) => m.id === id);
+  }
+
+  deleteMessage(id: number): boolean {
+    const idx = this.messages.findIndex((m) => m.id === id);
+    if (idx === -1) return false;
+    this.messages.splice(idx, 1);
+    // Rewrite JSONL without the deleted message
+    if (this.chatFile) {
+      ensureDir(dirname(this.chatFile));
+      const content = this.messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
+      writeFileSync(this.chatFile, content, "utf-8");
+    }
+    this.emit("room", { type: "message-deleted", data: { id } } as unknown as RoomEvent);
+    console.log(`  [delete] Message #${id} removed`);
+    return true;
   }
 
   who(): Agent[] {

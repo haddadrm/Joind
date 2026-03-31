@@ -286,6 +286,15 @@ app.get("/api/messages", (_req, res) => {
   res.json(room?.read(undefined, 100) ?? []);
 });
 
+app.post("/api/messages/delete", express.json(), (req, res) => {
+  const room = activeRoom(res);
+  if (!room) return;
+  const { id } = req.body as { id?: number };
+  if (id == null) { res.status(400).json({ error: "id required" }); return; }
+  const ok = room.deleteMessage(id);
+  res.json({ ok });
+});
+
 app.get("/api/who", (_req, res) => {
   const room = manager.getActiveRoom();
   res.json(room?.who() ?? []);
