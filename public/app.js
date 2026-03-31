@@ -31,6 +31,8 @@ var allMessages = []; // all messages for reply lookup
 var replyingTo = null; // current reply target (message object or null)
 var typingNames = new Set(); // agents currently typing
 var staleNames = new Set(); // agents marked as stale
+var autoScroll = true; // tracks if user is near bottom
+var unreadCount = 0; // messages received while scrolled up
 
 if (typeof marked !== 'undefined') { marked.setOptions({ breaks: true, gfm: true }); }
 
@@ -618,7 +620,12 @@ function appendMessage(msg, scroll) {
 
   c.appendChild(el);
   if (window.lucide) lucide.createIcons({ root: el });
-  if (scroll) scrollToBottom();
+  if (scroll && autoScroll) {
+    scrollToBottom();
+  } else if (scroll && !autoScroll) {
+    unreadCount++;
+    updateNewMsgsPill();
+  }
   addCodeCopyButtons(el);
 }
 
@@ -678,6 +685,43 @@ function addCodeCopyButtons(container) {
 
 function scrollToBottom() {
   var c = document.getElementById('messages'); c.scrollTop = c.scrollHeight;
+}
+
+// Smart scroll guard — don't steal focus when user is reading history
+(function() {
+  var c = document.getElementById('messages');
+  if (!c) return;
+  c.addEventListener('scroll', function() {
+    var distFromBottom = c.scrollHeight - c.scrollTop - c.clientHeight;
+    if (distFromBottom < 60) {
+      autoScroll = true;
+      if (unreadCount > 0) {
+        unreadCount = 0;
+        updateNewMsgsPill();
+      }
+    } else {
+      autoScroll = false;
+    }
+  });
+})();
+
+function updateNewMsgsPill() {
+  var pill = document.getElementById('new-msgs-pill');
+  var countEl = document.getElementById('new-msgs-count');
+  if (!pill || !countEl) return;
+  if (unreadCount > 0 && !autoScroll) {
+    countEl.textContent = unreadCount;
+    pill.classList.remove('hidden');
+  } else {
+    pill.classList.add('hidden');
+  }
+}
+
+function jumpToBottom() {
+  scrollToBottom();
+  autoScroll = true;
+  unreadCount = 0;
+  updateNewMsgsPill();
 }
 
 // --- Image upload ---
