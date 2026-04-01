@@ -461,7 +461,7 @@ function showPopover(anchor, agent) {
   // Remove button
   var removeBtn = document.createElement('button');
   removeBtn.className = 'pop-remove';
-  removeBtn.textContent = 'Remove from chat';
+  removeBtn.textContent = 'Dismiss';
   removeBtn.addEventListener('click', function() {
     kickAgent(agent.name); closePopover();
   });
@@ -1183,26 +1183,32 @@ function renderTerminals(terminals) {
     var e = document.createElement('li'); e.className = 'empty-state'; e.textContent = 'No agents found';
     list.appendChild(e); return;
   }
-  terminals.forEach(function(t) {
+  // Filter out WezTerm panes — only show PID-based entries
+  var filtered = terminals.filter(function(t) { return t.pid > 0; });
+  if (filtered.length === 0) {
+    var e2 = document.createElement('li'); e2.className = 'empty-state'; e2.textContent = 'No agents found';
+    list.appendChild(e2); return;
+  }
+  filtered.forEach(function(t) {
     var li = document.createElement('li'); li.className = 'terminal-item';
     var type = document.createElement('span'); type.className = 'terminal-type ' + t.type; type.textContent = t.type;
     var info = document.createElement('div'); info.className = 'terminal-info';
-    var joinedAgent = agents.find(function(a) {
-      if (t.weztermPaneId != null && a.weztermPaneId != null) return a.weztermPaneId === t.weztermPaneId;
-      return t.pid && a.pid === t.pid;
-    });
+    var joinedAgent = agents.find(function(a) { return t.pid && a.pid === t.pid; });
     var displayTitle = t.tabTitle || (joinedAgent ? joinedAgent.name : null);
     if (displayTitle) {
       var title = document.createElement('span'); title.className = 'terminal-tab-title'; title.textContent = displayTitle;
       info.appendChild(title);
     }
-    var idLabel = t.weztermPaneId != null ? 'Pane ' + t.weztermPaneId : 'PID ' + t.pid;
-    var pid = document.createElement('span'); pid.className = 'terminal-pid'; pid.textContent = idLabel;
+    var pid = document.createElement('span'); pid.className = 'terminal-pid'; pid.textContent = 'PID ' + t.pid;
     info.appendChild(pid);
     var joined = !!joinedAgent;
     var inv = document.createElement('button'); inv.className = 'terminal-invite';
-    inv.textContent = joined ? 'Joined' : 'Invite'; inv.disabled = joined;
-    if (!joined) inv.addEventListener('click', function() { inviteTerminal(t); });
+    inv.textContent = joined ? 'Dismiss' : 'Invite';
+    inv.classList.toggle('joined', joined);
+    inv.addEventListener('click', function() {
+      if (joined) { kickAgent(joinedAgent.name); }
+      else { inviteTerminal(t); }
+    });
     li.appendChild(type); li.appendChild(info); li.appendChild(inv); list.appendChild(li);
   });
 }

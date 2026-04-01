@@ -357,6 +357,16 @@ body {
   box-shadow: 0 0 8px rgba(124,58,237,0.3);
 }
 .terminal-invite:disabled { opacity: 0.3; cursor: default; }
+.terminal-invite.joined {
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+.terminal-invite.joined:hover {
+  color: #ef4444;
+  border-color: rgba(239,68,68,0.3);
+  background: rgba(239,68,68,0.08);
+  box-shadow: none;
+}
 
 .quick-actions { display: flex; gap: 3px; }
 .btn-action {
