@@ -55,8 +55,8 @@ export async function injectWezTerm(paneId: number, text: string, weztermExe?: s
       else reject(new Error(`wezterm send-text exit ${code}: ${stderr}`));
     });
     proc.on("error", reject);
-    // Pipe text + carriage return (Enter) via stdin
-    proc.stdin.write(text + "\r");
+    // Pipe text + newline via stdin (\n works more reliably across TUIs than \r)
+    proc.stdin.write(text + "\n");
     proc.stdin.end();
   });
 }
@@ -74,8 +74,9 @@ export async function inject(pid: number, text: string, weztermPaneId?: number, 
   if (process.platform === "win32") {
     const procName = await getProcessName(pid);
     const isCodex = procName === "codex.exe";
-    const delayMs = isCodex ? CODEX_DELAY_MS : DEFAULT_DELAY_MS;
-    const doubleEnter = isCodex;
+    const isCopilot = procName?.includes("copilot") ?? false;
+    const delayMs = (isCodex || isCopilot) ? CODEX_DELAY_MS : DEFAULT_DELAY_MS;
+    const doubleEnter = isCodex || isCopilot;
     console.log(`  [inject] target=${procName ?? "unknown"} delay=${delayMs}ms doubleEnter=${doubleEnter}`);
     await injectWindows(pid, text, delayMs, doubleEnter);
   } else {
