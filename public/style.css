@@ -1712,45 +1712,56 @@ body {
 }
 
 /* --- Role management sidebar --- */
-/* Search bar */
+/* Search overlay */
 .search-bar {
-  padding: 8px 12px;
-  background: rgba(24, 24, 27, 0.95);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  padding: 12px 16px;
+  background: rgba(9, 9, 11, 0.96);
+  backdrop-filter: blur(16px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  position: relative;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 .search-bar.hidden { display: none; }
 .search-bar input {
   flex: 1;
   min-width: 200px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   font-size: 13px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
+  font-family: inherit;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
   color: #e4e4e7;
   outline: none;
+  transition: border-color 0.15s;
 }
-.search-bar input:focus { border-color: rgba(167, 139, 250, 0.4); }
-.search-close { cursor: pointer; color: #71717a; }
+.search-bar input:focus { border-color: rgba(167, 139, 250, 0.4); box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.1); }
+.search-close { cursor: pointer; color: #52525b; transition: color 0.15s; }
 .search-close:hover { color: #e4e4e7; }
 .search-results {
   width: 100%;
-  max-height: 300px;
+  max-height: 320px;
   overflow-y: auto;
+  margin-top: 4px;
 }
+.search-results:empty { display: none; }
 .search-result-item {
   display: flex;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 8px 10px;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 6px;
   font-size: 12px;
   align-items: baseline;
+  transition: background 0.12s;
 }
 .search-result-item:hover { background: rgba(255, 255, 255, 0.06); }
 .search-result-sender { font-weight: 600; white-space: nowrap; }
@@ -1758,7 +1769,7 @@ body {
 .search-result-id { color: #52525b; font-size: 10px; white-space: nowrap; }
 .message.highlight { animation: msg-highlight 2s ease-out; }
 @keyframes msg-highlight {
-  0% { background: rgba(167, 139, 250, 0.2); }
+  0% { background: rgba(167, 139, 250, 0.15); }
   100% { background: transparent; }
 }
 

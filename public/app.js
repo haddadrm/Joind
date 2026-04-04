@@ -175,6 +175,13 @@ function connect() {
         onlineNames.delete(d.oldName); onlineNames.add(d.newName);
         agents = agents.filter(function(a) { return a.name !== d.oldName; });
         agents.push(d.agent); renderPills();
+        // Update cached terminal data with new name
+        lastScanResults.forEach(function(t) {
+          if (t.tabTitle === d.oldName) t.tabTitle = d.newName;
+          if (t.pid === d.agent.pid) t.tabTitle = d.newName;
+          if (t.weztermPaneId != null && t.weztermPaneId === d.agent.weztermPaneId) t.tabTitle = d.newName;
+        });
+        if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
       case 'role':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
@@ -1330,13 +1337,38 @@ function updateSendBtn() {
 }
 
 // --- Terminal scanner ---
+var autoScanInterval = null;
+var autoScanRunning = false;
+
 function scanTerminals() {
   var btn = document.getElementById('scan-btn');
   btn.textContent = '...'; btn.disabled = true;
   fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
     lastScanResults = t;
     renderTerminals(t); btn.textContent = 'Scan'; btn.disabled = false;
+    // Start auto-scan after first manual scan
+    if (!autoScanInterval) startAutoScan();
   }).catch(function() { lastScanResults = []; renderTerminals([]); btn.textContent = 'Scan'; btn.disabled = false; });
+}
+
+function startAutoScan() {
+  if (autoScanInterval) return;
+  autoScanInterval = setInterval(autoScanTerminals, 15000);
+}
+
+function autoScanTerminals() {
+  if (autoScanRunning) return;
+  autoScanRunning = true;
+  fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
+    autoScanRunning = false;
+    // Only re-render if something changed (compare by pid+paneId+tabTitle fingerprint)
+    var oldFp = lastScanResults.map(function(x) { return x.pid + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
+    var newFp = t.map(function(x) { return x.pid + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
+    if (oldFp !== newFp) {
+      lastScanResults = t;
+      renderTerminals(t);
+    }
+  }).catch(function() { autoScanRunning = false; });
 }
 
 function renderTerminals(terminals) {
