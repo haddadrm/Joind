@@ -1858,7 +1858,12 @@ body {
 }
 .settings-tab:hover { color: #a1a1aa; }
 .settings-tab.active { color: #a78bfa; border-bottom-color: #a78bfa; }
-.settings-panel { padding-top: 8px; }
+.settings-panel {
+  padding: 8px 0 4px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
 
 /* --- Role management --- */
 .role-subsection-label {

@@ -917,9 +917,10 @@ function openSettings(evt, defaultTab) {
   var anchor = evt ? (evt.currentTarget || evt.target) : null;
   var pop = document.createElement('div');
   pop.className = 'pill-popover settings-popover';
-  pop.style.width = '290px';
-  pop.style.maxHeight = '480px';
-  pop.style.overflowY = 'auto';
+  pop.style.width = '320px';
+  pop.style.height = '440px';
+  pop.style.display = 'flex';
+  pop.style.flexDirection = 'column';
   pop.addEventListener('click', function(e) { e.stopPropagation(); });
 
   // Tab bar
@@ -1153,33 +1154,11 @@ function openSettings(evt, defaultTab) {
 
   pop.appendChild(rolesPanel);
 
-  // Append to body, then position relative to the Config button
+  // Always center the settings dialog
   document.body.appendChild(pop);
   var popRect = pop.getBoundingClientRect();
-
-  if (anchor) {
-    var rect = anchor.getBoundingClientRect();
-    // Position to the right of the sidebar button, aligned to its top
-    var left = rect.right + 6;
-    var top = rect.top;
-    // If it overflows right edge, position to the left of the button instead
-    if (left + popRect.width > window.innerWidth - 8) {
-      left = rect.left - popRect.width - 6;
-    }
-    // If it overflows bottom, shift up
-    if (top + popRect.height > window.innerHeight - 8) {
-      top = window.innerHeight - popRect.height - 8;
-    }
-    // Clamp top
-    top = Math.max(8, top);
-    left = Math.max(8, left);
-    pop.style.top = top + 'px';
-    pop.style.left = left + 'px';
-  } else {
-    // Fallback: center of viewport
-    pop.style.top = Math.max(8, (window.innerHeight - popRect.height) / 2) + 'px';
-    pop.style.left = Math.max(8, (window.innerWidth - popRect.width) / 2) + 'px';
-  }
+  pop.style.top = Math.max(8, (window.innerHeight - popRect.height) / 2) + 'px';
+  pop.style.left = Math.max(8, (window.innerWidth - popRect.width) / 2) + 'px';
 
   openPopover = pop;
 }
