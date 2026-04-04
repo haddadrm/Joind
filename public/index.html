@@ -37,6 +37,7 @@
           <div class="quick-actions">
             <button class="btn btn-action" id="mute-btn" onclick="toggleMute()" title="Toggle sound"><i data-lucide="volume-2" width="18" height="18"></i></button>
             <button class="btn btn-action" onclick="openSoundSettings(event)" title="Sound settings"><i data-lucide="settings" width="18" height="18"></i></button>
+            <button class="btn btn-action" onclick="toggleSearch()" title="Search messages"><i data-lucide="search" width="18" height="18"></i></button>
             <button class="btn btn-action" onclick="exportChat()" title="Export chat"><i data-lucide="download" width="18" height="18"></i></button>
             <button class="btn btn-action" onclick="clearChat()" title="Clear chat view"><i data-lucide="trash-2" width="18" height="18"></i></button>
           </div>
@@ -93,6 +94,11 @@
       </aside>
 
       <main class="chat-area">
+        <div class="search-bar hidden" id="search-bar">
+          <input type="text" id="search-input" placeholder="Search messages..." spellcheck="false" />
+          <span class="search-close" onclick="closeSearch()"><i data-lucide="x" width="16" height="16"></i></span>
+          <div id="search-results" class="search-results"></div>
+        </div>
         <div class="chat-messages" id="messages">
           <div class="welcome-message" id="welcome">
             <div class="welcome-glyph">

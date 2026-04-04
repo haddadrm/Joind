@@ -26,7 +26,7 @@ export interface TerminalInfo {
   ppid: number;
   name: string;
   command: string;
-  type: "claude" | "codex" | "gemini" | "openclaw" | "unknown";
+  type: "claude" | "codex" | "gemini" | "openclaw" | "copilot" | "unknown";
   tabTitle?: string;
   wtSession?: string;
   weztermPaneId?: number;
@@ -56,6 +56,7 @@ const AGENT_PATTERNS: Array<{
   { nameMatch: /^codex\.exe$/i, type: "codex", label: "Codex" },
   { cmdMatch: /gemini-cli/i, type: "gemini", label: "Gemini" },
   { cmdMatch: /openclaw\.mjs.*tui/i, type: "openclaw", label: "OpenClaw" },
+  { cmdMatch: /copilot/i, type: "copilot", label: "Copilot" },
 ];
 
 const SKIP_PATTERNS = [

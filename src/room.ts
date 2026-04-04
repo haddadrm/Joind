@@ -17,6 +17,9 @@ export interface ChatMessage {
   timestamp: number;
   image?: string;
   replyTo?: number;
+  tag?: string;
+  pinned?: boolean;
+  to?: string[];  // targeted recipients (DM-style visibility)
 }
 
 export interface Agent {
@@ -25,6 +28,7 @@ export interface Agent {
   joinedAt: number;
   active: boolean;
   role?: string;
+  status?: string;
   lastSeen: number;
   weztermPaneId?: number;
 }
@@ -39,6 +43,8 @@ export class ChatRoom extends EventEmitter {
   private agents = new Map<string, Agent>();
   private nextId = 1;
   private typingState = new Map<string, NodeJS.Timeout>();
+  private statusTimeouts = new Map<string, NodeJS.Timeout>();
+  private pendingMentions = new Map<string, NodeJS.Timeout>(); // batched mention injection
   private chatFile: string | null = null;
   private staleInterval: ReturnType<typeof setInterval> | null = null;
   private agentTurnCount = 0; // consecutive agent turns since last human message
@@ -64,12 +70,13 @@ export class ChatRoom extends EventEmitter {
     }
   }
 
-  join(name: string, pid: number, weztermPaneId?: number): Agent {
+  join(name: string, pid: number, weztermPaneId?: number, persistedRole?: string): Agent {
     const existing = this.agents.get(name);
     if (existing) {
       existing.active = true;
       existing.pid = pid;
       if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
+      if (!existing.role && persistedRole) existing.role = persistedRole;
       existing.lastSeen = Date.now();
       this.emit("room", { type: "join", data: existing } as RoomEvent);
       return existing;
@@ -80,6 +87,7 @@ export class ChatRoom extends EventEmitter {
       pid,
       joinedAt: Date.now(),
       active: true,
+      role: persistedRole,
       lastSeen: Date.now(),
       weztermPaneId,
     };
@@ -99,7 +107,7 @@ export class ChatRoom extends EventEmitter {
     }
   }
 
-  send(sender: string, text: string, opts?: { image?: string; replyTo?: number }): ChatMessage {
+  send(sender: string, text: string, opts?: { image?: string; replyTo?: number; to?: string[] }): ChatMessage {
     const msg: ChatMessage = {
       id: this.nextId++,
       sender,
@@ -108,6 +116,7 @@ export class ChatRoom extends EventEmitter {
     };
     if (opts?.image) msg.image = opts.image;
     if (opts?.replyTo) msg.replyTo = opts.replyTo;
+    if (opts?.to && opts.to.length > 0) msg.to = opts.to;
 
     this.messages.push(msg);
     this.persist(msg);
@@ -141,9 +150,17 @@ export class ChatRoom extends EventEmitter {
         this.emit("room", { type: "turn-guard", data: { count: this.agentTurnCount, limit: this.turnGuard.limit } } as unknown as RoomEvent);
       }
     } else {
-      this.injectMentions(sender, targets).catch((err) => {
-        console.error(`  ✗ Mention injection error: ${err}`);
-      });
+      // Batch mentions: collect for 2s before injecting to reduce noise
+      for (const target of targets) {
+        if (this.pendingMentions.has(target)) continue; // already queued
+        const timeout = setTimeout(() => {
+          this.pendingMentions.delete(target);
+          this.injectMentions(sender, [target]).catch((err) => {
+            console.error(`  ✗ Mention injection error: ${err}`);
+          });
+        }, 2000);
+        this.pendingMentions.set(target, timeout);
+      }
     }
 
     console.log(`  [#${msg.id} ${sender}] ${text}`);
@@ -155,11 +172,14 @@ export class ChatRoom extends EventEmitter {
       const agent = this.agents.get(name);
       if (agent?.active && agent.name !== sender) {
         const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
+        const pidParam = agent.pid ? `&pid=${agent.pid}` : "";
+        const paneParam = agent.weztermPaneId != null ? `&paneId=${agent.weztermPaneId}` : "";
+        const pidBody = agent.pid ? `,"pid":${agent.pid}` : "";
         const prompt =
           `[joind] @${name} mentioned by ${sender}.${roleHint} ` +
-          `Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${name}&since=0" — ` +
+          `Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${name}&since=0${pidParam}${paneParam}" — ` +
           `Reply: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" ` +
-          `-d '{"sender":"${name}","text":"YOUR_REPLY"}'`;
+          `-d '{"sender":"${name}","text":"YOUR_REPLY"${pidBody}}'`;
         const target = agent.weztermPaneId != null ? `pane:${agent.weztermPaneId}` : `PID:${agent.pid}`;
         console.log(`  → Injecting into ${name} (${target})...`);
         try {
@@ -175,11 +195,19 @@ export class ChatRoom extends EventEmitter {
     }
   }
 
-  read(since?: number, limit = 50): ChatMessage[] {
+  read(since?: number, limit = 50, from?: string, viewer?: string): ChatMessage[] {
+    let msgs = this.messages;
     if (since != null) {
-      return this.messages.filter((m) => m.id > since).slice(-limit);
+      msgs = msgs.filter((m) => m.id > since);
     }
-    return this.messages.slice(-limit);
+    if (from) {
+      msgs = msgs.filter((m) => m.sender === from);
+    }
+    // Filter DMs: only show messages addressed to the viewer or public messages
+    if (viewer) {
+      msgs = msgs.filter((m) => !m.to || m.to.includes(viewer) || m.sender === viewer);
+    }
+    return msgs.slice(-limit);
   }
 
   getMessageById(id: number): ChatMessage | undefined {
@@ -285,6 +313,74 @@ export class ChatRoom extends EventEmitter {
     return agent;
   }
 
+  setStatus(name: string, status: string): Agent | null {
+    const agent = this.agents.get(name);
+    if (!agent) return null;
+    agent.status = status || undefined;
+    // Auto-clear status after 10 minutes
+    const existing = this.statusTimeouts.get(name);
+    if (existing) clearTimeout(existing);
+    if (status) {
+      const timeout = setTimeout(() => {
+        agent.status = undefined;
+        this.statusTimeouts.delete(name);
+        this.emit("room", { type: "agent-status", data: agent } as unknown as RoomEvent);
+      }, 600000);
+      this.statusTimeouts.set(name, timeout);
+    } else {
+      this.statusTimeouts.delete(name);
+    }
+    this.emit("room", { type: "agent-status", data: agent } as unknown as RoomEvent);
+    return agent;
+  }
+
+  search(query: string, limit = 20): Array<{ message: ChatMessage; matchIndex: number }> {
+    const q = query.toLowerCase();
+    const results: Array<{ message: ChatMessage; matchIndex: number }> = [];
+    // Reverse iteration — newest first
+    for (let i = this.messages.length - 1; i >= 0 && results.length < limit; i--) {
+      const m = this.messages[i];
+      const idx = m.text.toLowerCase().indexOf(q);
+      if (idx >= 0) {
+        results.push({ message: m, matchIndex: idx });
+      }
+    }
+    return results;
+  }
+
+  updateMessageText(messageId: number, newText: string): ChatMessage | null {
+    const msg = this.messages.find(m => m.id === messageId);
+    if (!msg) return null;
+    msg.text = newText;
+    return msg;
+  }
+
+  tagMessage(messageId: number, tag: string): ChatMessage | null {
+    const msg = this.messages.find(m => m.id === messageId);
+    if (!msg) return null;
+    msg.tag = tag || undefined;
+    return msg;
+  }
+
+  pinMessage(messageId: number, pinned: boolean): ChatMessage | null {
+    const msg = this.messages.find(m => m.id === messageId);
+    if (!msg) return null;
+    msg.pinned = pinned;
+    this.emit("room", { type: "message-pinned", data: { id: messageId, pinned } } as unknown as RoomEvent);
+    return msg;
+  }
+
+  getPinnedMessages(): ChatMessage[] {
+    return this.messages.filter(m => m.pinned);
+  }
+
+  addSessionMarker(markerType: "start" | "end", label?: string): ChatMessage {
+    const text = markerType === "start"
+      ? `--- Session started${label ? ": " + label : ""} ---`
+      : `--- Session ended${label ? ": " + label : ""} ---`;
+    return this.addSystem(text);
+  }
+
   messageCount(): number {
     return this.messages.length;
   }
@@ -297,7 +393,7 @@ export class ChatRoom extends EventEmitter {
     this.agentTurnCount = 0;
   }
 
-  private addSystem(text: string): void {
+  addSystem(text: string): ChatMessage {
     const msg: ChatMessage = {
       id: this.nextId++,
       sender: "system",
@@ -308,6 +404,7 @@ export class ChatRoom extends EventEmitter {
     this.persist(msg);
     this.emit("room", { type: "message", data: msg } as RoomEvent);
     console.log(`  [system] ${text}`);
+    return msg;
   }
 
   private extractMentions(text: string): string[] {
@@ -319,5 +416,7 @@ export class ChatRoom extends EventEmitter {
   destroy(): void {
     if (this.staleInterval) clearInterval(this.staleInterval);
     for (const t of this.typingState.values()) clearTimeout(t);
+    for (const t of this.statusTimeouts.values()) clearTimeout(t);
+    for (const t of this.pendingMentions.values()) clearTimeout(t);
   }
 }

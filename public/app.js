@@ -11,7 +11,10 @@ var SENDER_COLORS = {
   claude: '#da7756', commander: '#da7756', 'commander-claude': '#da7756',
   codex: '#10a37f', gemini: '#4285f4', paris: '#4285f4',
   openclaw: '#9b59b6', jadzia: '#9b59b6',
+  copilot: '#1f6feb',
 };
+
+var availableRoles = { preset: [], custom: [] };
 
 var SOUNDS = ['soft-chime','bright-ping','gentle-pop','alert-tone','pluck','click','warm-bell','none'];
 var soundCache = {};
@@ -118,6 +121,8 @@ function connect() {
         initTaskCount = event.data.openTaskCount || 0;
         initHasUrgent = event.data.hasUrgentTask || false;
         if (event.data.turnGuard) initTurnGuard(event.data.turnGuard);
+        if (event.data.roles) { availableRoles = event.data.roles; }
+        if (event.data.reactions) allReactions = event.data.reactions;
         if (activeConversation) {
           renderPills();
           renderMessages(event.data.messages || []);
@@ -219,6 +224,34 @@ function connect() {
       case 'turn-guard':
         initTurnGuard(event.data);
         break;
+      case 'roles-updated':
+        availableRoles = event.data;
+        break;
+      case 'agent-status':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        agents = agents.map(function(a) { return a.name === event.data.name ? event.data : a; });
+        renderPills();
+        break;
+      case 'reaction':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        // Update local reaction cache
+        if (event.data.action === 'added') {
+          allReactions.push({ messageId: event.data.messageId, emoji: event.data.emoji, sender: event.data.sender, timestamp: Date.now() });
+        } else {
+          allReactions = allReactions.filter(function(r) {
+            return !(r.messageId === event.data.messageId && r.emoji === event.data.emoji && r.sender === event.data.sender);
+          });
+        }
+        var rRow = document.querySelector('.msg-reactions[data-message-id="' + event.data.messageId + '"]');
+        if (rRow) {
+          var msgR = allReactions.filter(function(r) { return r.messageId === event.data.messageId; });
+          renderReactionRow(rRow, event.data.messageId, msgR);
+        }
+        break;
+      case 'message-edited':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        handleMessageEdited(event.data);
+        break;
     }
   };
   ws.onclose = function() { dot.classList.add('disconnected'); setTimeout(connect, 2000); };
@@ -246,13 +279,18 @@ function renderPills() {
     name.className = 'pill-name'; name.style.color = color;
     name.textContent = a.name;
 
+    pill.appendChild(dot); pill.appendChild(name);
     if (a.role) {
       var role = document.createElement('span');
       role.className = 'pill-role';
       role.textContent = a.role;
-      pill.appendChild(dot); pill.appendChild(name); pill.appendChild(role);
-    } else {
-      pill.appendChild(dot); pill.appendChild(name);
+      pill.appendChild(role);
+    }
+    if (a.status) {
+      var statusEl = document.createElement('span');
+      statusEl.className = 'pill-status';
+      statusEl.textContent = a.status;
+      pill.appendChild(statusEl);
     }
 
     pill.addEventListener('click', function(e) {
@@ -331,25 +369,9 @@ function showPopover(anchor, agent) {
   renameRow.appendChild(renameLabel); renameRow.appendChild(renameInput);
   pop.appendChild(renameRow);
 
-  // Role — preset buttons + custom input
-  var PRESET_ROLES = [
-    {emoji: '\uD83D\uDD0D', label: 'reviewer'},
-    {emoji: '\uD83C\uDFD7\uFE0F', label: 'architect'},
-    {emoji: '\u2B50', label: 'lead'},
-    {emoji: '\uD83D\uDCCA', label: 'analyst'},
-    {emoji: '\u26A0\uFE0F', label: 'critic'},
-    {emoji: '\uD83D\uDCA1', label: 'creative'},
-    {emoji: '\uD83D\uDEE0\uFE0F', label: 'builder'},
-    {emoji: '\uD83C\uDFAF', label: 'moderator'},
-    {emoji: '\uD83D\uDD2C', label: 'researcher'},
-    {emoji: '\uD83C\uDFBC', label: 'orchestrator'},
-    {emoji: '\uD83D\uDC1B', label: 'debugger'},
-    {emoji: '\uD83E\uDDEA', label: 'tester'},
-    {emoji: '\uD83D\uDCDD', label: 'planner'},
-    {emoji: '\uD83D\uDCD6', label: 'scribe'},
-    {emoji: '\uD83D\uDE08', label: 'devil-advocate'},
-    {emoji: '\u274C', label: 'clear'},
-  ];
+  // Role — dynamic from server + clear button
+  var allRoles = (availableRoles.preset || []).concat(availableRoles.custom || []);
+  allRoles.push({emoji: '\u274C', label: 'clear'});
 
   var roleSection = document.createElement('div');
   roleSection.className = 'pop-role-section';
@@ -368,7 +390,7 @@ function showPopover(anchor, agent) {
 
   var roleGrid = document.createElement('div');
   roleGrid.className = 'pop-role-grid';
-  PRESET_ROLES.forEach(function(r) {
+  allRoles.forEach(function(r) {
     var btn = document.createElement('button');
     btn.className = 'pop-role-btn' + (agent.role === r.label ? ' active' : '');
     btn.textContent = r.emoji + ' ' + r.label;
@@ -588,10 +610,37 @@ function appendMessage(msg, scroll) {
       tw.appendChild(img);
     }
 
+    // Edited badge
+    if (msg.edited) {
+      var editedBadge = document.createElement('span');
+      editedBadge.className = 'msg-edited-badge';
+      editedBadge.textContent = '(edited)';
+      editedBadge.title = 'Message has been edited';
+      tw.appendChild(editedBadge);
+    }
+
     body.appendChild(hdr); body.appendChild(tw);
+
+    // Reactions row
+    var reactRow = document.createElement('div');
+    reactRow.className = 'msg-reactions';
+    reactRow.dataset.messageId = msg.id;
+    body.appendChild(reactRow);
 
     var actions = document.createElement('div');
     actions.className = 'msg-actions';
+
+    // React button
+    var reactBtn = document.createElement('button');
+    reactBtn.className = 'msg-action-btn';
+    reactBtn.title = 'React';
+    var reactIcon = document.createElement('i');
+    reactIcon.setAttribute('data-lucide', 'smile-plus');
+    reactIcon.setAttribute('width', '14');
+    reactIcon.setAttribute('height', '14');
+    reactBtn.appendChild(reactIcon);
+    reactBtn.addEventListener('click', function() { showReactPicker(msg.id, reactBtn); });
+    actions.appendChild(reactBtn);
 
     // Reply button
     var replyBtn = document.createElement('button');
@@ -852,20 +901,51 @@ function exportChat() {
 
 // --- Global sound setting (popover, not prompt) ---
 function openSoundSettings(evt) {
+  openSettings(evt, 'sounds');
+}
+
+function openSettings(evt, defaultTab) {
   if (evt) evt.stopPropagation();
   closePopover();
   var anchor = evt ? (evt.currentTarget || evt.target) : null;
   var pop = document.createElement('div');
-  pop.className = 'pill-popover';
-  pop.style.width = '260px';
-  pop.style.maxHeight = '400px';
+  pop.className = 'pill-popover settings-popover';
+  pop.style.width = '290px';
+  pop.style.maxHeight = '480px';
   pop.style.overflowY = 'auto';
   pop.addEventListener('click', function(e) { e.stopPropagation(); });
 
-  var hdr = document.createElement('div');
-  hdr.className = 'pop-header';
-  hdr.textContent = 'Sound Settings';
-  pop.appendChild(hdr);
+  // Tab bar
+  var tabBar = document.createElement('div');
+  tabBar.className = 'settings-tab-bar';
+  var soundsTab = document.createElement('button');
+  soundsTab.className = 'settings-tab' + (defaultTab !== 'roles' ? ' active' : '');
+  soundsTab.textContent = 'Sounds';
+  var rolesTab = document.createElement('button');
+  rolesTab.className = 'settings-tab' + (defaultTab === 'roles' ? ' active' : '');
+  rolesTab.textContent = 'Roles';
+  tabBar.appendChild(soundsTab);
+  tabBar.appendChild(rolesTab);
+  pop.appendChild(tabBar);
+
+  // Panels
+  var soundsPanel = document.createElement('div');
+  soundsPanel.className = 'settings-panel';
+  if (defaultTab === 'roles') soundsPanel.style.display = 'none';
+  var rolesPanel = document.createElement('div');
+  rolesPanel.className = 'settings-panel';
+  if (defaultTab !== 'roles') rolesPanel.style.display = 'none';
+
+  soundsTab.addEventListener('click', function() {
+    soundsTab.classList.add('active'); rolesTab.classList.remove('active');
+    soundsPanel.style.display = ''; rolesPanel.style.display = 'none';
+  });
+  rolesTab.addEventListener('click', function() {
+    rolesTab.classList.add('active'); soundsTab.classList.remove('active');
+    rolesPanel.style.display = ''; soundsPanel.style.display = 'none';
+  });
+
+  // === Sounds panel content ===
 
   // Global sound
   var globalRow = document.createElement('div');
@@ -889,7 +969,7 @@ function openSoundSettings(evt) {
   });
   globalRow.appendChild(globalLabel);
   globalRow.appendChild(globalSelect);
-  pop.appendChild(globalRow);
+  soundsPanel.appendChild(globalRow);
 
   // Mute toggle
   var muteRow = document.createElement('div');
@@ -907,7 +987,7 @@ function openSoundSettings(evt) {
   });
   muteRow.appendChild(muteLabel);
   muteRow.appendChild(muteCheck);
-  pop.appendChild(muteRow);
+  soundsPanel.appendChild(muteRow);
 
   // Preview button
   var previewBtn = document.createElement('button');
@@ -921,14 +1001,14 @@ function openSoundSettings(evt) {
     playSound('_preview');
     isMuted = wasMuted;
   });
-  pop.appendChild(previewBtn);
+  soundsPanel.appendChild(previewBtn);
 
   // Per-agent section
   if (agents.length > 0) {
     var agentDivider = document.createElement('div');
     agentDivider.style.borderTop = '1px solid var(--border)';
     agentDivider.style.margin = '0';
-    pop.appendChild(agentDivider);
+    soundsPanel.appendChild(agentDivider);
 
     var agentHdr = document.createElement('div');
     agentHdr.className = 'pop-row';
@@ -942,7 +1022,7 @@ function openSoundSettings(evt) {
     agentHdrLabel.style.fontWeight = '600';
     agentHdrLabel.textContent = 'Per Agent';
     agentHdr.appendChild(agentHdrLabel);
-    pop.appendChild(agentHdr);
+    soundsPanel.appendChild(agentHdr);
 
     agents.forEach(function(a) {
       var row = document.createElement('div');
@@ -979,9 +1059,92 @@ function openSoundSettings(evt) {
       });
       row.appendChild(lbl);
       row.appendChild(sel);
-      pop.appendChild(row);
+      soundsPanel.appendChild(row);
     });
   }
+
+  pop.appendChild(soundsPanel);
+
+  // === Roles panel content ===
+  // Presets section
+  var presetsLabel = document.createElement('div');
+  presetsLabel.className = 'role-subsection-label';
+  presetsLabel.textContent = 'Presets';
+  rolesPanel.appendChild(presetsLabel);
+
+  var presetList = document.createElement('div');
+  presetList.className = 'role-list';
+  (availableRoles.preset || []).forEach(function(r) {
+    var item = document.createElement('div');
+    item.className = 'role-item preset';
+    item.textContent = r.emoji + ' ' + r.label;
+    presetList.appendChild(item);
+  });
+  rolesPanel.appendChild(presetList);
+
+  // Custom section
+  var customLabel = document.createElement('div');
+  customLabel.className = 'role-subsection-label';
+  customLabel.style.marginTop = '10px';
+  customLabel.textContent = 'Custom';
+  rolesPanel.appendChild(customLabel);
+
+  var customList = document.createElement('div');
+  customList.className = 'role-list';
+  (availableRoles.custom || []).forEach(function(r) {
+    var item = document.createElement('div');
+    item.className = 'role-item custom';
+    var label = document.createElement('span');
+    label.textContent = r.emoji + ' ' + r.label;
+    var delBtn = document.createElement('button');
+    delBtn.className = 'role-delete-btn';
+    delBtn.textContent = '\u00D7';
+    delBtn.title = 'Delete custom role';
+    delBtn.addEventListener('click', function() {
+      fetch('/api/roles/' + encodeURIComponent(r.label), { method: 'DELETE' }).then(function() {
+        item.remove();
+      });
+    });
+    item.appendChild(label);
+    item.appendChild(delBtn);
+    customList.appendChild(item);
+  });
+  rolesPanel.appendChild(customList);
+
+  // Add new role form
+  var addForm = document.createElement('div');
+  addForm.className = 'role-add-form';
+  addForm.style.marginTop = '8px';
+  var emojiInput = document.createElement('input');
+  emojiInput.type = 'text';
+  emojiInput.className = 'role-emoji-input';
+  emojiInput.placeholder = 'emoji';
+  emojiInput.maxLength = 4;
+  var labelInput = document.createElement('input');
+  labelInput.type = 'text';
+  labelInput.className = 'role-label-input';
+  labelInput.placeholder = 'role name';
+  var addBtn = document.createElement('button');
+  addBtn.className = 'btn btn-sm';
+  addBtn.textContent = '+';
+  addBtn.addEventListener('click', function() {
+    var em = emojiInput.value.trim();
+    var lb = labelInput.value.trim();
+    if (!em || !lb) return;
+    fetch('/api/roles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emoji: em, label: lb })
+    }).then(function(resp) {
+      if (resp.ok) { emojiInput.value = ''; labelInput.value = ''; closePopover(); openSettings(null, 'roles'); }
+    });
+  });
+  addForm.appendChild(emojiInput);
+  addForm.appendChild(labelInput);
+  addForm.appendChild(addBtn);
+  rolesPanel.appendChild(addForm);
+
+  pop.appendChild(rolesPanel);
 
   // Append to body, then position relative to the Config button
   document.body.appendChild(pop);
@@ -2289,3 +2452,169 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('sidebar').classList.add('hidden');
   }
 });
+
+// renderRolesPanel is now integrated into the settings dialog
+
+// --- Reactions ---
+var QUICK_REACTIONS = ['\uD83D\uDC4D', '\u2705', '\uD83D\uDC40', '\uD83C\uDF89', '\u2764\uFE0F', '\uD83E\uDD14'];
+var allReactions = []; // loaded from init
+
+function showReactPicker(messageId, anchorEl) {
+  // Close any existing picker
+  var existing = document.querySelector('.react-picker');
+  if (existing) existing.remove();
+
+  var picker = document.createElement('div');
+  picker.className = 'react-picker';
+  QUICK_REACTIONS.forEach(function(emoji) {
+    var btn = document.createElement('button');
+    btn.className = 'react-picker-btn';
+    btn.textContent = emoji;
+    btn.addEventListener('click', function() {
+      var sender = document.getElementById('sender-name').value || 'human';
+      fetch('/api/message/' + messageId + '/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: sender, emoji: emoji })
+      });
+      picker.remove();
+    });
+    picker.appendChild(btn);
+  });
+
+  anchorEl.parentElement.appendChild(picker);
+  setTimeout(function() {
+    document.addEventListener('click', function closePicker() {
+      picker.remove();
+      document.removeEventListener('click', closePicker);
+    }, { once: true });
+  }, 10);
+}
+
+function updateReactionPills(messageId) {
+  // Refresh reaction pills from server
+  fetch('/api/message/' + messageId)
+    .then(function(r) { return r.json(); })
+    .then(function() {
+      // Fetch all reactions for the active conversation and rebuild for this message
+      if (!activeConversation) return;
+      var row = document.querySelector('.msg-reactions[data-message-id="' + messageId + '"]');
+      if (!row) return;
+      // Find reactions for this message from our local cache
+      var msgReactions = allReactions.filter(function(r) { return r.messageId === messageId; });
+      renderReactionRow(row, messageId, msgReactions);
+    });
+}
+
+function renderReactionRow(row, messageId, reactions) {
+  row.textContent = '';
+  if (!reactions || reactions.length === 0) return;
+  // Group by emoji
+  var groups = {};
+  reactions.forEach(function(r) {
+    if (!groups[r.emoji]) groups[r.emoji] = [];
+    groups[r.emoji].push(r.sender);
+  });
+  Object.keys(groups).forEach(function(emoji) {
+    var pill = document.createElement('span');
+    pill.className = 'reaction-pill';
+    pill.textContent = emoji + ' ' + groups[emoji].length;
+    pill.title = groups[emoji].join(', ');
+    pill.addEventListener('click', function() {
+      var sender = document.getElementById('sender-name').value || 'human';
+      fetch('/api/message/' + messageId + '/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: sender, emoji: emoji })
+      });
+    });
+    row.appendChild(pill);
+  });
+}
+
+function handleMessageEdited(data) {
+  // Update in-memory message
+  var msg = allMessages.find(function(m) { return m.id === data.messageId; });
+  if (msg) {
+    msg.text = data.newText;
+    msg.edited = true;
+  }
+  // Update DOM
+  var el = document.querySelector('.message[data-id="' + data.messageId + '"]');
+  if (!el) return;
+  var tw = el.querySelector('.msg-text-wrap');
+  if (tw) {
+    // Re-render text
+    tw.textContent = '';
+    renderContent(tw, data.newText);
+    // Add edited badge if not present
+    if (!tw.querySelector('.msg-edited-badge')) {
+      var badge = document.createElement('span');
+      badge.className = 'msg-edited-badge';
+      badge.textContent = '(edited)';
+      badge.title = 'Message has been edited';
+      tw.appendChild(badge);
+    }
+  }
+}
+
+// --- Search ---
+var searchDebounce = null;
+function toggleSearch() {
+  var bar = document.getElementById('search-bar');
+  bar.classList.toggle('hidden');
+  if (!bar.classList.contains('hidden')) {
+    var inp = document.getElementById('search-input');
+    inp.focus();
+    inp.addEventListener('input', function() {
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(doSearch, 300);
+    });
+  }
+}
+function closeSearch() {
+  document.getElementById('search-bar').classList.add('hidden');
+  document.getElementById('search-results').textContent = '';
+  document.getElementById('search-input').value = '';
+}
+function doSearch() {
+  var q = document.getElementById('search-input').value.trim();
+  var results = document.getElementById('search-results');
+  if (!q) { results.textContent = ''; return; }
+  fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=20')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      results.textContent = '';
+      if (!data || data.length === 0) {
+        results.textContent = 'No results';
+        return;
+      }
+      data.forEach(function(r) {
+        var item = document.createElement('div');
+        item.className = 'search-result-item';
+        var sender = document.createElement('span');
+        sender.className = 'search-result-sender';
+        sender.style.color = getSenderColor(r.message.sender);
+        sender.textContent = r.message.sender;
+        var text = document.createElement('span');
+        text.className = 'search-result-text';
+        text.textContent = r.message.text.slice(0, 120);
+        var id = document.createElement('span');
+        id.className = 'search-result-id';
+        id.textContent = '#' + r.message.id;
+        item.appendChild(sender);
+        item.appendChild(text);
+        item.appendChild(id);
+        item.addEventListener('click', function() {
+          var el = document.querySelector('.message[data-id="' + r.message.id + '"]');
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.classList.add('highlight');
+            setTimeout(function() { el.classList.remove('highlight'); }, 2000);
+          }
+          closeSearch();
+        });
+        results.appendChild(item);
+      });
+    });
+}

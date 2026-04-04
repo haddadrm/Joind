@@ -23,7 +23,7 @@ export interface ConversationMeta {
 export class ConversationManager extends EventEmitter {
   private conversations = new Map<string, ChatRoom>();
   private meta = new Map<string, ConversationMeta>();
-  private agentBindings = new Map<string, string>(); // agentName → conversationId
+  private agentBindings = new Map<string, Array<{ conversationId: string; pid?: number; paneId?: number }>>(); // agentName → bindings
   private dataDir: string;
   private indexPath: string;
   private activeId: string | null = null; // web UI's currently viewed conversation
@@ -155,14 +155,14 @@ export class ConversationManager extends EventEmitter {
     return this.getOrCreateRoom(id);
   }
 
-  getRoomForAgent(agentName: string): ChatRoom | undefined {
-    const convId = this.agentBindings.get(agentName);
+  getRoomForAgent(agentName: string, pid?: number, paneId?: number): ChatRoom | undefined {
+    const convId = this.getAgentBinding(agentName, pid, paneId);
     if (!convId) return undefined;
     return this.conversations.get(convId);
   }
 
-  getAgentConversationId(agentName: string): string | undefined {
-    return this.agentBindings.get(agentName);
+  getAgentConversationId(agentName: string, pid?: number, paneId?: number): string | undefined {
+    return this.getAgentBinding(agentName, pid, paneId);
   }
 
   // -----------------------------------------------------------------------
@@ -195,16 +195,70 @@ export class ConversationManager extends EventEmitter {
   // Agent binding
   // -----------------------------------------------------------------------
 
-  bindAgent(agentName: string, conversationId: string): void {
-    this.agentBindings.set(agentName, conversationId);
+  bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number): void {
+    let entries = this.agentBindings.get(agentName);
+    if (!entries) {
+      entries = [];
+      this.agentBindings.set(agentName, entries);
+    }
+    // Update existing entry for same pid/paneId, else same conversation, else append
+    const idx = entries.findIndex(e =>
+      (paneId != null && e.paneId === paneId) ||
+      (pid != null && pid !== 0 && e.pid === pid)
+    );
+    const convIdx = idx < 0 ? entries.findIndex(e => e.conversationId === conversationId) : -1;
+    if (idx >= 0) {
+      // Merge: keep non-zero values from both old and new
+      const old = entries[idx];
+      entries[idx] = {
+        conversationId,
+        pid: (pid && pid !== 0) ? pid : old.pid,
+        paneId: paneId != null ? paneId : old.paneId,
+      };
+    } else if (convIdx >= 0) {
+      const old = entries[convIdx];
+      entries[convIdx] = {
+        conversationId,
+        pid: (pid && pid !== 0) ? pid : old.pid,
+        paneId: paneId != null ? paneId : old.paneId,
+      };
+    } else {
+      entries.push({ conversationId, pid, paneId });
+    }
   }
 
-  unbindAgent(agentName: string): void {
-    this.agentBindings.delete(agentName);
+  unbindAgent(agentName: string, conversationId?: string): void {
+    if (!conversationId) {
+      this.agentBindings.delete(agentName);
+      return;
+    }
+    const entries = this.agentBindings.get(agentName);
+    if (!entries) return;
+    const filtered = entries.filter(e => e.conversationId !== conversationId);
+    if (filtered.length === 0) {
+      this.agentBindings.delete(agentName);
+    } else {
+      this.agentBindings.set(agentName, filtered);
+    }
   }
 
-  getAgentBinding(agentName: string): string | undefined {
-    return this.agentBindings.get(agentName);
+  getAgentBinding(agentName: string, pid?: number, paneId?: number): string | undefined {
+    const entries = this.agentBindings.get(agentName);
+    if (!entries || entries.length === 0) return undefined;
+    // Exact match by paneId (most specific)
+    if (paneId != null) {
+      const match = entries.find(e => e.paneId === paneId);
+      if (match) return match.conversationId;
+    }
+    // Exact match by pid
+    if (pid != null && pid !== 0) {
+      const match = entries.find(e => e.pid === pid);
+      if (match) return match.conversationId;
+    }
+    // Fallback: single binding = unambiguous
+    if (entries.length === 1) return entries[0].conversationId;
+    // Ambiguous — multiple bindings, no disambiguator
+    return undefined;
   }
 
   // -----------------------------------------------------------------------
@@ -241,8 +295,13 @@ export class ConversationManager extends EventEmitter {
     this.conversations.delete(id);
     this.meta.delete(id);
     // Unbind any agents in this conversation
-    for (const [agent, convId] of this.agentBindings) {
-      if (convId === id) this.agentBindings.delete(agent);
+    for (const [agent, entries] of this.agentBindings) {
+      const filtered = entries.filter(e => e.conversationId !== id);
+      if (filtered.length === 0) {
+        this.agentBindings.delete(agent);
+      } else {
+        this.agentBindings.set(agent, filtered);
+      }
     }
     // If this was active, clear
     if (this.activeId === id) this.activeId = null;

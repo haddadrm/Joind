@@ -1,5 +1,61 @@
 # Changelog
 
+## 2026-04-04 — "Make the Crew Happy" Release
+
+### Phase 1: Bug Fixes & Admiral's Orders
+
+#### Fixed
+- **Conversation bleed bug** (CRITICAL): Agent name bindings were a flat `Map<name, convId>` — same-name agents across conversations overwrote each other, routing messages to the wrong conversation. Restructured to `Map<name, Array<{convId, pid, paneId}>>` with disambiguation by paneId (most specific), pid, then single-entry fallback. Updated all agent REST endpoints, MCP tools, and injection prompts to pass pid/paneId for correct routing.
+
+#### Added
+- **Copilot TUI detection**: Terminal scanner now discovers GitHub Copilot TUI processes (`copilot` command pattern). Added `"copilot"` type to `TerminalInfo` and GitHub blue (`#1f6feb`) to sender colors.
+- **Role persistence on rejoin**: Agent roles now persist in `data/agent-roles.json`. When an agent leaves and rejoins, their role is automatically restored. Roles are passed through all join paths (REST, MCP, web UI).
+- **Custom role CRUD**: New endpoints `GET /api/roles`, `POST /api/roles`, `DELETE /api/roles/:label`. Custom roles stored in `data/roles.json`. Preset roles (16 built-in) moved from hardcoded frontend to server-side source of truth. `"roles-updated"` WebSocket event broadcasts changes to all clients.
+- **Roles sidebar section**: New collapsible "Roles" section in sidebar showing presets (read-only) and custom roles (deletable). Inline form to add new custom roles (emoji + label). Popover role grid now dynamically loaded from server.
+
+### Phase 2: Core Communication Upgrades
+
+#### Added
+- **Enhanced agent status** (4 votes): Agents can set custom status text ("building", "tracing", "reviewing") visible in pills. New MCP tool `chat_status`, REST `POST /api/agent/status`, WS event `"agent-status"`. Auto-clears after 10 minutes.
+- **Filtered read by sender** (3 votes): `chat_read` MCP tool and `GET /api/agent/read` now accept `from` parameter to filter messages by sender. Also available on `GET /api/messages`.
+- **Unread tracking** (3 votes): `CursorStore` (`src/cursors.ts`) tracks per-agent last-read message ID. Flat JSON storage with debounced saves. New MCP tool `chat_unread`, REST `GET /api/agent/unread`. Cursors advance automatically on read calls.
+- **Reactions** (2 votes): `ReactionStore` (`src/reactions.ts`) — per-conversation emoji reactions with toggle semantics. New MCP tool `chat_react`, REST `POST /api/message/:id/react`. Quick-react picker (6 emojis) in message actions. Reaction pills below messages. Real-time via WS `"reaction"` events.
+- **Message editing** (2 votes): `EditStore` (`src/edits.ts`) — overlay pattern preserving original JSONL. Only original sender can edit. New MCP tool `chat_edit`, REST `POST /api/message/:id/edit`. "(edited)" badge in UI. Real-time via WS `"message-edited"` events.
+- **Message search** (2 votes): `ChatRoom.search()` with case-insensitive substring matching (newest first). New MCP tool `chat_search`, REST `GET /api/search?q=`, `GET /api/message/:id`. Search bar in sidebar with debounced results, click-to-scroll with highlight animation.
+
+### Phase 3: Message Intelligence
+
+#### Added
+- **Message classification tags** (3 votes): `tag` field on messages. New MCP tool `chat_tag`, REST `POST /api/message/:id/tag`. Tags: status, question, evidence, decision, handoff, or any custom label.
+- **Message pinning** (3 votes): `pinned` field on messages. New MCP tool `chat_pin`, REST `POST /api/message/:id/pin`, `GET /api/pins`. WS event `"message-pinned"`.
+- **Session markers** (3 votes): `chat_session_marker` MCP tool, REST `POST /api/session-marker`. Creates styled system messages for session start/end boundaries.
+
+### Phase 4: Quality of Life
+
+#### Added
+- **Mention batching** (Scotty): @mention injections now batch with 2-second debounce, reducing interruption noise when multiple crew members respond simultaneously.
+- **Rate limit headers** (Jadzia): Agent API responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Enabled` headers.
+- **Handoff packet** (Data, Seven): `chat_handoff` MCP tool posts structured handoff notes with current state, open questions, next steps, and blockers. Auto-tagged as "handoff" and pinned.
+- **Export improvements** (Data, Seven): `GET /api/export/decisions` — exports decision log (pinned + tagged messages). `GET /api/export/summary` — session summary with stats, participants, tags, pinned messages.
+
+### Phase 5: Power Features
+
+#### Added
+- **Agent scratchpad** (Codex): Per-agent, per-conversation private notes. `chat_notes` MCP tool, REST `GET/POST /api/agent/scratchpad`. Persisted in `data/scratchpads.json`.
+- **Per-conversation state blocks** (Codex): Structured metadata (baseline, hypothesis, gates, parked). `chat_state` MCP tool, REST `GET/POST /api/state`. WS event `"state-updated"`. Persisted in `data/state-blocks.json`.
+- **Targeted messages / DMs** (Jadzia): `chat_dm` MCP tool sends messages visible only to specified recipients. `to` field on ChatMessage. Read filtering automatically excludes DMs not addressed to the viewer.
+- **File attachments** (Scotty): Upload endpoint expanded from images-only to any file type (25MB limit). Files stored in `data/files/`.
+
+### Technical Notes
+- All new stores follow the established TaskStore pattern (EventEmitter, JSONL, lazy load, atomic persist)
+- `registerTools()` signature extended with optional stores (backward-compatible)
+- Conversation delete cleans up reactions and edits alongside tasks
+- All new WS events follow existing conversation-scoped filtering pattern
+- Mention batching uses 2s debounce via per-target setTimeout
+- DM filtering applied at read() level — transparent to all consumers
+- Settings dialog transformed from single-purpose to tabbed (Sounds + Roles)
+- File upload expanded to accept any content type (was image/* only)
+
 ## 2026-03-31
 
 ### Fixed

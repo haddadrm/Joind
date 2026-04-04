@@ -24,6 +24,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ConversationManager } from "./manager.js";
 import { registerTools } from "./tools.js";
 import { TaskStore } from "./tasks.js";
+import { ReactionStore } from "./reactions.js";
+import { CursorStore } from "./cursors.js";
+import { EditStore } from "./edits.js";
 import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv } from "./terminals.js";
 import {
   loadTemplates,
@@ -80,6 +83,60 @@ function saveTurnGuard(settings: TurnGuardSettings): void {
 
 let turnGuard = loadTurnGuard();
 
+// --- Role persistence ---
+const ROLES_FILE = join(DATA_DIR, "roles.json");
+const AGENT_ROLES_FILE = join(DATA_DIR, "agent-roles.json");
+
+interface CustomRole { emoji: string; label: string; }
+
+const PRESET_ROLES: CustomRole[] = [
+  { emoji: "\uD83D\uDD0D", label: "reviewer" },
+  { emoji: "\uD83C\uDFD7\uFE0F", label: "architect" },
+  { emoji: "\u2B50", label: "lead" },
+  { emoji: "\uD83D\uDCCA", label: "analyst" },
+  { emoji: "\u26A0\uFE0F", label: "critic" },
+  { emoji: "\uD83D\uDCA1", label: "creative" },
+  { emoji: "\uD83D\uDEE0\uFE0F", label: "builder" },
+  { emoji: "\uD83C\uDFAF", label: "moderator" },
+  { emoji: "\uD83D\uDD2C", label: "researcher" },
+  { emoji: "\uD83C\uDFBC", label: "orchestrator" },
+  { emoji: "\uD83D\uDC1B", label: "debugger" },
+  { emoji: "\uD83E\uDDEA", label: "tester" },
+  { emoji: "\uD83D\uDCDD", label: "planner" },
+  { emoji: "\uD83D\uDCD6", label: "scribe" },
+  { emoji: "\uD83D\uDE08", label: "devil-advocate" },
+];
+
+function loadCustomRoles(): CustomRole[] {
+  try {
+    if (existsSync(ROLES_FILE)) {
+      const data = JSON.parse(readFileSync(ROLES_FILE, "utf8"));
+      return data.custom ?? [];
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+function saveCustomRoles(roles: CustomRole[]): void {
+  try { writeFileSync(ROLES_FILE, JSON.stringify({ custom: roles }, null, 2)); } catch { /* ignore */ }
+}
+
+function loadAgentRoles(): Record<string, string> {
+  try {
+    if (existsSync(AGENT_ROLES_FILE)) {
+      return JSON.parse(readFileSync(AGENT_ROLES_FILE, "utf8"));
+    }
+  } catch { /* ignore */ }
+  return {};
+}
+
+function saveAgentRoles(roles: Record<string, string>): void {
+  try { writeFileSync(AGENT_ROLES_FILE, JSON.stringify(roles, null, 2)); } catch { /* ignore */ }
+}
+
+let customRoles = loadCustomRoles();
+const agentRoles = loadAgentRoles();
+
 /** Push turn guard settings to all loaded rooms */
 function applyTurnGuard(): void {
   for (const conv of manager.listConversations()) {
@@ -88,9 +145,12 @@ function applyTurnGuard(): void {
   }
 }
 
-// --- Conversation manager + task store ---
+// --- Conversation manager + stores ---
 const manager = new ConversationManager(DATA_DIR);
 const taskStore = new TaskStore(DATA_DIR);
+const reactionStore = new ReactionStore(join(DATA_DIR, "conversations"));
+const cursorStore = new CursorStore(DATA_DIR);
+const editStore = new EditStore(join(DATA_DIR, "conversations"));
 
 // --- HTTP + WebSocket server ---
 const app = express();
@@ -134,6 +194,22 @@ taskStore.on("task", (event) => {
   }
 });
 
+// Forward reaction events to WebSocket clients
+reactionStore.on("reaction", (event) => {
+  const msg = JSON.stringify(event);
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+});
+
+// Forward edit events to WebSocket clients
+editStore.on("edit", (event) => {
+  const msg = JSON.stringify(event);
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+});
+
 // Forward global events (conversation created/renamed/deleted)
 manager.on("global", (event) => {
   const msg = JSON.stringify(event);
@@ -162,6 +238,8 @@ wss.on("connection", (ws) => {
         openTaskCount: activeId ? taskStore.countOpen(activeId) : 0,
         hasUrgentTask: activeId ? taskStore.hasUrgent(activeId) : false,
         turnGuard,
+        roles: { preset: PRESET_ROLES, custom: customRoles },
+        reactions: activeId ? reactionStore.getForConversation(activeId) : [],
       },
     })
   );
@@ -175,7 +253,7 @@ const mcpSessions = new Map<
 
 function createMcpServer(): McpServer {
   const server = new McpServer({ name: "joind", version: "0.2.0" });
-  registerTools(server, manager, taskStore);
+  registerTools(server, manager, taskStore, (name) => agentRoles[name], reactionStore, cursorStore, editStore);
   return server;
 }
 
@@ -239,14 +317,15 @@ app.delete("/mcp", async (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Image upload ---
-app.post("/api/upload", express.raw({ type: "image/*", limit: "10mb" }), (req, res) => {
-  const ext = (req.headers["content-type"] || "").split("/")[1] || "png";
+// --- File upload (images + any file type) ---
+app.post("/api/upload", express.raw({ type: "*/*", limit: "25mb" }), (req, res) => {
+  const contentType = req.headers["content-type"] || "application/octet-stream";
+  const ext = contentType.split("/")[1]?.split(";")[0] || "bin";
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  const imgDir = join(DATA_DIR, "images");
-  ensureDir(imgDir);
-  writeFileSync(join(imgDir, filename), req.body);
-  res.json({ url: `/data/images/${filename}` });
+  const fileDir = join(DATA_DIR, "files");
+  ensureDir(fileDir);
+  writeFileSync(join(fileDir, filename), req.body);
+  res.json({ url: `/data/files/${filename}`, filename, contentType, size: (req.body as Buffer).length });
 });
 
 app.use("/data", express.static(DATA_DIR));
@@ -281,9 +360,10 @@ app.post("/api/send", express.json(), (req, res) => {
   res.json({ id: msg.id, sender: msg.sender, text: msg.text });
 });
 
-app.get("/api/messages", (_req, res) => {
+app.get("/api/messages", (req, res) => {
   const room = manager.getActiveRoom();
-  res.json(room?.read(undefined, 100) ?? []);
+  const from = req.query.from as string | undefined;
+  res.json(room?.read(undefined, 100, from) ?? []);
 });
 
 app.post("/api/messages/delete", express.json(), (req, res) => {
@@ -342,9 +422,9 @@ app.post("/api/join", express.json(), (req, res) => {
     name?: string; pid?: number; wtSession?: string; weztermPaneId?: number;
   };
   if (!name || (!pid && weztermPaneId == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
-  const agent = room.join(name, pid || 0, weztermPaneId);
+  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
   const activeId = manager.getActiveId();
-  if (activeId) manager.bindAgent(name, activeId);
+  if (activeId) manager.bindAgent(name, activeId, pid, weztermPaneId);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
   res.json({ name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, online: room.whoNames() });
@@ -357,7 +437,11 @@ app.post("/api/leave", express.json(), (req, res) => {
   const convId = manager.getAgentBinding(name);
   const room = convId ? manager.getRoom(convId) : manager.getActiveRoom();
   if (room) room.leave(name);
-  manager.unbindAgent(name);
+  if (convId) {
+    manager.unbindAgent(name, convId);
+  } else {
+    manager.unbindAgent(name);
+  }
   res.json({ ok: true });
 });
 
@@ -370,7 +454,10 @@ app.post("/api/rename", express.json(), (req, res) => {
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
   // Update binding
   const convId = manager.getAgentBinding(oldName);
-  if (convId) { manager.unbindAgent(oldName); manager.bindAgent(newName, convId); }
+  if (convId) {
+    manager.unbindAgent(oldName, convId);
+    manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId);
+  }
   res.json({ name: agent.name, pid: agent.pid });
 });
 
@@ -391,7 +478,279 @@ app.post("/api/role", express.json(), (req, res) => {
   if (!name) { res.status(400).json({ error: "name required" }); return; }
   const agent = room.setRole(name, role ?? "");
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+  // Persist agent role assignment
+  if (role) {
+    agentRoles[name] = role;
+  } else {
+    delete agentRoles[name];
+  }
+  saveAgentRoles(agentRoles);
   res.json({ name: agent.name, role: agent.role });
+});
+
+// --- Role definitions CRUD ---
+app.get("/api/roles", (_req, res) => {
+  res.json({ preset: PRESET_ROLES, custom: customRoles });
+});
+
+app.post("/api/roles", express.json(), (req, res) => {
+  const { emoji, label } = req.body as { emoji?: string; label?: string };
+  if (!emoji || !label) { res.status(400).json({ error: "emoji and label required" }); return; }
+  const cleanLabel = label.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 30);
+  if (!cleanLabel) { res.status(400).json({ error: "Invalid label" }); return; }
+  const allLabels = [...PRESET_ROLES.map(r => r.label), ...customRoles.map(r => r.label)];
+  if (allLabels.includes(cleanLabel)) {
+    res.status(409).json({ error: "Role already exists" }); return;
+  }
+  const role: CustomRole = { emoji: emoji.trim(), label: cleanLabel };
+  customRoles.push(role);
+  saveCustomRoles(customRoles);
+  // Broadcast to web UI
+  const msg = JSON.stringify({ type: "roles-updated", data: { preset: PRESET_ROLES, custom: customRoles } });
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+  res.json({ ok: true, role });
+});
+
+app.delete("/api/roles/:label", (req, res) => {
+  const label = req.params.label;
+  const idx = customRoles.findIndex(r => r.label === label);
+  if (idx === -1) { res.status(404).json({ error: "Custom role not found" }); return; }
+  customRoles.splice(idx, 1);
+  saveCustomRoles(customRoles);
+  const msg = JSON.stringify({ type: "roles-updated", data: { preset: PRESET_ROLES, custom: customRoles } });
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+  res.json({ ok: true });
+});
+
+// --- Reactions ---
+app.post("/api/message/:id/react", express.json(), (req, res) => {
+  const room = activeRoom(res);
+  if (!room) return;
+  const messageId = Number(req.params.id);
+  if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const { sender, emoji } = req.body as { sender?: string; emoji?: string };
+  if (!sender || !emoji) { res.status(400).json({ error: "sender and emoji required" }); return; }
+  const msg = room.getMessageById(messageId);
+  if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
+  const activeId = manager.getActiveId();
+  if (!activeId) { res.status(400).json({ error: "No active conversation" }); return; }
+  const result = reactionStore.toggle(activeId, messageId, emoji, sender);
+  res.json(result);
+});
+
+// --- Message editing ---
+app.post("/api/message/:id/edit", express.json(), (req, res) => {
+  const room = activeRoom(res);
+  if (!room) return;
+  const messageId = Number(req.params.id);
+  if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const { sender, newText } = req.body as { sender?: string; newText?: string };
+  if (!sender || !newText) { res.status(400).json({ error: "sender and newText required" }); return; }
+  const msg = room.getMessageById(messageId);
+  if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
+  if (msg.sender !== sender) { res.status(403).json({ error: "Only the original sender can edit" }); return; }
+  const activeId = manager.getActiveId();
+  if (!activeId) { res.status(400).json({ error: "No active conversation" }); return; }
+  const record = editStore.edit(activeId, messageId, newText, sender, msg.text);
+  room.updateMessageText(messageId, newText);
+  res.json(record);
+});
+
+// --- Unread ---
+app.get("/api/agent/unread", (req, res) => {
+  const sender = req.query.sender as string;
+  if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
+  const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
+  const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
+  const ctx = agentRoom(sender, res, pid, paneId);
+  if (!ctx) return;
+  const cursor = cursorStore.get(sender);
+  const newMsgs = ctx.room.read(cursor, 100000);
+  const unread = cursorStore.getUnreadCount(sender, newMsgs);
+  res.json(unread);
+});
+
+// --- Message tags ---
+app.post("/api/message/:id/tag", express.json(), (req, res) => {
+  const room = activeRoom(res);
+  if (!room) return;
+  const messageId = Number(req.params.id);
+  if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const { tag } = req.body as { tag?: string };
+  if (!tag) { res.status(400).json({ error: "tag required" }); return; }
+  const msg = room.tagMessage(messageId, tag);
+  if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
+  res.json({ id: msg.id, tag: msg.tag });
+});
+
+// --- Pinning ---
+app.post("/api/message/:id/pin", express.json(), (req, res) => {
+  const room = activeRoom(res);
+  if (!room) return;
+  const messageId = Number(req.params.id);
+  if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const { pinned } = req.body as { pinned?: boolean };
+  const msg = room.pinMessage(messageId, pinned !== false);
+  if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
+  res.json({ id: msg.id, pinned: msg.pinned });
+});
+
+app.get("/api/pins", (_req, res) => {
+  const room = manager.getActiveRoom();
+  if (!room) { res.json([]); return; }
+  res.json(room.getPinnedMessages());
+});
+
+// --- Session markers ---
+app.post("/api/session-marker", express.json(), (req, res) => {
+  const room = activeRoom(res);
+  if (!room) return;
+  const { type, label } = req.body as { type?: "start" | "end"; label?: string };
+  if (type !== "start" && type !== "end") { res.status(400).json({ error: "type must be 'start' or 'end'" }); return; }
+  const msg = room.addSessionMarker(type, label);
+  res.json({ id: msg.id });
+});
+
+// --- Agent scratchpad ---
+const SCRATCHPAD_FILE = join(DATA_DIR, "scratchpads.json");
+
+function loadScratchpads(): Record<string, string> {
+  try {
+    if (existsSync(SCRATCHPAD_FILE)) return JSON.parse(readFileSync(SCRATCHPAD_FILE, "utf8"));
+  } catch { /* ignore */ }
+  return {};
+}
+function saveScratchpads(data: Record<string, string>): void {
+  try { writeFileSync(SCRATCHPAD_FILE, JSON.stringify(data, null, 2)); } catch { /* ignore */ }
+}
+const scratchpads = loadScratchpads();
+
+app.get("/api/agent/scratchpad", (req, res) => {
+  const sender = req.query.sender as string;
+  if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
+  const convId = (req.query.conversation as string) || manager.getActiveId() || "";
+  const key = `${convId}:${sender}`;
+  res.json({ notes: scratchpads[key] || "" });
+});
+
+app.post("/api/agent/scratchpad", express.json(), (req, res) => {
+  const { sender, notes, conversation } = req.body as { sender?: string; notes?: string; conversation?: string };
+  if (!sender) { res.status(400).json({ error: "sender required" }); return; }
+  const convId = conversation || manager.getActiveId() || "";
+  const key = `${convId}:${sender}`;
+  if (notes) {
+    scratchpads[key] = notes;
+  } else {
+    delete scratchpads[key];
+  }
+  saveScratchpads(scratchpads);
+  res.json({ ok: true });
+});
+
+// --- Per-conversation state blocks ---
+const STATE_BLOCKS_FILE = join(DATA_DIR, "state-blocks.json");
+
+function loadStateBlocks(): Record<string, Record<string, string>> {
+  try {
+    if (existsSync(STATE_BLOCKS_FILE)) return JSON.parse(readFileSync(STATE_BLOCKS_FILE, "utf8"));
+  } catch { /* ignore */ }
+  return {};
+}
+function saveStateBlocks(data: Record<string, Record<string, string>>): void {
+  try { writeFileSync(STATE_BLOCKS_FILE, JSON.stringify(data, null, 2)); } catch { /* ignore */ }
+}
+const stateBlocks = loadStateBlocks();
+
+app.get("/api/state", (req, res) => {
+  const convId = (req.query.conversation as string) || manager.getActiveId() || "";
+  res.json(stateBlocks[convId] || {});
+});
+
+app.post("/api/state", express.json(), (req, res) => {
+  const { conversation, key, value } = req.body as { conversation?: string; key?: string; value?: string };
+  if (!key) { res.status(400).json({ error: "key required" }); return; }
+  const convId = conversation || manager.getActiveId() || "";
+  if (!stateBlocks[convId]) stateBlocks[convId] = {};
+  if (value) {
+    stateBlocks[convId][key] = value;
+  } else {
+    delete stateBlocks[convId][key];
+  }
+  saveStateBlocks(stateBlocks);
+  // Broadcast state update
+  const msg = JSON.stringify({ type: "state-updated", conversationId: convId, data: stateBlocks[convId] });
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+  res.json(stateBlocks[convId]);
+});
+
+// --- Search ---
+app.get("/api/search", (req, res) => {
+  const room = manager.getActiveRoom();
+  if (!room) { res.json([]); return; }
+  const q = (req.query.q as string) || "";
+  const limit = Number(req.query.limit ?? 20);
+  if (!q) { res.json([]); return; }
+  res.json(room.search(q, limit));
+});
+
+app.get("/api/message/:id", (req, res) => {
+  const room = manager.getActiveRoom();
+  if (!room) { res.status(400).json({ error: "No active conversation" }); return; }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const msg = room.getMessageById(id);
+  if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
+  res.json(msg);
+});
+
+// --- Export: decision log ---
+app.get("/api/export/decisions", (_req, res) => {
+  const room = manager.getActiveRoom();
+  if (!room) { res.status(400).send("No active conversation"); return; }
+  const meta = manager.getActiveMeta();
+  const messages = room.read(undefined, 100000);
+  const decisions = messages.filter(m => m.tag === "decision" || m.tag === "handoff" || m.pinned);
+  let md = `# Decision Log — ${meta?.name ?? "Joind"}\n\n`;
+  for (const msg of decisions) {
+    const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const tags = [msg.tag, msg.pinned ? "pinned" : ""].filter(Boolean).join(", ");
+    md += `### #${msg.id} — ${msg.sender} (${time}) [${tags}]\n${msg.text}\n\n`;
+  }
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.send(md);
+});
+
+// --- Export: session summary ---
+app.get("/api/export/summary", (_req, res) => {
+  const room = manager.getActiveRoom();
+  if (!room) { res.status(400).send("No active conversation"); return; }
+  const meta = manager.getActiveMeta();
+  const messages = room.read(undefined, 100000);
+  const agents = room.who();
+  const pinned = room.getPinnedMessages();
+  const tagged = messages.filter(m => m.tag);
+  const tagCounts: Record<string, number> = {};
+  for (const m of tagged) { tagCounts[m.tag!] = (tagCounts[m.tag!] || 0) + 1; }
+
+  let md = `# Session Summary — ${meta?.name ?? "Joind"}\n\n`;
+  md += `- **Messages**: ${messages.length}\n`;
+  md += `- **Participants**: ${agents.map(a => a.name + (a.role ? ` (${a.role})` : "")).join(", ")}\n`;
+  md += `- **Pinned**: ${pinned.length}\n`;
+  if (Object.keys(tagCounts).length > 0) {
+    md += `- **Tags**: ${Object.entries(tagCounts).map(([k, v]) => `${k} (${v})`).join(", ")}\n`;
+  }
+  md += `\n## Pinned Messages\n\n`;
+  for (const msg of pinned) {
+    md += `- **#${msg.id} ${msg.sender}**: ${msg.text.slice(0, 120)}${msg.text.length > 120 ? "..." : ""}\n`;
+  }
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.send(md);
 });
 
 // --- Conversation management ---
@@ -439,7 +798,11 @@ app.post("/api/conversations/delete", express.json(), (req, res) => {
   const { id } = req.body as { id?: string };
   if (!id) { res.status(400).json({ error: "id required" }); return; }
   const ok = manager.deleteConversation(id);
-  if (ok) taskStore.deleteForConversation(id);
+  if (ok) {
+    taskStore.deleteForConversation(id);
+    reactionStore.deleteForConversation(id);
+    editStore.deleteForConversation(id);
+  }
   res.json({ ok });
 });
 
@@ -535,12 +898,22 @@ app.post("/api/turn-guard", express.json(), (req, res) => {
 
 // --- Agent REST API (MCP-free path for Claude Code agents) ---
 
-/** Helper: get agent's room by name binding */
-function agentRoom(name: string, res: express.Response) {
-  const convId = manager.getAgentBinding(name);
+/** Helper: get agent's room by name binding (with optional pid/paneId disambiguation) */
+function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number) {
+  const convId = manager.getAgentBinding(name, pid, paneId);
   if (convId) {
     const room = manager.getRoom(convId);
-    if (room) return { room, convId };
+    if (room) {
+      // Add rate limit headers
+      const turns = room.getAgentTurnCount();
+      const guard = room.turnGuard;
+      if (guard) {
+        res.setHeader("X-RateLimit-Limit", guard.limit);
+        res.setHeader("X-RateLimit-Remaining", Math.max(0, guard.limit - turns));
+        res.setHeader("X-RateLimit-Enabled", guard.enabled ? "true" : "false");
+      }
+      return { room, convId };
+    }
   }
   // No fallback — agent must join first to avoid cross-conversation pollution
   res.status(400).json({ error: "Not in a conversation. Call /api/agent/join first." });
@@ -612,8 +985,8 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
     } catch { /* best effort */ }
   }
 
-  const agent = room.join(name, pid || 0, weztermPaneId);
-  manager.bindAgent(name, convId);
+  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
+  manager.bindAgent(name, convId, pid, weztermPaneId);
   room.touch(name);
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
@@ -641,22 +1014,26 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
 app.get("/api/agent/read", (req, res) => {
   const sender = req.query.sender as string;
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
-  const ctx = agentRoom(sender, res);
+  const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
+  const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
+  const ctx = agentRoom(sender, res, pid, paneId);
   if (!ctx) return;
   const since = req.query.since != null ? Number(req.query.since) : undefined;
   const limit = Number(req.query.limit ?? 50);
+  const from = req.query.from as string | undefined;
   ctx.room.touch(sender);
-  const messages = ctx.room.read(since, limit);
+  const messages = ctx.room.read(since, limit, from, sender);
   const lastId = messages.length > 0 ? messages[messages.length - 1].id : (since ?? 0);
+  if (lastId > 0) cursorStore.advance(sender, lastId);
   res.json({ messages, lastId });
 });
 
 app.post("/api/agent/send", express.json(), (req, res) => {
-  const { sender, text, replyTo } = req.body as {
-    sender?: string; text?: string; replyTo?: number;
+  const { sender, text, replyTo, pid, paneId } = req.body as {
+    sender?: string; text?: string; replyTo?: number; pid?: number; paneId?: number;
   };
   if (!sender || !text) { res.status(400).json({ error: "sender and text required" }); return; }
-  const ctx = agentRoom(sender, res);
+  const ctx = agentRoom(sender, res, pid, paneId);
   if (!ctx) return;
   ctx.room.touch(sender);
   ctx.room.setTyping(sender, false);
@@ -666,31 +1043,45 @@ app.post("/api/agent/send", express.json(), (req, res) => {
 });
 
 app.post("/api/agent/leave", express.json(), (req, res) => {
-  const { name } = req.body as { name?: string };
+  const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const convId = manager.getAgentBinding(name);
+  const convId = manager.getAgentBinding(name, pid, paneId);
   const room = convId ? manager.getRoom(convId) : undefined;
   if (room) room.leave(name);
-  manager.unbindAgent(name);
+  if (convId) {
+    manager.unbindAgent(name, convId);
+  } else {
+    manager.unbindAgent(name);
+  }
   res.json({ ok: true });
 });
 
 app.post("/api/agent/typing", express.json(), (req, res) => {
-  const { name, typing } = req.body as { name?: string; typing?: boolean };
+  const { name, typing, pid, paneId } = req.body as { name?: string; typing?: boolean; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res);
+  const ctx = agentRoom(name, res, pid, paneId);
   if (!ctx) return;
   ctx.room.setTyping(name, typing ?? true);
   res.json({ ok: true });
 });
 
 app.post("/api/agent/heartbeat", express.json(), (req, res) => {
-  const { name } = req.body as { name?: string };
+  const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res);
+  const ctx = agentRoom(name, res, pid, paneId);
   if (!ctx) return;
   ctx.room.touch(name);
   res.json({ ok: true });
+});
+
+app.post("/api/agent/status", express.json(), (req, res) => {
+  const { name, status, pid, paneId } = req.body as { name?: string; status?: string; pid?: number; paneId?: number };
+  if (!name) { res.status(400).json({ error: "name required" }); return; }
+  const ctx = agentRoom(name, res, pid, paneId);
+  if (!ctx) return;
+  const agent = ctx.room.setStatus(name, status ?? "");
+  if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+  res.json({ name: agent.name, status: agent.status });
 });
 
 // --- Workflow sessions ---
