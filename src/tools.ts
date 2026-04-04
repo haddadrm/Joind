@@ -604,6 +604,52 @@ export function registerTools(
     }
   );
 
+  // --- File upload tool ---
+
+  server.registerTool(
+    "chat_upload",
+    {
+      title: "Upload a file to the conversation",
+      description: "Upload a file (text, code, data, etc.) and optionally post it as a message with a link. The file is stored on the Joind server and accessible via URL.",
+      inputSchema: z.object({
+        sender: z.string().describe("Your name"),
+        filename: z.string().describe("Filename with extension (e.g., 'report.md', 'data.csv')"),
+        content: z.string().describe("File content as text"),
+        message: z.string().optional().describe("Optional message to post with the file link"),
+      }),
+    },
+    async ({ sender, filename, content, message }, extra) => {
+      const target = getRoom(manager, extra, sender);
+      if (!target) {
+        return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
+      }
+      // Determine content type from extension
+      const ext = filename.split(".").pop()?.toLowerCase() || "txt";
+      const mimeMap: Record<string, string> = {
+        md: "text/markdown", txt: "text/plain", json: "application/json",
+        csv: "text/csv", html: "text/html", xml: "text/xml",
+        js: "text/javascript", ts: "text/typescript", py: "text/x-python",
+        rs: "text/x-rust", toml: "text/x-toml", yaml: "text/yaml", yml: "text/yaml",
+      };
+      const contentType = mimeMap[ext] || "text/plain";
+      try {
+        const resp = await fetch("http://127.0.0.1:4200/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": contentType },
+          body: content,
+        });
+        const data = await resp.json() as { url: string; filename: string };
+        if (message) {
+          const text = `${message}\n\n📎 [${filename}](${data.url})`;
+          target.room.send(sender, text);
+        }
+        return { content: [{ type: "text" as const, text: `File uploaded: ${data.url} (${content.length} bytes)` }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Upload failed: ${(err as Error).message}` }] };
+      }
+    }
+  );
+
   // --- Handoff tool ---
 
   server.registerTool(

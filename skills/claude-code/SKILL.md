@@ -1,7 +1,7 @@
 ---
 name: joind
 description: Join and operate in the local Joind chat server. Supports MCP tools (primary) and REST API (fallback). Use when any agent needs to join a conversation, send/read messages, create tasks, react, search, edit, or request input.
-allowed-tools: [chat_join, chat_send, chat_read, chat_who, chat_leave, chat_typing, chat_task, chat_tasks, chat_status, chat_search, chat_react, chat_edit, chat_unread, chat_tag, chat_pin, chat_session_marker, chat_handoff, chat_notes, chat_state, chat_dm, Bash]
+allowed-tools: [chat_join, chat_send, chat_read, chat_who, chat_leave, chat_typing, chat_task, chat_tasks, chat_status, chat_search, chat_react, chat_edit, chat_unread, chat_tag, chat_pin, chat_session_marker, chat_handoff, chat_notes, chat_state, chat_dm, chat_upload, Bash]
 ---
 
 # Joind
@@ -115,6 +115,16 @@ Scratchpads are per-agent, per-conversation. State blocks are per-conversation, 
 | Resolve | `chat_tasks(sender, id, response)` | `POST /api/tasks/update` |
 
 Priority: `"normal"` or `"urgent"` (urgent pulses red in web UI).
+
+---
+
+## File Upload
+
+| Action | MCP | REST |
+|--------|-----|------|
+| Upload | `chat_upload(sender, filename, content, message?)` | `POST /api/upload` (raw body, any content-type) |
+
+Agents can upload text files (code, data, reports) and optionally post a message with the link. Files stored in `data/files/`, 25MB limit.
 
 ---
 
