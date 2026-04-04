@@ -2467,7 +2467,23 @@ document.addEventListener('DOMContentLoaded', function() {
 // renderRolesPanel is now integrated into the settings dialog
 
 // --- Reactions ---
-var QUICK_REACTIONS = ['\uD83D\uDC4D', '\u2705', '\uD83D\uDC40', '\uD83C\uDF89', '\u2764\uFE0F', '\uD83E\uDD14'];
+var QUICK_REACTIONS = ['\uD83D\uDC4D', '\u2705', '\uD83D\uDC40', '\uD83C\uDF89', '\u2764\uFE0F', '\uD83E\uDD14', '\uD83D\uDD96', '\uD83E\uDEF1', '\uD83E\uDD17', '\uD83E\uDEE1', '\uD83D\uDC4C'];
+var FULL_EMOJI_SET = [
+  // Faces
+  '\uD83D\uDE00', '\uD83D\uDE02', '\uD83D\uDE0D', '\uD83E\uDD29', '\uD83E\uDD73', '\uD83D\uDE0E', '\uD83E\uDD13', '\uD83E\uDD2F',
+  '\uD83D\uDE31', '\uD83D\uDE2D', '\uD83D\uDE24', '\uD83E\uDD75', '\uD83E\uDD76', '\uD83E\uDD21', '\uD83D\uDC80', '\uD83D\uDC7D',
+  // Gestures
+  '\uD83D\uDC4D', '\uD83D\uDC4E', '\uD83D\uDC4F', '\uD83D\uDE4C', '\uD83E\uDD1D', '\uD83D\uDC4A', '\u270C\uFE0F', '\uD83E\uDD1E',
+  '\uD83D\uDD96', '\uD83E\uDEF1', '\uD83E\uDEE1', '\uD83D\uDC4C', '\uD83D\uDC4B', '\u270B', '\uD83E\uDD19', '\uD83D\uDCAA',
+  // Hearts & symbols
+  '\u2764\uFE0F', '\uD83E\uDDE1', '\uD83D\uDC9B', '\uD83D\uDC9A', '\uD83D\uDC99', '\uD83D\uDC9C', '\uD83D\uDDA4', '\uD83E\uDD0D',
+  // Objects
+  '\u2705', '\u274C', '\u26A0\uFE0F', '\uD83D\uDCA1', '\uD83D\uDD25', '\uD83C\uDF89', '\uD83C\uDFC6', '\uD83D\uDE80',
+  '\uD83D\uDC40', '\uD83E\uDD14', '\uD83E\uDD17', '\uD83D\uDCAF', '\uD83D\uDC8E', '\uD83C\uDF1F', '\u2B50', '\uD83C\uDF08',
+  // Tech & work
+  '\uD83D\uDEE0\uFE0F', '\uD83D\uDD2C', '\uD83D\uDCBB', '\uD83E\uDDEA', '\uD83D\uDCC8', '\uD83D\uDCCA', '\uD83D\uDCDD', '\uD83D\uDCD6',
+  '\uD83D\uDD12', '\uD83D\uDD13', '\uD83C\uDFAF', '\u23F0', '\uD83D\uDEA8', '\uD83D\uDED1', '\uD83D\uDFE2', '\uD83D\uDD34',
+];
 var allReactions = []; // loaded from init
 
 function showReactPicker(messageId, anchorEl) {
@@ -2477,29 +2493,64 @@ function showReactPicker(messageId, anchorEl) {
 
   var picker = document.createElement('div');
   picker.className = 'react-picker';
+
+  // Quick reactions row
   QUICK_REACTIONS.forEach(function(emoji) {
     var btn = document.createElement('button');
     btn.className = 'react-picker-btn';
     btn.textContent = emoji;
     btn.addEventListener('click', function() {
-      var sender = document.getElementById('sender-name').value || 'human';
-      fetch('/api/message/' + messageId + '/react', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sender: sender, emoji: emoji })
-      });
+      sendReaction(messageId, emoji);
       picker.remove();
     });
     picker.appendChild(btn);
   });
 
+  // Expand button for full panel
+  var moreBtn = document.createElement('button');
+  moreBtn.className = 'react-picker-btn react-more-btn';
+  moreBtn.textContent = '\u00B7\u00B7\u00B7';
+  moreBtn.title = 'More emojis';
+  moreBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    var grid = picker.querySelector('.react-full-grid');
+    if (grid) {
+      grid.classList.toggle('hidden');
+      return;
+    }
+    grid = document.createElement('div');
+    grid.className = 'react-full-grid';
+    FULL_EMOJI_SET.forEach(function(emoji) {
+      var btn = document.createElement('button');
+      btn.className = 'react-grid-btn';
+      btn.textContent = emoji;
+      btn.addEventListener('click', function() {
+        sendReaction(messageId, emoji);
+        picker.remove();
+      });
+      grid.appendChild(btn);
+    });
+    picker.appendChild(grid);
+  });
+  picker.appendChild(moreBtn);
+
   anchorEl.parentElement.appendChild(picker);
   setTimeout(function() {
-    document.addEventListener('click', function closePicker() {
+    document.addEventListener('click', function closePicker(e) {
+      if (picker.contains(e.target)) return;
       picker.remove();
       document.removeEventListener('click', closePicker);
-    }, { once: true });
+    });
   }, 10);
+}
+
+function sendReaction(messageId, emoji) {
+  var sender = document.getElementById('sender-name').value || 'human';
+  fetch('/api/message/' + messageId + '/react', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sender: sender, emoji: emoji })
+  });
 }
 
 function updateReactionPills(messageId) {
