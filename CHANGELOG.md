@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-04-12 — Session Resume: Fix Session Listers
+
+### Fixed
+- **Gemini session lister broken** (`src/launch-sessions.ts`): `projects.json` has a nested `{ "projects": { ... } }` structure but code read it as a flat map. Now correctly unwraps the `projects` key. Gemini sessions for tpol (3), belanna (1), odo (5) now appear.
+- **Codex session lister broken** (`src/launch-sessions.ts`): Codex wraps all JSONL event data in a `payload` object but code read fields at top level. Fixed `session_meta` to read `payload.id` / `payload.cwd`, and `turn_context` to read `payload.model`.
+- **Codex event type wrong** (`src/launch-sessions.ts`): Code looked for `event_msg` type but Codex uses `response_item` with `payload.role === "user"` and `content[].type === "input_text"` for user messages.
+- **Gemini message role field** (`src/launch-sessions.ts`): Gemini session files use `type: "user"` not `role: "user"` for message role. Now checks both.
+- **Conversation list not rendering** (`public/app.js`): Reaction-only messages (emoji + messageId, no text) in the active conversation crashed `renderContent()` with `TypeError: Cannot read properties of undefined (reading 'replace')`. This killed the entire WS `init` handler before `renderConversationList()` could run. Fixed with null guards in `renderContent`, `renderTextWithMentions`, and early-return in `appendMessage` for reaction-only events.
+- **Browser cache busting** (`public/index.html`): Added version query params to `app.js` and `style.css` references to prevent stale cached assets.
+
+## 2026-04-05 — Launcher Fixes: Harness Detection, Terminal Picker, MCP Warning
+
+### Fixed
+- **Harness detection broken on Windows** (`src/harnesses.ts`): `checkInstalled()` now uses `where` (Windows) / `which` (Unix) to resolve `.cmd` shim paths before attempting `--version`. All npm-installed CLIs (`codex.cmd`, `gemini.cmd`, `openclaw.cmd`) now correctly show as installed. Resolved path stored as `resolvedPath` on `HarnessDefinition`.
+- **buildCommand uses resolvedPath** (`src/launcher.ts`): First element of argv uses `harness.resolvedPath ?? harness.command` so the actual `.cmd` path is executed, not just the bare command name.
+- **MCP warning is now harness-aware** (`public/app.js`): "No MCP config detected" warning only shows when the selected harness has no MCP config for the crew folder. Warning updates reactively on harness radio change.
+
+### Added
+- **Terminal picker in launch dialog** (`public/app.js`, `src/index.ts`, `src/launcher.ts`):
+  - New `GET /api/launcher/terminals` endpoint returns availability + running status for WezTerm, Windows Terminal, and Manual.
+  - Dialog now has a "Terminal" radio-card section (WezTerm / Windows Terminal / Manual) auto-selecting the best available option.
+  - WezTerm card shows "Auto-inject supported" (green) if running, "Will open new window" (muted) if available but not running.
+  - Windows Terminal card shows "Manual join required" (yellow); launches via `wt new-tab` detached process.
+  - Manual card shows "Copy command to clipboard"; returns command string immediately without spawning.
+  - `LaunchRequest` gains `terminal: "wezterm" | "wt" | "manual"` field; `launch()` branches accordingly.
+- **Richer `mcpConfig` object in `/api/crew`** (`src/index.ts`): Returns `mcpConfig: { claude, codex, gemini, openclaw }` boolean flags alongside legacy `hasMcpConfig` for backward compat.
+
+## 2026-04-05 — Agent Launcher
+
+### Added
+- **Agent Launcher dialog** (`public/app.js`, `public/index.html`, `public/style.css`): Full-featured agent launch UI accessible via the rocket button in the sidebar quick-actions bar.
+  - Crew folder selection with live path + identity/MCP badges; "Add folder..." inline form calls `POST /api/crew`
+  - TUI harness radio cards (disabled + tooltip when not installed); flag inputs auto-rendered per harness (`text`, `enum`, `boolean`, `multi-text`)
+  - Join section: conversation selector (pre-selects active conversation) + joinAs name input (auto-filled from crew's `joinAs`)
+  - Terminal status line (WezTerm available vs. manual launch) + inject delay picker (2s/3s/4s/6s/10s)
+  - `POST /api/launch` executes launch; transitions to status view showing pane ID or manual command box
+  - Countdown timer for inject delay with "Inject now" / "Cancel injection" buttons
+  - `POST /api/launch/:id/inject` fires immediately on demand; polling `GET /api/launch/:id` at 1s intervals until done/failed
+  - "Launch Another" resets to form view without closing dialog
+  - All glassmorphism styling consistent with existing dialog patterns; new CSS classes: `.launch-dialog-box`, `.status-badge`, `.harness-card-label`, `.manual-command`, `.launch-countdown`, `.inject-delay-row`, etc.
+
 ## 2026-04-04 — "Make the Crew Happy" Release
 
 ### Phase 1: Bug Fixes & Admiral's Orders

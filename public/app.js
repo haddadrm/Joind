@@ -538,9 +538,11 @@ function renderMessages(msgs) {
 
 function appendMessage(msg, scroll) {
   if (scroll === undefined) scroll = true;
+  // Skip reaction-only events (no text, no id — just emoji + messageId)
+  if (!msg.text && !msg.id && msg.emoji) return;
   var c = document.getElementById('messages');
   var el = document.createElement('div');
-  el.dataset.id = msg.id;
+  el.dataset.id = msg.id || '';
 
   var isGrouped = msg.sender !== 'system' && msg.sender === lastSender;
 
@@ -571,7 +573,7 @@ function appendMessage(msg, scroll) {
       if (orig) {
         var quote = document.createElement('div');
         quote.className = 'reply-quote';
-        quote.textContent = orig.sender + ': ' + orig.text.slice(0, 80);
+        quote.textContent = orig.sender + ': ' + (orig.text || '').slice(0, 80);
         quote.style.borderLeftColor = getSenderColor(orig.sender);
         quote.addEventListener('click', function() { scrollToMessage(orig.id); });
         body.appendChild(quote);
@@ -717,6 +719,7 @@ function appendMessage(msg, scroll) {
 }
 
 function renderContent(parent, text) {
+  if (!text) { parent.textContent = ''; return; }
   if (typeof marked !== 'undefined') {
     // Ensure real newlines (WebSocket/JSON may deliver literal \n)
     text = text.replace(/\\n/g, '\n');
@@ -735,6 +738,7 @@ function renderContent(parent, text) {
 }
 
 function renderTextWithMentions(parent, text) {
+  if (!text) { parent.textContent = ''; return; }
   text.split(/(@\w[\w-]*)/g).forEach(function(part) {
     if (part.match(/^@\w/)) {
       var span = document.createElement('span');
@@ -2543,6 +2547,1155 @@ function showReactPicker(messageId, anchorEl) {
     });
   }, 10);
 }
+
+// =============================================================================
+// LAUNCH AGENT DIALOG
+// =============================================================================
+
+var launchDialogOverlay = null;
+var launchCountdownInterval = null;
+var launchPollInterval = null;
+var launchCurrentId = null;
+var launchCancelledInject = false;
+
+function openLaunchDialog() {
+  closeLaunchDialog();
+  launchCancelledInject = false;
+
+  var overlay = document.createElement('div');
+  overlay.className = 'launch-dialog-overlay';
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) closeLaunchDialog();
+  });
+
+  var box = document.createElement('div');
+  box.className = 'launch-dialog-box';
+
+  // Header
+  var hdr = document.createElement('div');
+  hdr.className = 'launch-dialog-header';
+  var title = document.createElement('div');
+  title.className = 'launch-dialog-title';
+  title.textContent = '\u{1F680} Launch Agent';
+  var closeBtn = document.createElement('button');
+  closeBtn.className = 'launch-dialog-close';
+  closeBtn.textContent = '\u00D7';
+  closeBtn.addEventListener('click', closeLaunchDialog);
+  hdr.appendChild(title);
+  hdr.appendChild(closeBtn);
+  box.appendChild(hdr);
+
+  // Content area — show loading spinner while fetching
+  var content = document.createElement('div');
+  content.className = 'launch-dialog-content';
+  var loading = buildLaunchLoading();
+  content.appendChild(loading);
+  box.appendChild(content);
+
+  // Footer placeholder (will be replaced when loaded)
+  var footer = document.createElement('div');
+  footer.className = 'launch-dialog-footer';
+  box.appendChild(footer);
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  launchDialogOverlay = overlay;
+
+  // Fetch all data in parallel
+  Promise.all([
+    fetch('/api/crew').then(function(r) { return r.json(); }).catch(function() { return []; }),
+    fetch('/api/harnesses').then(function(r) { return r.json(); }).catch(function() { return []; }),
+    fetch('/api/conversations').then(function(r) { return r.json(); }).catch(function() { return { conversations: [] }; }),
+    fetch('/api/launcher/terminals').then(function(r) { return r.json(); }).catch(function() { return { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } }; })
+  ]).then(function(results) {
+    var crewList = results[0];
+    var harnesses = results[1];
+    var convData = results[2];
+    var terminalsInfo = results[3];
+    var convList = convData.conversations || convData || [];
+    content.textContent = '';
+    footer.textContent = '';
+    buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo);
+  }).catch(function(err) {
+    content.textContent = '';
+    var errMsg = document.createElement('div');
+    errMsg.className = 'launch-error';
+    errMsg.textContent = 'Failed to load data: ' + (err && err.message ? err.message : 'network error');
+    content.appendChild(errMsg);
+  });
+}
+
+function closeLaunchDialog() {
+  if (launchCountdownInterval) { clearInterval(launchCountdownInterval); launchCountdownInterval = null; }
+  if (launchPollInterval) { clearInterval(launchPollInterval); launchPollInterval = null; }
+  launchCurrentId = null;
+  if (launchDialogOverlay) { launchDialogOverlay.remove(); launchDialogOverlay = null; }
+}
+
+function buildLaunchLoading() {
+  var wrap = document.createElement('div');
+  wrap.className = 'launch-loading';
+  for (var i = 0; i < 3; i++) {
+    var dot = document.createElement('span');
+    dot.className = 'launch-loading-dot';
+    wrap.appendChild(dot);
+  }
+  var txt = document.createTextNode(' Loading');
+  wrap.appendChild(txt);
+  return wrap;
+}
+
+function buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo) {
+  // Track selected state
+  var selectedCrew = null;
+  var selectedHarness = null;
+  var selectedTerminal = null; // "wezterm" | "wt" | "manual"
+
+  // Default terminalsInfo shape if not provided
+  terminalsInfo = terminalsInfo || { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } };
+
+  // --- CREW SECTION ---
+  var crewSection = document.createElement('div');
+  crewSection.className = 'launch-section';
+  var crewLabel = document.createElement('div');
+  crewLabel.className = 'launch-section-label';
+  crewLabel.textContent = 'Crew Member';
+  crewSection.appendChild(crewLabel);
+
+  var crewSelect = document.createElement('select');
+  crewSelect.className = 'launch-select';
+  crewSelect.id = 'launch-crew-select';
+
+  var emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = '-- select crew --';
+  crewSelect.appendChild(emptyOpt);
+
+  crewList.forEach(function(crew) {
+    var opt = document.createElement('option');
+    opt.value = crew.name;
+    opt.textContent = crew.name;
+    crewSelect.appendChild(opt);
+  });
+
+  // "Add folder..." option
+  var addOpt = document.createElement('option');
+  addOpt.value = '__add__';
+  addOpt.textContent = '+ Add folder...';
+  crewSelect.appendChild(addOpt);
+
+  crewSection.appendChild(crewSelect);
+
+  // Crew meta row
+  var crewMeta = document.createElement('div');
+  crewMeta.className = 'crew-meta';
+  crewSection.appendChild(crewMeta);
+
+  // Add folder inline form (hidden by default)
+  var addCrewForm = buildAddCrewForm(function(newCrew) {
+    // Reload after adding
+    fetch('/api/crew').then(function(r) { return r.json(); }).then(function(updated) {
+      // Rebuild options preserving add
+      while (crewSelect.options.length > 1) crewSelect.remove(1);
+      updated.forEach(function(c) {
+        var o = document.createElement('option');
+        o.value = c.name; o.textContent = c.name;
+        crewSelect.appendChild(o);
+      });
+      var ao = document.createElement('option');
+      ao.value = '__add__'; ao.textContent = '+ Add folder...';
+      crewSelect.appendChild(ao);
+      crewList = updated;
+      addCrewForm.style.display = 'none';
+      // Select the newly added crew
+      if (newCrew) {
+        crewSelect.value = newCrew.name;
+        updateCrewMeta(newCrew);
+        selectedCrew = newCrew;
+        autoFillFromCrew(newCrew);
+      }
+      updateLaunchBtn();
+    }).catch(function() {});
+  }, function() {
+    addCrewForm.style.display = 'none';
+    crewSelect.value = '';
+    updateLaunchBtn();
+  });
+  addCrewForm.style.display = 'none';
+  crewSection.appendChild(addCrewForm);
+
+  crewSelect.addEventListener('change', function() {
+    if (crewSelect.value === '__add__') {
+      addCrewForm.style.display = '';
+      selectedCrew = null;
+      updateCrewMeta(null);
+      updateLaunchBtn();
+      return;
+    }
+    addCrewForm.style.display = 'none';
+    selectedCrew = crewList.find(function(c) { return c.name === crewSelect.value; }) || null;
+    updateCrewMeta(selectedCrew);
+    if (selectedCrew) autoFillFromCrew(selectedCrew);
+    if (typeof reloadResumeIfOpen === 'function') reloadResumeIfOpen();
+    updateLaunchBtn();
+  });
+
+  function updateCrewMeta(crew) {
+    crewMeta.textContent = '';
+    if (!crew) return;
+    if (crew.path) {
+      var pathSpan = document.createElement('span');
+      pathSpan.className = 'crew-meta-path';
+      pathSpan.textContent = crew.path;
+      pathSpan.title = crew.path;
+      crewMeta.appendChild(pathSpan);
+    }
+    var idBadge = document.createElement('span');
+    idBadge.className = 'status-badge ' + (crew.identityExists ? 'ok' : 'warn');
+    idBadge.textContent = crew.identityExists ? '\u2713 identity' : '\u26A0 no identity';
+    crewMeta.appendChild(idBadge);
+
+    var hasSomeMcp = crew.hasMcpConfig ||
+      (crew.mcpConfig && typeof crew.mcpConfig === 'object' &&
+        Object.values(crew.mcpConfig).some(function(v) { return !!v; }));
+    var mcpBadge = document.createElement('span');
+    mcpBadge.className = 'status-badge ' + (hasSomeMcp ? 'ok' : 'warn');
+    mcpBadge.textContent = hasSomeMcp ? '\u2713 MCP' : '\u26A0 no MCP';
+    crewMeta.appendChild(mcpBadge);
+  }
+
+  content.appendChild(crewSection);
+
+  // --- HARNESS SECTION ---
+  var harnessSection = document.createElement('div');
+  harnessSection.className = 'launch-section';
+  var harnessLabel = document.createElement('div');
+  harnessLabel.className = 'launch-section-label';
+  harnessLabel.textContent = 'TUI Harness';
+  harnessSection.appendChild(harnessLabel);
+
+  var harnessGroup = document.createElement('div');
+  harnessGroup.className = 'harness-radio-group';
+
+  harnesses.forEach(function(h) {
+    var lbl = document.createElement('label');
+    lbl.className = 'harness-card-label' + (h.installed ? '' : ' disabled');
+    if (!h.installed) lbl.title = h.label + ' not installed';
+
+    var radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'launch-harness';
+    radio.value = h.id;
+    radio.disabled = !h.installed;
+
+    var nameSpan = document.createElement('span');
+    nameSpan.textContent = h.label;
+
+    lbl.appendChild(radio);
+    lbl.appendChild(nameSpan);
+
+    if (!h.installed) {
+      var notInstalled = document.createElement('span');
+      notInstalled.className = 'harness-not-installed';
+      notInstalled.textContent = '(not installed)';
+      lbl.appendChild(notInstalled);
+    }
+
+    radio.addEventListener('change', function() {
+      if (!radio.checked) return;
+      // Update card styling
+      harnessGroup.querySelectorAll('.harness-card-label').forEach(function(el) {
+        el.classList.remove('selected');
+      });
+      lbl.classList.add('selected');
+      selectedHarness = h;
+      renderFlagsForm(h, flagsForm);
+      updateMcpWarning();
+      if (typeof reloadResumeIfOpen === 'function') reloadResumeIfOpen();
+      updateLaunchBtn();
+    });
+
+    harnessGroup.appendChild(lbl);
+  });
+
+  harnessSection.appendChild(harnessGroup);
+  content.appendChild(harnessSection);
+
+  // --- FLAGS SECTION ---
+  var flagsSection = document.createElement('div');
+  flagsSection.className = 'launch-section';
+  var flagsLabel = document.createElement('div');
+  flagsLabel.className = 'launch-section-label';
+  flagsLabel.textContent = 'Harness Options';
+  flagsSection.appendChild(flagsLabel);
+
+  var flagsForm = document.createElement('div');
+  flagsForm.className = 'flags-form';
+  flagsSection.appendChild(flagsForm);
+  content.appendChild(flagsSection);
+
+  // --- RESUME SECTION ---
+  var resumeSessionId = null;
+  var resumeSection = document.createElement('div');
+  resumeSection.className = 'launch-section';
+  var resumeHdr = document.createElement('div');
+  resumeHdr.className = 'launch-section-label';
+  resumeHdr.textContent = 'Resume';
+  resumeSection.appendChild(resumeHdr);
+
+  var resumeToggleRow = document.createElement('label');
+  resumeToggleRow.className = 'resume-toggle-row';
+  var resumeCheckbox = document.createElement('input');
+  resumeCheckbox.type = 'checkbox';
+  resumeCheckbox.id = 'launch-resume-checkbox';
+  var resumeToggleText = document.createElement('span');
+  resumeToggleText.textContent = 'Resume previous session';
+  resumeToggleRow.appendChild(resumeCheckbox);
+  resumeToggleRow.appendChild(resumeToggleText);
+  resumeSection.appendChild(resumeToggleRow);
+
+  var resumeDropdownWrap = document.createElement('div');
+  resumeDropdownWrap.className = 'resume-dropdown-wrap';
+  resumeDropdownWrap.style.display = 'none';
+  var resumeSelect = document.createElement('select');
+  resumeSelect.className = 'launch-select';
+  resumeSelect.id = 'launch-resume-select';
+  resumeDropdownWrap.appendChild(resumeSelect);
+  var resumeStatus = document.createElement('div');
+  resumeStatus.className = 'resume-status';
+  resumeDropdownWrap.appendChild(resumeStatus);
+  resumeSection.appendChild(resumeDropdownWrap);
+  content.appendChild(resumeSection);
+
+  function formatRelativeTime(ms) {
+    var d = Date.now() - ms;
+    if (d < 60000) return 'just now';
+    if (d < 3600000) return Math.floor(d / 60000) + 'm ago';
+    if (d < 86400000) return Math.floor(d / 3600000) + 'h ago';
+    if (d < 2592000000) return Math.floor(d / 86400000) + 'd ago';
+    return new Date(ms).toISOString().slice(0, 10);
+  }
+
+  function loadResumeSessions() {
+    if (!selectedCrew || !selectedHarness) {
+      resumeSelect.textContent = '';
+      var opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'Pick a crew and harness first';
+      opt.disabled = true;
+      resumeSelect.appendChild(opt);
+      return;
+    }
+    resumeSelect.textContent = '';
+    resumeStatus.textContent = 'Loading sessions…';
+    resumeStatus.style.color = 'var(--text-muted)';
+    resumeSessionId = null;
+    var url = '/api/launcher/sessions?harness=' +
+      encodeURIComponent(selectedHarness.id) +
+      '&cwd=' + encodeURIComponent(selectedCrew.path);
+    fetch(url).then(function(r) { return r.json(); }).then(function(sessions) {
+      resumeSelect.textContent = '';
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        var opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = '(no sessions found for this folder)';
+        opt.disabled = true;
+        resumeSelect.appendChild(opt);
+        resumeStatus.textContent = selectedHarness.id === 'openclaw'
+          ? 'OpenClaw resume is not supported yet'
+          : 'No previous sessions found for this folder';
+        resumeStatus.style.color = 'var(--text-muted)';
+        resumeSessionId = null;
+        updateLaunchBtn();
+        return;
+      }
+      var placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '— pick a session —';
+      resumeSelect.appendChild(placeholder);
+      sessions.forEach(function(s) {
+        var o = document.createElement('option');
+        o.value = s.id;
+        var label = s.title || s.firstMessage || s.id.slice(0, 8);
+        o.textContent = label + '  ·  ' + formatRelativeTime(s.lastActivity);
+        if (s.firstMessage && s.firstMessage !== label) {
+          o.title = s.firstMessage;
+        }
+        resumeSelect.appendChild(o);
+      });
+      resumeStatus.textContent = sessions.length + ' session' + (sessions.length === 1 ? '' : 's') + ' found';
+      resumeStatus.style.color = 'var(--text-muted)';
+      updateLaunchBtn();
+    }).catch(function(err) {
+      resumeSelect.textContent = '';
+      var opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = '(failed to load)';
+      opt.disabled = true;
+      resumeSelect.appendChild(opt);
+      resumeStatus.textContent = 'Error: ' + (err && err.message ? err.message : 'load failed');
+      resumeStatus.style.color = 'var(--err-color, #f87171)';
+      updateLaunchBtn();
+    });
+  }
+
+  resumeCheckbox.addEventListener('change', function() {
+    if (resumeCheckbox.checked) {
+      resumeDropdownWrap.style.display = 'block';
+      loadResumeSessions();
+    } else {
+      resumeDropdownWrap.style.display = 'none';
+      resumeSessionId = null;
+      updateLaunchBtn();
+    }
+  });
+
+  resumeSelect.addEventListener('change', function() {
+    resumeSessionId = resumeSelect.value || null;
+    updateLaunchBtn();
+  });
+
+  // Reload sessions when crew or harness changes (if resume is toggled on)
+  function reloadResumeIfOpen() {
+    if (resumeCheckbox.checked) loadResumeSessions();
+  }
+
+  // --- TERMINAL SECTION ---
+  var terminalSection = document.createElement('div');
+  terminalSection.className = 'launch-section';
+  var terminalLabel = document.createElement('div');
+  terminalLabel.className = 'launch-section-label';
+  terminalLabel.textContent = 'Terminal';
+  terminalSection.appendChild(terminalLabel);
+
+  var terminalGroup = document.createElement('div');
+  terminalGroup.className = 'harness-radio-group';
+
+  var terminalDefs = [
+    { id: 'wezterm', label: 'WezTerm', info: terminalsInfo.wezterm || { available: false, running: false } },
+    { id: 'wt', label: 'Windows Terminal', info: terminalsInfo.wt || { available: false } },
+    { id: 'manual', label: 'Manual', info: terminalsInfo.manual || { available: true } },
+  ];
+
+  // Auto-select: prefer wezterm if available, then wt, then manual
+  var defaultTerminal = 'manual';
+  if (terminalsInfo.wezterm && terminalsInfo.wezterm.available) defaultTerminal = 'wezterm';
+  else if (terminalsInfo.wt && terminalsInfo.wt.available) defaultTerminal = 'wt';
+  selectedTerminal = defaultTerminal;
+
+  terminalDefs.forEach(function(t) {
+    var available = t.info.available !== false;
+    var lbl = document.createElement('label');
+    lbl.className = 'harness-card-label' + (available ? '' : ' disabled');
+    if (!available) lbl.title = t.label + ' not available';
+
+    var radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'launch-terminal';
+    radio.value = t.id;
+    radio.disabled = !available;
+    if (t.id === defaultTerminal) {
+      radio.checked = true;
+      lbl.classList.add('selected');
+    }
+
+    var nameSpan = document.createElement('span');
+    nameSpan.textContent = t.label;
+    lbl.appendChild(radio);
+    lbl.appendChild(nameSpan);
+
+    // Subtitle
+    var subtitle = document.createElement('span');
+    subtitle.className = 'harness-not-installed';
+    if (t.id === 'wezterm') {
+      if (t.info.running) {
+        subtitle.textContent = 'Auto-inject supported';
+        subtitle.style.color = 'var(--ok-color, #4ecdc4)';
+      } else if (available) {
+        subtitle.textContent = 'Will open new window';
+        subtitle.style.color = 'var(--text-muted)';
+      } else {
+        subtitle.textContent = '(not available)';
+      }
+    } else if (t.id === 'wt') {
+      if (available) {
+        subtitle.textContent = 'Manual join required';
+        subtitle.style.color = 'var(--warn-color, #f59e0b)';
+      } else {
+        subtitle.textContent = '(not available)';
+      }
+    } else if (t.id === 'manual') {
+      subtitle.textContent = 'Copy command to clipboard';
+      subtitle.style.color = 'var(--text-muted)';
+    }
+    lbl.appendChild(subtitle);
+
+    radio.addEventListener('change', function() {
+      if (!radio.checked) return;
+      terminalGroup.querySelectorAll('.harness-card-label').forEach(function(el) {
+        el.classList.remove('selected');
+      });
+      lbl.classList.add('selected');
+      selectedTerminal = t.id;
+      updateMcpWarning();
+      updateLaunchBtn();
+    });
+
+    terminalGroup.appendChild(lbl);
+  });
+
+  terminalSection.appendChild(terminalGroup);
+  content.appendChild(terminalSection);
+
+  // --- JOIN SECTION ---
+  var joinSection = document.createElement('div');
+  joinSection.className = 'launch-section';
+  var joinSectionLabel = document.createElement('div');
+  joinSectionLabel.className = 'launch-section-label';
+  joinSectionLabel.textContent = 'Join';
+  joinSection.appendChild(joinSectionLabel);
+
+  var convRow = document.createElement('div');
+  convRow.className = 'join-row';
+  var convRowLabel = document.createElement('span');
+  convRowLabel.className = 'join-row-label';
+  convRowLabel.textContent = 'Conversation';
+  var convSelect = document.createElement('select');
+  convSelect.className = 'launch-select';
+  convSelect.id = 'launch-conversation';
+
+  var skipOpt = document.createElement('option');
+  skipOpt.value = '';
+  skipOpt.textContent = '(skip join)';
+  convSelect.appendChild(skipOpt);
+
+  convList.forEach(function(c) {
+    var co = document.createElement('option');
+    co.value = c.id || c.name;
+    co.textContent = c.name;
+    convSelect.appendChild(co);
+  });
+
+  // Pre-select active conversation if available
+  if (activeConversation) {
+    convSelect.value = activeConversation.id;
+  }
+
+  convRow.appendChild(convRowLabel);
+  convRow.appendChild(convSelect);
+  joinSection.appendChild(convRow);
+
+  var joinAsRow = document.createElement('div');
+  joinAsRow.className = 'join-row';
+  var joinAsLabel = document.createElement('span');
+  joinAsLabel.className = 'join-row-label';
+  joinAsLabel.textContent = 'Join as';
+  var joinAsInput = document.createElement('input');
+  joinAsInput.type = 'text';
+  joinAsInput.className = 'launch-input';
+  joinAsInput.id = 'launch-join-as';
+  joinAsInput.placeholder = 'agent name';
+  joinAsInput.addEventListener('input', updateLaunchBtn);
+  joinAsRow.appendChild(joinAsLabel);
+  joinAsRow.appendChild(joinAsInput);
+  joinSection.appendChild(joinAsRow);
+
+  content.appendChild(joinSection);
+
+  // --- META SECTION ---
+  var metaSection = document.createElement('div');
+  metaSection.className = 'launch-section';
+
+  var metaRow = document.createElement('div');
+  metaRow.className = 'launch-meta-row';
+
+  var termStatus = document.createElement('div');
+  termStatus.className = 'terminal-status-line';
+  termStatus.id = 'launch-terminal-status';
+  termStatus.textContent = 'WezTerm status unknown';
+  metaRow.appendChild(termStatus);
+
+  var delayRow = document.createElement('div');
+  delayRow.className = 'inject-delay-row';
+  var delayLabel = document.createElement('span');
+  delayLabel.className = 'inject-delay-label';
+  delayLabel.textContent = 'Delay';
+  var delaySelect = document.createElement('select');
+  delaySelect.className = 'inject-delay-select';
+  delaySelect.id = 'launch-inject-delay';
+  [2, 3, 4, 6, 10].forEach(function(s) {
+    var o = document.createElement('option');
+    o.value = s;
+    o.textContent = s + 's';
+    if (s === 4) o.selected = true;
+    delaySelect.appendChild(o);
+  });
+  delayRow.appendChild(delayLabel);
+  delayRow.appendChild(delaySelect);
+  metaRow.appendChild(delayRow);
+
+  metaSection.appendChild(metaRow);
+
+  // Warning area (for no-MCP warning)
+  var warnArea = document.createElement('div');
+  warnArea.id = 'launch-warn-area';
+  metaSection.appendChild(warnArea);
+
+  content.appendChild(metaSection);
+
+  // --- FOOTER ---
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-launch-cancel';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', closeLaunchDialog);
+
+  var goBtn = document.createElement('button');
+  goBtn.className = 'btn-launch-go';
+  goBtn.id = 'launch-go-btn';
+  goBtn.textContent = 'Launch \u2192';
+  goBtn.disabled = true;
+  goBtn.addEventListener('click', function() {
+    executeLaunch(harnesses, crewList, function(launchResult) {
+      showLaunchStatus(content, footer, launchResult, convSelect.value, joinAsInput.value);
+    });
+  });
+
+  footer.appendChild(cancelBtn);
+  footer.appendChild(goBtn);
+
+  // --- HELPER: update MCP warning based on selected harness + crew (Fix 3) ---
+  function updateMcpWarning() {
+    var wa = document.getElementById('launch-warn-area');
+    if (!wa) return;
+    wa.textContent = '';
+    if (!selectedCrew) return;
+    // Determine which mcpConfig key to check for the selected harness
+    var harnessId = selectedHarness ? selectedHarness.id : null;
+    var hasMcp;
+    if (selectedCrew.mcpConfig && typeof selectedCrew.mcpConfig === 'object') {
+      // Rich mcpConfig object: keyed by harness id
+      hasMcp = harnessId ? !!selectedCrew.mcpConfig[harnessId] : false;
+    } else {
+      // Legacy boolean hasMcpConfig (claude only)
+      hasMcp = harnessId === 'claude' ? !!selectedCrew.hasMcpConfig : true;
+    }
+    // Only show the warning when a harness is selected and its MCP config is missing
+    if (harnessId && !hasMcp) {
+      var warn = document.createElement('div');
+      warn.className = 'launch-warning';
+      warn.textContent = '\u26A0 No MCP config detected for ' + (selectedHarness ? selectedHarness.label : harnessId) + ' \u2014 command will be shown for manual launch';
+      wa.appendChild(warn);
+    }
+  }
+
+  // --- HELPER: autofill from crew ---
+  function autoFillFromCrew(crew) {
+    if (crew.joinAs) joinAsInput.value = crew.joinAs;
+    if (crew.defaultHarness) {
+      var radio = harnessGroup.querySelector('input[value="' + crew.defaultHarness + '"]');
+      if (radio && !radio.disabled) {
+        radio.checked = true;
+        harnessGroup.querySelectorAll('.harness-card-label').forEach(function(el) {
+          el.classList.remove('selected');
+        });
+        var parentLbl = radio.parentElement;
+        if (parentLbl) parentLbl.classList.add('selected');
+        selectedHarness = harnesses.find(function(h) { return h.id === crew.defaultHarness; }) || null;
+        if (selectedHarness) renderFlagsForm(selectedHarness, flagsForm);
+      }
+    }
+    if (crew.defaultConversation) {
+      convSelect.value = crew.defaultConversation;
+    }
+    // Update WezTerm status
+    var ts = document.getElementById('launch-terminal-status');
+    if (ts) {
+      var weztermAvail = terminalsInfo.wezterm && terminalsInfo.wezterm.available;
+      if (weztermAvail) {
+        ts.textContent = '\u2713 WezTerm available';
+        ts.className = 'terminal-status-line ok';
+      } else {
+        ts.textContent = '\u26A0 No WezTerm \u2014 manual launch';
+        ts.className = 'terminal-status-line warn';
+      }
+    }
+    updateMcpWarning();
+    updateLaunchBtn();
+  }
+
+  // --- VALIDATE + UPDATE LAUNCH BTN ---
+  function updateLaunchBtn() {
+    var btn = document.getElementById('launch-go-btn');
+    if (!btn) return;
+    var valid = (
+      selectedCrew !== null &&
+      selectedCrew.path &&
+      selectedHarness !== null &&
+      selectedHarness.installed &&
+      joinAsInput.value.trim() !== ''
+    );
+    // When resume toggle is on, a session must be picked
+    if (resumeCheckbox.checked && !resumeSessionId) valid = false;
+    btn.disabled = !valid;
+  }
+
+  // Expose resume state to executeLaunch via a getter on the closure
+  window.__getLaunchResumeId = function() { return resumeSessionId; };
+}
+
+function renderFlagsForm(harness, container) {
+  container.textContent = '';
+  var flags = harness.flags || [];
+  if (flags.length === 0) {
+    var empty = document.createElement('div');
+    empty.style.fontSize = '11px';
+    empty.style.color = 'var(--text-muted)';
+    empty.style.fontStyle = 'italic';
+    empty.textContent = 'No configurable options';
+    container.appendChild(empty);
+    return;
+  }
+  flags.forEach(function(flag) {
+    var row = document.createElement('div');
+    row.className = 'flag-row';
+
+    var lbl = document.createElement('label');
+    lbl.className = 'flag-label';
+    lbl.textContent = flag.label;
+    if (flag.help) lbl.title = flag.help;
+    row.appendChild(lbl);
+
+    var input;
+    if (flag.type === 'enum') {
+      input = document.createElement('select');
+      input.className = 'launch-select';
+      (flag.options || []).forEach(function(opt) {
+        var o = document.createElement('option');
+        o.value = opt; o.textContent = opt;
+        if (opt === flag.default) o.selected = true;
+        input.appendChild(o);
+      });
+    } else if (flag.type === 'boolean') {
+      var checkWrap = document.createElement('div');
+      checkWrap.style.display = 'flex';
+      checkWrap.style.alignItems = 'center';
+      checkWrap.style.gap = '7px';
+      input = document.createElement('input');
+      input.type = 'checkbox';
+      input.style.accentColor = 'var(--accent)';
+      input.style.width = '15px';
+      input.style.height = '15px';
+      if (flag.default === true || flag.default === 'true') input.checked = true;
+      checkWrap.appendChild(input);
+      if (flag.help) {
+        var helpSpan = document.createElement('span');
+        helpSpan.style.fontSize = '10px';
+        helpSpan.style.color = 'var(--text-muted)';
+        helpSpan.textContent = flag.help;
+        checkWrap.appendChild(helpSpan);
+      }
+      input.dataset.flagId = flag.id;
+      input.dataset.flagType = 'boolean';
+      row.appendChild(checkWrap);
+      container.appendChild(row);
+      return;
+    } else if (flag.type === 'multi-text') {
+      input = document.createElement('textarea');
+      input.className = 'launch-textarea';
+      input.placeholder = flag.placeholder || 'One value per line';
+      if (flag.default) input.value = flag.default;
+    } else {
+      // text (default)
+      input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'launch-input';
+      input.placeholder = flag.placeholder || '';
+      if (flag.default !== undefined) input.value = flag.default;
+    }
+
+    input.dataset.flagId = flag.id;
+    input.dataset.flagType = flag.type || 'text';
+    row.appendChild(input);
+    container.appendChild(row);
+  });
+}
+
+function buildAddCrewForm(onAdd, onCancel) {
+  var form = document.createElement('div');
+  form.className = 'add-crew-form';
+
+  var pathRow = document.createElement('div');
+  pathRow.className = 'add-crew-form-row';
+  var pathLabel = document.createElement('span');
+  pathLabel.className = 'add-crew-form-label';
+  pathLabel.textContent = 'Path';
+  var pathInput = document.createElement('input');
+  pathInput.type = 'text';
+  pathInput.className = 'launch-input';
+  pathInput.placeholder = '/path/to/agent/workspace';
+  pathRow.appendChild(pathLabel);
+  pathRow.appendChild(pathInput);
+  form.appendChild(pathRow);
+
+  var nameRow = document.createElement('div');
+  nameRow.className = 'add-crew-form-row';
+  var nameLabel = document.createElement('span');
+  nameLabel.className = 'add-crew-form-label';
+  nameLabel.textContent = 'Name';
+  var nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'launch-input';
+  nameInput.placeholder = 'display name';
+  nameRow.appendChild(nameLabel);
+  nameRow.appendChild(nameInput);
+  form.appendChild(nameRow);
+
+  var errLine = document.createElement('div');
+  errLine.className = 'launch-error';
+  errLine.style.display = 'none';
+  form.appendChild(errLine);
+
+  var btnRow = document.createElement('div');
+  btnRow.className = 'add-crew-btns';
+
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-launch-cancel';
+  cancelBtn.style.padding = '4px 12px';
+  cancelBtn.style.fontSize = '11px';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', onCancel);
+
+  var addBtn = document.createElement('button');
+  addBtn.className = 'btn-launch-go';
+  addBtn.style.padding = '4px 12px';
+  addBtn.style.fontSize = '11px';
+  addBtn.textContent = 'Add';
+  addBtn.addEventListener('click', function() {
+    var path = pathInput.value.trim();
+    var name = nameInput.value.trim();
+    if (!path || !name) {
+      errLine.textContent = 'Path and name are required';
+      errLine.style.display = '';
+      return;
+    }
+    errLine.style.display = 'none';
+    addBtn.disabled = true;
+    addBtn.textContent = '...';
+    fetch('/api/crew', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, path: path })
+    }).then(function(r) { return r.json(); }).then(function(crew) {
+      addBtn.disabled = false;
+      addBtn.textContent = 'Add';
+      if (crew.error) {
+        errLine.textContent = crew.error;
+        errLine.style.display = '';
+        return;
+      }
+      onAdd(crew);
+    }).catch(function() {
+      addBtn.disabled = false;
+      addBtn.textContent = 'Add';
+      errLine.textContent = 'Request failed';
+      errLine.style.display = '';
+    });
+  });
+
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(addBtn);
+  form.appendChild(btnRow);
+
+  return form;
+}
+
+function executeLaunch(harnesses, crewList, onResult) {
+  var crewSelect = document.getElementById('launch-crew-select');
+  var joinAsInput = document.getElementById('launch-join-as');
+  var convSelect = document.getElementById('launch-conversation');
+  var delaySelect = document.getElementById('launch-inject-delay');
+  var goBtn = document.getElementById('launch-go-btn');
+
+  if (!crewSelect || !joinAsInput) return;
+
+  var crewName = crewSelect.value;
+  var crew = (crewList || []).find(function(c) { return c.name === crewName; });
+  var crewPath = crew ? crew.path : '';
+  var harnessRadio = document.querySelector('input[name="launch-harness"]:checked');
+  var harnessId = harnessRadio ? harnessRadio.value : null;
+  var terminalRadio = document.querySelector('input[name="launch-terminal"]:checked');
+  var terminalId = terminalRadio ? terminalRadio.value : 'wezterm';
+  var joinAs = joinAsInput.value.trim();
+  var convId = convSelect ? convSelect.value : '';
+  var delaySec = delaySelect ? parseInt(delaySelect.value, 10) : 4;
+  var delayMs = (isFinite(delaySec) ? delaySec : 4) * 1000;
+
+  // Collect flags from rendered flag inputs
+  var flagsObj = {};
+  document.querySelectorAll('[data-flag-id]').forEach(function(el) {
+    var id = el.dataset.flagId;
+    var type = el.dataset.flagType;
+    if (!id) return;
+    if (type === 'boolean') {
+      flagsObj[id] = el.checked;
+    } else if (type === 'multi-text') {
+      var lines = el.value.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l; });
+      flagsObj[id] = lines;
+    } else {
+      flagsObj[id] = el.value;
+    }
+  });
+
+  var payload = {
+    crewName: crewName,
+    crewPath: crewPath,
+    harness: harnessId,
+    flags: flagsObj,
+    joinAs: joinAs,
+    injectDelay: delayMs,
+    terminal: terminalId
+  };
+  if (convId) payload.conversation = convId;
+  if (typeof window.__getLaunchResumeId === 'function') {
+    var resumeId = window.__getLaunchResumeId();
+    if (resumeId) payload.resumeSessionId = resumeId;
+  }
+
+  if (goBtn) goBtn.disabled = true;
+  if (goBtn) goBtn.textContent = 'Launching...';
+
+  fetch('/api/launch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).then(function(r) { return r.json(); }).then(function(result) {
+    onResult(result);
+  }).catch(function(err) {
+    if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Launch \u2192'; }
+    var result = { error: err && err.message ? err.message : 'Network error', status: 'failed' };
+    onResult(result);
+  });
+}
+
+function showLaunchStatus(content, footer, result, convId, joinAs) {
+  if (launchCountdownInterval) { clearInterval(launchCountdownInterval); launchCountdownInterval = null; }
+  if (launchPollInterval) { clearInterval(launchPollInterval); launchPollInterval = null; }
+
+  content.textContent = '';
+  footer.textContent = '';
+
+  var view = document.createElement('div');
+  view.className = 'launch-status-view';
+
+  // Status line
+  var statusLine = document.createElement('div');
+  if (result.error && result.status !== 'pending' && result.status !== 'launched') {
+    statusLine.className = 'launch-status-line err';
+    statusLine.textContent = '\u2716 Error: ' + result.error;
+  } else if (result.paneId != null) {
+    statusLine.className = 'launch-status-line ok';
+    statusLine.textContent = '\u2713 Pane spawned (ID: ' + result.paneId + ')';
+  } else {
+    statusLine.className = 'launch-status-line warn';
+    statusLine.textContent = '\u26A0 No WezTerm — manual launch';
+  }
+  view.appendChild(statusLine);
+
+  if (result.paneId != null && !result.error) {
+    // Countdown + inject buttons
+    launchCurrentId = result.launchId;
+    launchCancelledInject = false;
+
+    var delaySelect = document.getElementById('launch-inject-delay');
+    var totalDelay = (delaySelect ? parseInt(delaySelect.value) : 4);
+    if (!totalDelay || isNaN(totalDelay)) totalDelay = 4;
+    var remaining = totalDelay;
+
+    var countWrap = document.createElement('div');
+    countWrap.className = 'launch-countdown-wrap';
+
+    var countEl = document.createElement('div');
+    countEl.className = 'launch-countdown';
+    countEl.textContent = remaining;
+
+    var countLabel = document.createElement('div');
+    countLabel.className = 'launch-countdown-label';
+    countLabel.textContent = 'Injecting join command in ' + remaining + 's...';
+
+    countWrap.appendChild(countEl);
+    countWrap.appendChild(countLabel);
+    view.appendChild(countWrap);
+
+    var injectBtns = document.createElement('div');
+    injectBtns.className = 'launch-inject-btns';
+
+    var injectNowBtn = document.createElement('button');
+    injectNowBtn.className = 'btn-inject-now';
+    injectNowBtn.textContent = 'Inject now';
+    injectNowBtn.addEventListener('click', function() {
+      if (launchCountdownInterval) { clearInterval(launchCountdownInterval); launchCountdownInterval = null; }
+      injectBtns.textContent = '';
+      doInject(result.launchId, view, convId, joinAs);
+    });
+
+    var cancelInjectBtn = document.createElement('button');
+    cancelInjectBtn.className = 'btn-inject-cancel';
+    cancelInjectBtn.textContent = 'Cancel injection';
+    cancelInjectBtn.addEventListener('click', function() {
+      if (launchCountdownInterval) { clearInterval(launchCountdownInterval); launchCountdownInterval = null; }
+      launchCancelledInject = true;
+      injectBtns.textContent = '';
+      countWrap.remove();
+      var cancelledMsg = document.createElement('div');
+      cancelledMsg.className = 'launch-status-line warn';
+      cancelledMsg.textContent = '\u2715 Injection cancelled';
+      view.insertBefore(cancelledMsg, view.children[1] || null);
+    });
+
+    injectBtns.appendChild(injectNowBtn);
+    injectBtns.appendChild(cancelInjectBtn);
+    view.appendChild(injectBtns);
+
+    launchCountdownInterval = setInterval(function() {
+      remaining--;
+      countEl.textContent = remaining;
+      countLabel.textContent = 'Injecting join command in ' + remaining + 's...';
+      if (remaining <= 0) {
+        clearInterval(launchCountdownInterval);
+        launchCountdownInterval = null;
+        if (!launchCancelledInject) {
+          injectBtns.textContent = '';
+          countWrap.remove();
+          doInject(result.launchId, view, convId, joinAs);
+        }
+      }
+    }, 1000);
+
+  } else if (result.command) {
+    // Manual mode — show command string
+    var manualLabel = document.createElement('div');
+    manualLabel.style.fontSize = '11px';
+    manualLabel.style.color = 'var(--text-muted)';
+    manualLabel.textContent = 'Run this command in the agent\'s terminal:';
+    view.appendChild(manualLabel);
+
+    var cmdBox = document.createElement('div');
+    cmdBox.className = 'manual-command';
+    cmdBox.textContent = result.command;
+    view.appendChild(cmdBox);
+
+    var copyBtn = document.createElement('button');
+    copyBtn.className = 'btn-copy-cmd';
+    copyBtn.textContent = 'Copy command';
+    copyBtn.addEventListener('click', function() {
+      navigator.clipboard.writeText(result.command).then(function() {
+        copyBtn.textContent = '\u2713 Copied';
+        copyBtn.classList.add('copied');
+        setTimeout(function() {
+          copyBtn.textContent = 'Copy command';
+          copyBtn.classList.remove('copied');
+        }, 1500);
+      });
+    });
+    view.appendChild(copyBtn);
+  }
+
+  content.appendChild(view);
+
+  // Status footer
+  var closeBtn = document.createElement('button');
+  closeBtn.className = 'btn-launch-close';
+  closeBtn.textContent = 'Close';
+  closeBtn.addEventListener('click', closeLaunchDialog);
+
+  var anotherBtn = document.createElement('button');
+  anotherBtn.className = 'btn-launch-another';
+  anotherBtn.textContent = 'Launch Another';
+  anotherBtn.addEventListener('click', function() {
+    closeLaunchDialog();
+    openLaunchDialog();
+  });
+
+  footer.appendChild(closeBtn);
+  footer.appendChild(anotherBtn);
+}
+
+function doInject(launchId, view, convId, joinAs) {
+  var doingEl = document.createElement('div');
+  doingEl.className = 'launch-status-line';
+  doingEl.style.color = 'var(--text-muted)';
+  doingEl.textContent = 'Injecting...';
+  view.appendChild(doingEl);
+
+  fetch('/api/launch/' + encodeURIComponent(launchId) + '/inject', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  }).then(function(r) { return r.json(); }).then(function(res) {
+    doingEl.remove();
+    if (res.status === 'done' || res.status === 'injected') {
+      var doneLine = document.createElement('div');
+      doneLine.className = 'launch-done-line';
+      var convName = convId ? convId : '(no conversation)';
+      doneLine.textContent = '\u2713 Joined ' + convName + ' as ' + joinAs;
+      view.appendChild(doneLine);
+    } else {
+      startLaunchPolling(launchId, view, convId, joinAs);
+    }
+  }).catch(function(err) {
+    doingEl.remove();
+    var errLine = document.createElement('div');
+    errLine.className = 'launch-status-line err';
+    errLine.textContent = '\u2716 Inject failed: ' + (err && err.message ? err.message : 'error');
+    view.appendChild(errLine);
+  });
+}
+
+function startLaunchPolling(launchId, view, convId, joinAs) {
+  if (launchPollInterval) { clearInterval(launchPollInterval); launchPollInterval = null; }
+
+  var pollIndicator = document.createElement('div');
+  pollIndicator.className = 'launch-status-line';
+  pollIndicator.style.color = 'var(--text-muted)';
+  pollIndicator.style.fontSize = '11px';
+  pollIndicator.textContent = 'Waiting for agent...';
+  view.appendChild(pollIndicator);
+
+  var pollCount = 0;
+  launchPollInterval = setInterval(function() {
+    pollCount++;
+    if (pollCount > 30) {
+      clearInterval(launchPollInterval); launchPollInterval = null;
+      pollIndicator.textContent = 'Timed out waiting for agent';
+      pollIndicator.className = 'launch-status-line warn';
+      return;
+    }
+    fetch('/api/launch/' + encodeURIComponent(launchId))
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (res.status === 'done' || res.status === 'injected') {
+          clearInterval(launchPollInterval); launchPollInterval = null;
+          pollIndicator.remove();
+          var doneLine = document.createElement('div');
+          doneLine.className = 'launch-done-line';
+          var convName = convId ? convId : '(no conversation)';
+          doneLine.textContent = '\u2713 Joined ' + convName + ' as ' + joinAs;
+          view.appendChild(doneLine);
+        } else if (res.status === 'failed') {
+          clearInterval(launchPollInterval); launchPollInterval = null;
+          pollIndicator.remove();
+          var errLine = document.createElement('div');
+          errLine.className = 'launch-status-line err';
+          errLine.textContent = '\u2716 Failed: ' + (res.error || 'unknown error');
+          view.appendChild(errLine);
+        }
+        // else still pending — keep polling
+      }).catch(function() { /* keep polling */ });
+  }, 1000);
+}
+
+// END LAUNCH DIALOG
+// =============================================================================
 
 function sendReaction(messageId, emoji) {
   var sender = document.getElementById('sender-name').value || 'human';

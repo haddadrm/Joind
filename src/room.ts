@@ -38,6 +38,11 @@ export interface RoomEvent {
   data: ChatMessage | Agent | { oldName: string; newName: string; agent: Agent } | { name: string; typing: boolean };
 }
 
+export interface ChatRoomOptions {
+  chatFilePath?: string;
+  getCursor?: (agentName: string) => number;
+}
+
 export class ChatRoom extends EventEmitter {
   private messages: ChatMessage[] = [];
   private agents = new Map<string, Agent>();
@@ -48,14 +53,25 @@ export class ChatRoom extends EventEmitter {
   private chatFile: string | null = null;
   private staleInterval: ReturnType<typeof setInterval> | null = null;
   private agentTurnCount = 0; // consecutive agent turns since last human message
+  getCursor: (agentName: string) => number;
   turnGuard: { enabled: boolean; limit: number } | null = null;
 
-  constructor(chatFilePath?: string) {
+  constructor(chatFilePathOrOptions?: string | ChatRoomOptions) {
     super();
-    if (chatFilePath) {
-      this.chatFile = chatFilePath;
-      const loaded = loadMessages<ChatMessage>(chatFilePath);
-      this.messages = loaded;
+    // Support legacy string argument as well as the new options object
+    const options: ChatRoomOptions =
+      typeof chatFilePathOrOptions === "string"
+        ? { chatFilePath: chatFilePathOrOptions }
+        : (chatFilePathOrOptions ?? {});
+
+    this.getCursor = options.getCursor ?? (() => 0);
+
+    if (options.chatFilePath) {
+      this.chatFile = options.chatFilePath;
+      const loaded = loadMessages<ChatMessage>(options.chatFilePath);
+      // Filter out reaction-only entries that may have been persisted incorrectly
+      // (they have emoji + messageId but no id or text)
+      this.messages = loaded.filter((m) => m.id != null);
       this.nextId = maxId(loaded) + 1;
       if (loaded.length > 0) {
         console.log(`  Loaded ${loaded.length} messages (next ID: ${this.nextId})`);
@@ -175,9 +191,10 @@ export class ChatRoom extends EventEmitter {
         const pidParam = agent.pid ? `&pid=${agent.pid}` : "";
         const paneParam = agent.weztermPaneId != null ? `&paneId=${agent.weztermPaneId}` : "";
         const pidBody = agent.pid ? `,"pid":${agent.pid}` : "";
+        const since = this.getCursor(name);
         const prompt =
           `[joind] @${name} mentioned by ${sender}.${roleHint} ` +
-          `Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${name}&since=0${pidParam}${paneParam}" — ` +
+          `Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${name}&since=${since}${pidParam}${paneParam}" — ` +
           `Reply: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" ` +
           `-d '{"sender":"${name}","text":"YOUR_REPLY"${pidBody}}'`;
         const target = agent.weztermPaneId != null ? `pane:${agent.weztermPaneId}` : `PID:${agent.pid}`;

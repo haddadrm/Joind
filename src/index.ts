@@ -28,6 +28,11 @@ import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
 import { EditStore } from "./edits.js";
 import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv } from "./terminals.js";
+import CrewStore, { detectIdentityFile, validateCrewFolder } from "./crew.js";
+import type { CrewFolder } from "./crew.js";
+import { getHarnesses, pickBestExePath } from "./harnesses.js";
+import { listSessionsForHarness } from "./launch-sessions.js";
+import LaunchService from "./launcher.js";
 import {
   loadTemplates,
   getTemplates,
@@ -162,8 +167,19 @@ loadTemplates();
 
 // Apply turn guard to existing and future rooms
 applyTurnGuard();
+
+// Apply cursor provider to all existing and future rooms
+function applyCursorProvider(): void {
+  for (const conv of manager.listConversations()) {
+    const room = manager.getRoom(conv.id);
+    if (room) room.getCursor = (name) => cursorStore.get(name);
+  }
+}
+applyCursorProvider();
+
 manager.on("room-created", (room) => {
   if (turnGuard.enabled) room.turnGuard = turnGuard;
+  room.getCursor = (name: string) => cursorStore.get(name);
 });
 
 // Forward conversation room events to WebSocket clients (scoped by active conversation)
@@ -1105,7 +1121,7 @@ app.post("/api/session/start", express.json(), (req, res) => {
   if (!tmpl) { res.status(404).json({ error: "Template not found" }); return; }
   const missing = tmpl.roles.filter((r) => !cast[r]);
   if (missing.length > 0) { res.status(400).json({ error: "Missing roles", missing }); return; }
-  const session = startSession(templateId, cast, goal ?? "", startedBy ?? "human", room);
+  const session = startSession(templateId, cast, goal ?? "", startedBy ?? "human", room, (name) => cursorStore.get(name));
   if (!session) { res.status(500).json({ error: "Failed" }); return; }
   res.json(session);
 });
@@ -1136,6 +1152,241 @@ app.get("/api/terminals", async (_req, res) => {
     }
     res.json(terminals);
   } catch { res.json([]); }
+});
+
+// --- Crew management ---
+
+app.get("/api/crew", (_req, res) => {
+  const crew = CrewStore.getAll();
+  const enriched = crew.map((entry) => {
+    const identityExists =
+      entry.identityFile
+        ? existsSync(join(entry.path, entry.identityFile))
+        : false;
+    const mcpConfig = {
+      claude:
+        existsSync(join(entry.path, ".claude", "settings.json")) ||
+        existsSync(join(entry.path, ".claude", "settings.local.json")),
+      codex: existsSync(join(entry.path, ".codex")),
+      gemini: existsSync(join(entry.path, ".gemini")),
+      openclaw: existsSync(join(entry.path, ".openclaw")),
+    };
+    // Legacy boolean for backward compat
+    const hasMcpConfig = mcpConfig.claude;
+    return { ...entry, identityExists, hasMcpConfig, mcpConfig };
+  });
+  res.json(enriched);
+});
+
+app.post("/api/crew", express.json(), (req, res) => {
+  const { name, path: folderPath, defaultHarness, defaultConversation, joinAs } =
+    req.body as {
+      name?: string;
+      path?: string;
+      defaultHarness?: string;
+      defaultConversation?: string;
+      joinAs?: string;
+    };
+
+  if (!name || !folderPath) {
+    res.status(400).json({ error: "name and path required" });
+    return;
+  }
+
+  const entry: CrewFolder = { name, path: folderPath };
+  if (defaultHarness) entry.defaultHarness = defaultHarness;
+  if (defaultConversation) entry.defaultConversation = defaultConversation;
+
+  // Auto-detect identity file if not provided
+  const detected = detectIdentityFile(folderPath);
+  if (detected) {
+    entry.identityFile = detected.file;
+    entry.joinAs = joinAs ?? detected.joinAs;
+  } else if (joinAs) {
+    entry.joinAs = joinAs;
+  }
+
+  const { valid, errors } = validateCrewFolder(entry);
+  if (!valid) {
+    res.status(400).json({ error: errors.join("; ") });
+    return;
+  }
+
+  CrewStore.add(entry);
+  res.json(entry);
+});
+
+app.delete("/api/crew/:name", (req, res) => {
+  const removed = CrewStore.remove(req.params.name);
+  if (!removed) {
+    res.status(404).json({ error: "Crew entry not found" });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+// --- Launcher terminal picker ---
+
+/** Resolve a command name via where/which, preferring .exe/.cmd/.bat on Windows. */
+async function resolveExe(command: string): Promise<string | null> {
+  try {
+    const whichCmd = process.platform === "win32" ? "where" : "which";
+    const { stdout } = await execFileAsync(whichCmd, [command], { timeout: 3000 });
+    const lines = stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    return pickBestExePath(lines);
+  } catch {
+    return null;
+  }
+}
+
+app.get("/api/launcher/terminals", async (_req, res) => {
+  try {
+    const [weztermPath, wtPath] = await Promise.all([
+      resolveExe("wezterm"),
+      process.platform === "win32" ? resolveExe("wt") : Promise.resolve(null),
+    ]);
+
+    const weztermRunning = weztermPath ? await checkWezTerm() : false;
+
+    res.json({
+      wezterm: {
+        available: weztermPath !== null,
+        running: weztermRunning,
+        path: weztermPath ?? undefined,
+      },
+      wt: {
+        available: wtPath !== null,
+        path: wtPath ?? undefined,
+      },
+      manual: {
+        available: true,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// --- Harness registry ---
+
+app.get("/api/harnesses", async (_req, res) => {
+  try {
+    const harnesses = await getHarnesses();
+    res.json(harnesses);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// --- Agent launcher ---
+
+app.get("/api/launcher/sessions", async (req, res) => {
+  const harnessId = String(req.query.harness ?? "").trim();
+  const cwd = String(req.query.cwd ?? "").trim();
+  const limitRaw = parseInt(String(req.query.limit ?? "30"), 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? limitRaw : 30;
+
+  if (!harnessId || !cwd) {
+    res.status(400).json({ error: "harness and cwd query parameters are required" });
+    return;
+  }
+
+  try {
+    const sessions = await listSessionsForHarness(harnessId, cwd, limit);
+    res.json(sessions);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/launch", express.json(), async (req, res) => {
+  const { crewName, crewPath, harness: harnessId, flags, conversation, joinAs, injectDelay, terminal, initialPrompt, resumeSessionId } =
+    req.body as {
+      crewName?: string;
+      crewPath?: string;
+      harness?: string;
+      flags?: Record<string, string | string[] | boolean>;
+      conversation?: string;
+      joinAs?: string;
+      injectDelay?: number;
+      terminal?: "wezterm" | "wt" | "manual";
+      initialPrompt?: string;
+      resumeSessionId?: string;
+    };
+
+  if (!crewName || !crewPath || !harnessId || !joinAs) {
+    res.status(400).json({ error: "crewName, crewPath, harness, and joinAs are required" });
+    return;
+  }
+
+  const harnesses = await getHarnesses();
+  const harness = harnesses.find((h) => h.id === harnessId);
+  if (!harness) {
+    res.status(400).json({ error: `Unknown harness: ${harnessId}` });
+    return;
+  }
+
+  const resolvedDelay =
+    typeof injectDelay === "number" && injectDelay >= 0
+      ? injectDelay
+      : harness.defaultDelay;
+
+  const resolvedTerminal: "wezterm" | "wt" | "manual" = terminal ?? "wezterm";
+
+  // Resolve wt.exe path if needed
+  let wtExe: string | undefined;
+  if (resolvedTerminal === "wt" && process.platform === "win32") {
+    wtExe = (await resolveExe("wt")) ?? "wt";
+  }
+
+  try {
+    const result = await LaunchService.launch(
+      {
+        crewName,
+        crewPath,
+        harness: harnessId,
+        flags: flags ?? {},
+        conversation,
+        joinAs,
+        injectDelay: resolvedDelay,
+        terminal: resolvedTerminal,
+        initialPrompt,
+        resumeSessionId,
+      },
+      harness,
+      getWeztermPath(),
+      getWeztermEnv(),
+      wtExe
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/launch/:launchId/inject", async (req, res) => {
+  const { launchId } = req.params;
+  const current = LaunchService.getLaunchStatus(launchId);
+  if (!current) {
+    res.status(404).json({ error: `Launch ${launchId} not found` });
+    return;
+  }
+  try {
+    await LaunchService.inject(launchId);
+    const updated = LaunchService.getLaunchStatus(launchId);
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/launch/:launchId", (req, res) => {
+  const result = LaunchService.getLaunchStatus(req.params.launchId);
+  if (!result) {
+    res.status(404).json({ error: `Launch ${req.params.launchId} not found` });
+    return;
+  }
+  res.json(result);
 });
 
 // --- Static files ---

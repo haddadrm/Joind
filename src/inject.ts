@@ -10,6 +10,52 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Spawn a new WezTerm pane running the given command in the given cwd.
+ * Returns the new pane ID.
+ * Optionally sets a tab title (best-effort).
+ * Throws if the pane ID returned by wezterm is not a valid integer.
+ */
+export async function spawnWeztermPane(opts: {
+  cwd: string;
+  command: string[];
+  tabTitle?: string;
+  weztermExe?: string;
+  weztermEnv?: Record<string, string>;
+}): Promise<number> {
+  const exe = opts.weztermExe ?? "wezterm";
+  const env =
+    opts.weztermEnv && Object.keys(opts.weztermEnv).length > 0
+      ? { ...process.env, ...opts.weztermEnv }
+      : undefined;
+
+  // wezterm cli spawn --cwd <cwd> -- <command...>
+  // stdout is the new pane ID as a plain integer string
+  const { stdout } = await execFileAsync(
+    exe,
+    ["cli", "spawn", "--cwd", opts.cwd, "--", ...opts.command],
+    { timeout: 10000, env }
+  );
+
+  const paneId = parseInt(stdout.trim(), 10);
+  if (!Number.isFinite(paneId) || isNaN(paneId)) {
+    throw new Error(
+      `wezterm cli spawn returned unexpected output (expected pane ID integer): ${stdout.trim()}`
+    );
+  }
+
+  // Best-effort tab title rename — ignore failures
+  if (opts.tabTitle) {
+    execFileAsync(
+      exe,
+      ["cli", "set-tab-title", "--pane-id", String(paneId), opts.tabTitle],
+      { timeout: 5000, env }
+    ).catch(() => {});
+  }
+
+  return paneId;
+}
+
 /** Default delays (ms) between text injection and Enter keystroke */
 const DEFAULT_DELAY_MS = 50;
 const CODEX_DELAY_MS = 300;

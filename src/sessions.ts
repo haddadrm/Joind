@@ -96,13 +96,16 @@ export function getTemplate(id: string): SessionTemplate | undefined {
 
 let nextSessionId = 1;
 const activeSessions = new Map<number, Session>();
+/** Per-session cursor resolvers — kept separate from the public Session type. */
+const sessionCursors = new Map<number, (agentName: string) => number>();
 
 export function startSession(
   templateId: string,
   cast: Record<string, string>,
   goal: string,
   startedBy: string,
-  room: ChatRoom
+  room: ChatRoom,
+  getCursor?: (agentName: string) => number
 ): Session | null {
   const tmpl = templates.get(templateId);
   if (!tmpl) return null;
@@ -127,6 +130,8 @@ export function startSession(
   };
 
   activeSessions.set(session.id, session);
+  const resolveCursor = getCursor ?? (() => 0);
+  sessionCursors.set(session.id, resolveCursor);
 
   // Announce session start
   const castDesc = Object.entries(cast)
@@ -135,18 +140,24 @@ export function startSession(
   room.send("system", `Session started: ${tmpl.name}${goal ? " — " + goal : ""} [${castDesc}]`);
 
   // Start first phase
-  advancePhase(session, tmpl, room);
+  advancePhase(session, tmpl, room, resolveCursor);
 
   return session;
 }
 
-function advancePhase(session: Session, tmpl: SessionTemplate, room: ChatRoom): void {
+function advancePhase(
+  session: Session,
+  tmpl: SessionTemplate,
+  room: ChatRoom,
+  getCursor: (agentName: string) => number
+): void {
   if (session.currentPhase >= tmpl.phases.length) {
     // All phases complete
     session.status = "complete";
     session.waitingFor = null;
     room.send("system", `Session complete: ${tmpl.name}`);
     activeSessions.delete(session.id);
+    sessionCursors.delete(session.id);
     return;
   }
 
@@ -155,15 +166,20 @@ function advancePhase(session: Session, tmpl: SessionTemplate, room: ChatRoom): 
 
   room.send("system", `Phase ${session.currentPhase + 1}/${tmpl.phases.length}: ${phase.name}`);
 
-  triggerCurrentTurn(session, tmpl, room);
+  triggerCurrentTurn(session, tmpl, room, getCursor);
 }
 
-function triggerCurrentTurn(session: Session, tmpl: SessionTemplate, room: ChatRoom): void {
+function triggerCurrentTurn(
+  session: Session,
+  tmpl: SessionTemplate,
+  room: ChatRoom,
+  getCursor: (agentName: string) => number
+): void {
   const phase = tmpl.phases[session.currentPhase];
   if (session.currentTurn >= phase.participants.length) {
     // All turns in this phase done — advance to next phase
     session.currentPhase++;
-    advancePhase(session, tmpl, room);
+    advancePhase(session, tmpl, room, getCursor);
     return;
   }
 
@@ -172,7 +188,7 @@ function triggerCurrentTurn(session: Session, tmpl: SessionTemplate, room: ChatR
   if (!agentName) {
     // Skip missing cast member
     session.currentTurn++;
-    triggerCurrentTurn(session, tmpl, room);
+    triggerCurrentTurn(session, tmpl, room, getCursor);
     return;
   }
 
@@ -185,7 +201,7 @@ function triggerCurrentTurn(session: Session, tmpl: SessionTemplate, room: ChatR
     room.send("system", `${agentName} timed out (${timeoutSec}s) in phase "${phase.name}"`);
     session.waitingFor = null;
     session.currentTurn++;
-    triggerCurrentTurn(session, tmpl, room);
+    triggerCurrentTurn(session, tmpl, room, getCursor);
   }, timeoutSec * 1000);
 
   // Build the prompt for this agent
@@ -198,7 +214,8 @@ function triggerCurrentTurn(session: Session, tmpl: SessionTemplate, room: ChatR
     prompt += ` ${DISSENT_LINE}`;
   }
 
-  prompt += ` Read context: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${agentName}&since=0&limit=30" — ` +
+  const since = getCursor(agentName);
+  prompt += ` Read context: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${agentName}&since=${since}&limit=30" — ` +
     `Respond: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" -d '{"sender":"${agentName}","text":"YOUR_RESPONSE"}'`;
 
   // Inject into the agent's terminal
@@ -236,9 +253,11 @@ export function onMessage(sender: string, room: ChatRoom): void {
     session.waitingFor = null;
     session.currentTurn++;
 
+    const getCursor = sessionCursors.get(session.id) ?? (() => 0);
+
     // Small delay before triggering next turn (let the message render)
     setTimeout(() => {
-      triggerCurrentTurn(session, tmpl, room);
+      triggerCurrentTurn(session, tmpl, room, getCursor);
     }, 2000);
 
     break; // One session per message
@@ -259,6 +278,7 @@ export function cancelSession(id: number, room: ChatRoom): boolean {
   session.status = "cancelled";
   session.waitingFor = null;
   activeSessions.delete(id);
+  sessionCursors.delete(id);
   room.send("system", `Session cancelled: ${session.templateName}`);
   return true;
 }
