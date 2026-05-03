@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-05-03 — Decision Cards from the Human Side
+
+### Added
+- `POST /api/send` (the web UI's human-message route) now accepts `choices: string[]`, matching `POST /api/agent/send`. Lets a human post a decision card directly without going through an agent.
+
 ## 2026-05-03 — Project .mcp.json Merge into Agent Configs (#4)
 
 ### Added

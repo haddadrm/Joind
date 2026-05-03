@@ -370,8 +370,8 @@ function activeRoom(res: express.Response) {
 app.post("/api/send", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
-  const { sender, text, image, replyTo } = req.body as {
-    sender?: string; text?: string; image?: string; replyTo?: number;
+  const { sender, text, image, replyTo, choices } = req.body as {
+    sender?: string; text?: string; image?: string; replyTo?: number; choices?: string[];
   };
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text required" });
@@ -381,8 +381,8 @@ app.post("/api/send", express.json(), (req, res) => {
   const activeId = manager.getActiveId();
   if (activeId && sender !== "system") manager.autoName(activeId, text);
 
-  const msg = room.send(sender, text, { image, replyTo });
-  res.json({ id: msg.id, sender: msg.sender, text: msg.text });
+  const msg = room.send(sender, text, { image, replyTo, choices });
+  res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices });
 });
 
 app.get("/api/messages", (req, res) => {
