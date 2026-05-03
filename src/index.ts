@@ -28,7 +28,8 @@ import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
 import { EditStore } from "./edits.js";
 import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv } from "./terminals.js";
-import CrewStore, { detectIdentityFile, validateCrewFolder } from "./crew.js";
+import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from "./crew.js";
+import { loadConfig, acquireLock } from "./config.js";
 import type { CrewFolder } from "./crew.js";
 import { getHarnesses, pickBestExePath } from "./harnesses.js";
 import { listSessionsForHarness } from "./launch-sessions.js";
@@ -44,8 +45,16 @@ import {
 } from "./sessions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.JOIND_PORT ?? 4200);
-const DATA_DIR = join(__dirname, "..", "data");
+const CONFIG = loadConfig();
+const PORT = CONFIG.port;
+const DATA_DIR = CONFIG.dataDir;
+const INSTANCE_NAME = CONFIG.instance;
+initCrewStore(DATA_DIR);
+const releaseLock = acquireLock(CONFIG);
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.once(sig, () => { releaseLock(); process.exit(0); });
+}
+process.once("exit", () => releaseLock());
 
 // --- WT_SESSION → agent name persistence (survives shell prompt title resets) ---
 const TAB_NAMES_FILE = join(DATA_DIR, "tab-names.json");
@@ -394,6 +403,10 @@ app.post("/api/messages/delete", express.json(), (req, res) => {
 app.get("/api/who", (_req, res) => {
   const room = manager.getActiveRoom();
   res.json(room?.who() ?? []);
+});
+
+app.get("/api/instance", (_req, res) => {
+  res.json({ name: INSTANCE_NAME, port: PORT, dataDir: DATA_DIR });
 });
 
 app.get("/api/export", (_req, res) => {

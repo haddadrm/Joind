@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-05-03 — Per-Project Instance Isolation (#1)
+
+### Added
+- **CLI flags & env vars** (`src/config.ts`): `--port` / `JOIND_PORT`, `--data-dir` / `JOIND_DATA_DIR`, `--name` / `JOIND_INSTANCE`. Defaults match previous behaviour (port 4200, in-repo `data/`, instance "Joind"), so single-instance users see no change.
+- **Data-directory lockfile** (`.joind.lock`): prevents two Joind servers from writing to the same `data/` directory. Stale locks (dead PIDs) are auto-replaced; live locks abort startup with a clear message.
+- **Instance name in web UI**: header logo and page title show the instance label so users running multiple servers can tell them apart at a glance. Served via new `GET /api/instance`.
+
+### Changed
+- `src/index.ts` now resolves all configuration through `loadConfig()` instead of reading `process.env.JOIND_PORT` and a hardcoded `data/` path.
+- `src/crew.ts` exposes `initCrewStore(dataDir)` so the crew folders file is bound to whichever `data/` directory the instance is using.
+
+### Why
+Joind already isolates conversations within one server. Per-project instance isolation is a different axis: each project gets its own port, its own `data/` (uploads, search index, scratchpads, agent roles…), its own MCP endpoint. Project chat history can live next to the project's source tree and travel with it. Inspired by agentchattr 0.4.0.
+
 ## 2026-05-03 — Skill Audit: REST Coverage Refresh
 
 ### Changed

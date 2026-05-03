@@ -2499,6 +2499,13 @@ document.addEventListener('DOMContentLoaded', function() {
   updateMuteBtn();
   connect();
   loadTemplates();
+  // Show instance name in header + page title
+  fetch('/api/instance').then(function(r) { return r.json(); }).then(function(info) {
+    if (!info || !info.name) return;
+    var el = document.getElementById('instance-name');
+    if (el) el.textContent = info.name;
+    document.title = info.name === 'Joind' ? 'Joind' : info.name + ' — Joind';
+  }).catch(function() { /* ignore */ });
   // Wire conversation search
   var convSearch = document.getElementById('conv-search');
   if (convSearch) {

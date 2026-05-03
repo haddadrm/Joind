@@ -14,8 +14,16 @@ import { fileURLToPath } from "url";
 import { dirname } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, "..", "data");
-const CREW_FILE = join(DATA_DIR, "crew-folders.json");
+let CREW_FILE = join(__dirname, "..", "data", "crew-folders.json");
+
+/**
+ * Point the crew store at a specific data directory. Must be called before
+ * any other crew operation when running with a non-default dataDir.
+ */
+export function initCrewStore(dataDir: string): void {
+  CREW_FILE = join(dataDir, "crew-folders.json");
+  CrewStore.reload();
+}
 
 export interface CrewFolder {
   name: string;            // "Commander"
@@ -162,6 +170,11 @@ class CrewStoreImpl {
 
   save(): void {
     saveCrew(this.entries);
+  }
+
+  /** Re-read entries from disk after CREW_FILE is repointed. */
+  reload(): void {
+    this.entries = loadCrew();
   }
 }
 

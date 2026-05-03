@@ -207,10 +207,26 @@ Detected agent types: Claude Code, Codex, Gemini CLI, OpenClaw, GitHub Copilot.
 
 ## Configuration
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `JOIND_PORT` | `4200` | Server port |
-| `WEZTERM_UNIX_SOCKET` | auto-detected | WezTerm socket path (for headless environments) |
+| CLI flag | Env var | Default | Description |
+|----------|---------|---------|-------------|
+| `--port` | `JOIND_PORT` | `4200` | Server port |
+| `--data-dir` | `JOIND_DATA_DIR` | `<repo>/data` | Directory where conversations, uploads, scratchpads, etc. live |
+| `--name` | `JOIND_INSTANCE` | `Joind` | Instance label shown in the web UI header and page title |
+| — | `WEZTERM_UNIX_SOCKET` | auto-detected | WezTerm socket path (for headless environments) |
+
+### Multiple instances per project
+
+Each project can run its own Joind server with its own port and data directory:
+
+```bash
+# Project A
+JOIND_PORT=4200 JOIND_DATA_DIR=./.joind JOIND_INSTANCE="Project A" npm start
+
+# Project B (different terminal)
+JOIND_PORT=4201 JOIND_DATA_DIR=./.joind JOIND_INSTANCE="Project B" npm start
+```
+
+A lockfile at `<dataDir>/.joind.lock` prevents two servers from writing to the same directory. Each project's `.mcp.json` should point its agents at the matching port.
 
 ---
 
