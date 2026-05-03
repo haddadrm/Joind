@@ -11,6 +11,7 @@ import { join } from "path";
 import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } from "fs";
 import { ChatRoom, type ChatMessage, type Agent, type RoomEvent } from "./room.js";
 import { ensureDir, loadMessages, maxId, appendMessage } from "./persist.js";
+import { ChoiceStore } from "./choices.js";
 
 export interface ConversationMeta {
   id: string;
@@ -27,11 +28,13 @@ export class ConversationManager extends EventEmitter {
   private dataDir: string;
   private indexPath: string;
   private activeId: string | null = null; // web UI's currently viewed conversation
+  private choiceStore: ChoiceStore;
 
   constructor(dataDir: string) {
     super();
     this.dataDir = join(dataDir, "conversations");
     this.indexPath = join(dataDir, "conversations.json");
+    this.choiceStore = new ChoiceStore(this.dataDir);
     ensureDir(this.dataDir);
     this.loadIndex();
   }
@@ -152,7 +155,14 @@ export class ConversationManager extends EventEmitter {
     let room = this.conversations.get(id);
     if (!room) {
       const filePath = join(this.dataDir, id + ".jsonl");
-      room = new ChatRoom(filePath);
+      const choiceStore = this.choiceStore;
+      room = new ChatRoom({
+        chatFilePath: filePath,
+        onChoice: (messageId, value, by, at) => choiceStore.record(id, { messageId, value, by, at }),
+      });
+      // Replay any persisted choice resolutions onto the freshly loaded messages
+      const persistedChoices = choiceStore.load(id);
+      if (persistedChoices.length > 0) room.applyChoiceRecords(persistedChoices);
       // Forward room events with conversation ID
       room.on("room", (event: RoomEvent) => {
         this.emit("room", { ...event, conversationId: id });

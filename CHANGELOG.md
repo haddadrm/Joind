@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-05-03 — Persist Decision Card Resolutions
+
+### Fixed
+- Choice resolutions (`choiceResponse`) now survive server restart. Previously they were only mutated in-memory and broadcast via WS, so a rebuild/restart wiped them.
+
+### Added
+- **`src/choices.ts`** (`ChoiceStore`): append-only JSONL sidecar at `<convId>.choices.jsonl`. First record per `messageId` wins.
+- `ChatRoom` accepts an `onChoice` callback (invoked by `chooseMessage`) and exposes `applyChoiceRecords()` to replay sidecar contents onto loaded messages.
+- `ConversationManager.getOrCreateRoom()` wires both: every new room gets the persistence callback and replays any existing `.choices.jsonl` immediately after construction.
+
+### Notes
+- Pin and tag mutations have the same in-memory-only behaviour today. Not fixed here — separate issue if you want them persisted too.
+- Existing decisions made before this commit are not retroactively recovered (they were never written anywhere).
+
 ## 2026-05-03 — Decision Cards from the Human Side
 
 ### Added

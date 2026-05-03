@@ -43,6 +43,7 @@ export interface RoomEvent {
 export interface ChatRoomOptions {
   chatFilePath?: string;
   getCursor?: (agentName: string) => number;
+  onChoice?: (messageId: number, value: string, by: string, at: number) => void;
 }
 
 export class ChatRoom extends EventEmitter {
@@ -57,6 +58,7 @@ export class ChatRoom extends EventEmitter {
   private agentTurnCount = 0; // consecutive agent turns since last human message
   getCursor: (agentName: string) => number;
   turnGuard: { enabled: boolean; limit: number } | null = null;
+  private onChoice?: (messageId: number, value: string, by: string, at: number) => void;
 
   constructor(chatFilePathOrOptions?: string | ChatRoomOptions) {
     super();
@@ -67,6 +69,7 @@ export class ChatRoom extends EventEmitter {
         : (chatFilePathOrOptions ?? {});
 
     this.getCursor = options.getCursor ?? (() => 0);
+    this.onChoice = options.onChoice;
 
     if (options.chatFilePath) {
       this.chatFile = options.chatFilePath;
@@ -395,9 +398,23 @@ export class ChatRoom extends EventEmitter {
     if (!msg) return null;
     if (!msg.choices || !msg.choices.includes(value)) return null;
     if (msg.choiceResponse) return msg;  // already resolved — first answer wins
-    msg.choiceResponse = { value, by, at: Date.now() };
+    const at = Date.now();
+    msg.choiceResponse = { value, by, at };
+    this.onChoice?.(messageId, value, by, at);
     this.emit("room", { type: "message-choice", data: { id: messageId, response: msg.choiceResponse } } as unknown as RoomEvent);
     return msg;
+  }
+
+  /** Replay persisted choice resolutions onto loaded messages. First record per messageId wins. */
+  applyChoiceRecords(records: { messageId: number; value: string; by: string; at: number }[]): void {
+    const seen = new Set<number>();
+    for (const r of records) {
+      if (seen.has(r.messageId)) continue;
+      const msg = this.messages.find(m => m.id === r.messageId);
+      if (!msg || !msg.choices || !msg.choices.includes(r.value)) continue;
+      msg.choiceResponse = { value: r.value, by: r.by, at: r.at };
+      seen.add(r.messageId);
+    }
   }
 
   getPinnedMessages(): ChatMessage[] {
