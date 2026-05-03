@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-03 — Skill Audit: REST Coverage Refresh
+
+### Changed
+- `skills/claude-code/SKILL.md`: audited the documented surface against `src/tools.ts` (21 MCP tools) and `src/index.ts` REST routes. All 21 MCP tools were already covered with correct signatures.
+- Added REST equivalents for `chat_status` (`POST /api/agent/status`) and `chat_unread` (`GET /api/agent/unread`) — previously marked MCP-only.
+- Added REST-only entries: `POST /api/messages/delete`, `GET /api/message/:id`, `GET /api/pins`, `GET /api/tasks/count`.
+- New "Conversation Management (REST only)" section: list/new/select/rename/star/delete + search.
+- Clarified `chat_read` default `limit=50` (10–15 is polling guidance, not the default).
+
 ## 2026-05-03 — Public Release on GitHub
 
 ### Added
