@@ -862,7 +862,6 @@ body {
 
 #message-input:focus {
   outline: none;
-}
   background: var(--bg-elevated);
 }
 #message-input::placeholder {
@@ -1398,18 +1397,215 @@ body {
 .agent-pill.stale { opacity: 0.4; }
 .agent-pill.stale .pill-dot { background: var(--text-muted) !important; box-shadow: none; }
 
-@media (max-width: 700px) {
-  .sidebar { width: 180px; min-width: 180px; }
+/* ================================================================
+   RESPONSIVE — Tablet (≤768px)
+   ================================================================ */
+@media (max-width: 768px) {
+  .sidebar { width: 200px; min-width: 200px; }
   .you-pill .you-label { display: none; }
+  .agent-pill { padding: 3px 8px 3px 6px; gap: 4px; }
+  .pill-role { display: none; }
+  .header { gap: 8px; }
 }
+
+/* ================================================================
+   RESPONSIVE — Mobile (≤560px)
+   ================================================================ */
 @media (max-width: 560px) {
-  .sidebar { display: none; }
-  .input-hint { display: none; }
-  #sender-name { width: 56px; min-width: 50px; font-size: 10px; }
-  .header { padding: 0 10px; }
-  .chat-messages { padding: 8px 10px; }
-  .chat-footer { padding: 6px 10px 8px; }
+  /* --- Sidebar: overlay drawer --- */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 280px;
+    min-width: 280px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: none;
+    border-right: 1px solid var(--border-bright);
+  }
+  .sidebar.hidden {
+    display: flex; /* override desktop hidden — drawer uses transform instead */
+    transform: translateX(-100%);
+  }
+  .sidebar.mobile-open {
+    transform: translateX(0);
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Backdrop behind drawer */
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  .sidebar-backdrop.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* --- Header: compact --- */
+  .header { padding: 0 10px; gap: 6px; height: 46px; }
+  .header-left { gap: 0; }
+  .logo { font-size: 13px; gap: 4px; }
+
+  /* Pills: compact — smaller, no role, tighter spacing */
+  .agent-pills { gap: 3px; }
+  .agent-pill {
+    padding: 2px 6px 2px 5px;
+    font-size: 11px;
+    gap: 3px;
+  }
+  .pill-role { display: none; }
+  .pill-close { display: none; }
+  .pill-dot { width: 5px; height: 5px; }
+
+  /* You pill: compact */
+  .you-pill {
+    padding: 3px 8px 3px 6px;
+    font-size: 11px;
+    gap: 4px;
+  }
+  .you-pill .you-label { display: none; }
+
+  /* Task badge: compact */
+  .task-badge { padding: 3px 7px; font-size: 11px; }
+
+  /* --- Messages --- */
+  .chat-messages { padding: 6px 8px; }
   .message { max-width: 98%; }
+  .msg-avatar { width: 26px; height: 26px; font-size: 11px; }
+  .msg-header { gap: 4px; }
+  .msg-sender { font-size: 11px; }
+  .msg-time { font-size: 8px; }
+  .msg-id { font-size: 8px; }
+  .msg-text-wrap { font-size: 13px; }
+  .msg-image { max-width: 100%; }
+  .reply-quote { max-width: 100%; }
+
+  /* --- Input area --- */
+  .input-hint { display: none; }
+  .chat-footer {
+    padding: 6px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+  #message-input {
+    padding: 10px 12px;
+    font-size: 14px;
+    min-height: 40px;
+  }
+  .input-highlight { padding: 10px 12px; font-size: 14px; }
+  .btn-send {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 8px;
+  }
+
+  /* --- Reply / image preview --- */
+  .reply-preview { font-size: 11px; padding: 4px 8px; }
+  .image-preview { padding: 4px 8px; }
+
+  /* --- Dialogs: full-screen --- */
+  .launch-dialog-box {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+    border: none;
+  }
+  .launch-dialog-content {
+    padding: 12px;
+  }
+  .launch-section-label { font-size: 9px; }
+  .harness-radio-group { gap: 6px; }
+  .harness-card-label { padding: 8px 10px; font-size: 12px; }
+  .launch-select { font-size: 13px; }
+
+  /* Settings popover: full-width bottom sheet on mobile */
+  .pill-popover {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    width: 100%;
+    max-height: 70vh;
+    border-radius: 14px 14px 0 0;
+    overflow-y: auto;
+    animation: slide-up 0.2s ease-out;
+  }
+  .settings-popover {
+    width: 100%;
+  }
+
+  /* Session modal */
+  .session-modal {
+    width: 90vw;
+    max-width: 90vw;
+  }
+
+  /* Context menus */
+  .conv-context-menu { font-size: 12px; }
+
+  /* Emoji picker */
+  .react-full-grid { grid-template-columns: repeat(6, 1fr); }
+
+  /* New messages pill */
+  .new-msgs-pill { font-size: 11px; padding: 5px 12px; }
+
+  /* Search bar */
+  .search-bar { padding: 6px 8px; }
+  #search-input { font-size: 13px; }
+
+  /* Task panel */
+  .task-panel {
+    width: 100%;
+    position: fixed;
+    right: 0;
+    top: 46px;
+    bottom: 0;
+    border-radius: 0;
+  }
+}
+
+/* ================================================================
+   RESPONSIVE — Small phone (≤400px)
+   ================================================================ */
+@media (max-width: 400px) {
+  .logo .logo-icon ~ * { display: none; } /* icon only */
+  .logo-icon { opacity: 1; font-size: 16px; }
+
+  /* Pills: dot + initial only */
+  .agent-pill { padding: 2px 5px; gap: 2px; }
+  .pill-name { max-width: 3ch; overflow: hidden; text-overflow: ''; }
+
+  /* Even tighter header */
+  .header { padding: 0 6px; gap: 4px; height: 42px; }
+  .you-pill { padding: 2px 6px; font-size: 10px; }
+  .task-badge { padding: 2px 5px; }
+
+  /* Messages tighter */
+  .chat-messages { padding: 4px 6px; }
+  .msg-avatar { width: 22px; height: 22px; font-size: 10px; }
+}
+
+/* Slide-up animation for bottom sheets */
+@keyframes slide-up {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* Safe area padding for header on notch devices */
+@supports (padding-top: env(safe-area-inset-top)) {
+  .header {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
 }
 
 /* ==========================================================================

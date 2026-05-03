@@ -1,7 +1,36 @@
+# Build artefacts
 node_modules/
 dist/
 *.js.map
 *.d.ts
 !src/**/*.d.ts
+
+# Secrets / env
 .env
+.env.*
+!.env.example
+
+# Runtime / personalisation data — do NOT publish to cloud repo
 data/
+data/**
+*.local.json
+*.local.jsonl
+
+# Conversation, reaction, task, edit logs
+**/conversations/
+**/conversations.json
+**/agent-cursors.json
+**/agent-roles.json
+**/crew-folders.json
+**/roles.json
+**/scratchpads.json
+**/state-blocks.json
+**/turn-guard.json
+**/files/
+**/images/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

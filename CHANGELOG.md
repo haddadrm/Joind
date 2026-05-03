@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-05-03 — Public Release on GitHub
+
+### Added
+- Published repository at https://github.com/haddadrm/Joind.
+- Hardened `.gitignore`: explicitly excludes `data/`, conversation logs, reactions, tasks, edits, agent cursors/roles, scratchpads, uploaded files/images, and `.env*` so personal/runtime data never leaves the local clone.
+
+## 2026-04-12 — Mobile Responsive Design
+
+### Added
+- **Responsive CSS** (`public/style.css`): Three breakpoints — 768px (tablet), 560px (mobile), 400px (small phone).
+- **Sidebar drawer** on mobile: Fixed overlay that slides in from left with backdrop, replaces the hidden sidebar. Auto-closes on conversation select. Toggle via hamburger button.
+- **Header compact mode**: Progressive shrinking of pills, you-pill, task badge, and logo across breakpoints. At ≤400px, logo is icon-only and pills show dot+initial.
+- **Input area safe areas**: `env(safe-area-inset-bottom)` padding for notch/home-indicator devices. `viewport-fit=cover` meta tag.
+- **Messages mobile**: Smaller avatars, tighter padding, responsive images (`max-width: 100%`), scaled font sizes.
+- **Full-screen dialogs**: Launch dialog goes full-viewport on mobile. Settings dialog becomes a bottom-sheet. Agent pill popovers become bottom-sheets.
+- **Task panel**: Full-width fixed panel on mobile instead of side overlay.
+
+### Changed
+- `toggleSidebar()` now detects mobile vs desktop and uses drawer overlay or hidden class accordingly.
+- `selectConversation()` auto-closes mobile drawer.
+- Settings/pill popovers skip inline positioning on mobile, letting CSS bottom-sheet rules take effect.
+- Sidebar localStorage restore skipped on mobile (drawer starts closed).
+
 ## 2026-04-12 — Session Resume: Fix Session Listers
 
 ### Fixed

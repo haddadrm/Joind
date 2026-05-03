@@ -496,23 +496,22 @@ function showPopover(anchor, agent) {
   });
   pop.appendChild(removeBtn);
 
-  // Position — clamp to viewport
+  // Position — bottom-sheet on mobile, clamped popover on desktop
   document.body.appendChild(pop);
-  var rect = anchor.getBoundingClientRect();
-  var popRect = pop.getBoundingClientRect();
-  var top = rect.bottom + 6;
-  var left = rect.left;
-
-  // Clamp right edge
-  if (left + popRect.width > window.innerWidth - 8) {
-    left = window.innerWidth - popRect.width - 8;
+  if (!isMobileView()) {
+    var rect = anchor.getBoundingClientRect();
+    var popRect = pop.getBoundingClientRect();
+    var top = rect.bottom + 6;
+    var left = rect.left;
+    if (left + popRect.width > window.innerWidth - 8) {
+      left = window.innerWidth - popRect.width - 8;
+    }
+    if (top + popRect.height > window.innerHeight - 8) {
+      top = rect.top - popRect.height - 6;
+    }
+    pop.style.top = Math.max(8, top) + 'px';
+    pop.style.left = Math.max(8, left) + 'px';
   }
-  // Clamp bottom edge — flip above if needed
-  if (top + popRect.height > window.innerHeight - 8) {
-    top = rect.top - popRect.height - 6;
-  }
-  pop.style.top = Math.max(8, top) + 'px';
-  pop.style.left = Math.max(8, left) + 'px';
 
   openPopover = pop;
 }
@@ -1158,11 +1157,17 @@ function openSettings(evt, defaultTab) {
 
   pop.appendChild(rolesPanel);
 
-  // Always center the settings dialog
+  // Position: center on desktop, bottom-sheet on mobile (CSS handles mobile)
   document.body.appendChild(pop);
-  var popRect = pop.getBoundingClientRect();
-  pop.style.top = Math.max(8, (window.innerHeight - popRect.height) / 2) + 'px';
-  pop.style.left = Math.max(8, (window.innerWidth - popRect.width) / 2) + 'px';
+  if (!isMobileView()) {
+    var popRect = pop.getBoundingClientRect();
+    pop.style.top = Math.max(8, (window.innerHeight - popRect.height) / 2) + 'px';
+    pop.style.left = Math.max(8, (window.innerWidth - popRect.width) / 2) + 'px';
+  } else {
+    // Mobile: CSS makes it a bottom sheet — clear any fixed dimensions
+    pop.style.width = '';
+    pop.style.height = '';
+  }
 
   openPopover = pop;
 }
@@ -1406,11 +1411,49 @@ function kickAgent(name) {
   fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name }) });
 }
 
-// --- Sidebar toggle ---
+// --- Sidebar toggle (desktop: show/hide, mobile: drawer overlay) ---
+function isMobileView() { return window.innerWidth <= 560; }
+
 function toggleSidebar() {
   var sb = document.getElementById('sidebar');
-  sb.classList.toggle('hidden');
-  localStorage.setItem('joind-sidebar', sb.classList.contains('hidden') ? 'hidden' : 'visible');
+  if (isMobileView()) {
+    // Mobile: toggle drawer overlay
+    var isOpen = sb.classList.contains('mobile-open');
+    if (isOpen) {
+      closeMobileDrawer();
+    } else {
+      openMobileDrawer();
+    }
+  } else {
+    // Desktop: toggle hidden
+    sb.classList.toggle('hidden');
+    localStorage.setItem('joind-sidebar', sb.classList.contains('hidden') ? 'hidden' : 'visible');
+  }
+}
+
+function openMobileDrawer() {
+  var sb = document.getElementById('sidebar');
+  sb.classList.remove('hidden');
+  sb.classList.add('mobile-open');
+  // Create/show backdrop
+  var backdrop = document.getElementById('sidebar-backdrop');
+  if (!backdrop) {
+    backdrop = document.createElement('div');
+    backdrop.id = 'sidebar-backdrop';
+    backdrop.className = 'sidebar-backdrop';
+    backdrop.addEventListener('click', closeMobileDrawer);
+    document.body.appendChild(backdrop);
+  }
+  // Force reflow before adding visible class for transition
+  void backdrop.offsetWidth;
+  backdrop.classList.add('visible');
+}
+
+function closeMobileDrawer() {
+  var sb = document.getElementById('sidebar');
+  sb.classList.remove('mobile-open');
+  var backdrop = document.getElementById('sidebar-backdrop');
+  if (backdrop) backdrop.classList.remove('visible');
 }
 
 function toggleSection(header) {
@@ -1668,6 +1711,8 @@ function loadConversations() {
 }
 
 function selectConversation(id) {
+  // Close mobile drawer if open
+  if (isMobileView()) closeMobileDrawer();
   // Optimistic: immediately highlight the selected conversation + clear chat
   var meta = conversationList.find(function(c) { return c.id === id; });
   if (meta) {
@@ -2462,8 +2507,8 @@ document.addEventListener('DOMContentLoaded', function() {
       renderConversationList();
     });
   }
-  // Restore sidebar state
-  if (localStorage.getItem('joind-sidebar') === 'hidden') {
+  // Restore sidebar state (desktop only — mobile uses drawer)
+  if (!isMobileView() && localStorage.getItem('joind-sidebar') === 'hidden') {
     document.getElementById('sidebar').classList.add('hidden');
   }
 });
