@@ -13,6 +13,7 @@ import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { injectWezTerm, spawnWeztermPane } from "./inject.js";
 import type { HarnessDefinition } from "./harnesses.js";
+import { applyProjectMcp } from "./mcp-merge.js";
 
 export type LaunchStatus =
   | "pending"
@@ -240,6 +241,15 @@ class LaunchServiceImpl {
     };
 
     this.launches.set(launchId, state);
+
+    // Merge project .mcp.json into the agent's config when applicable.
+    // Never blocks launch — failures only log.
+    try {
+      const status = applyProjectMcp(harness.id, req.crewPath);
+      console.log(`  [launch ${launchId}] mcp-merge: ${status}`);
+    } catch (err) {
+      console.warn(`  [launch ${launchId}] mcp-merge unexpected: ${(err as Error).message}`);
+    }
 
     // --- manual: no spawn, just return command ---
     if (req.terminal === "manual") {

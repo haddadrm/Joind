@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-05-03 — Project .mcp.json Merge into Agent Configs (#4)
+
+### Added
+- **`src/mcp-merge.ts`**: walks up from a crew folder looking for `.mcp.json`, reads its `mcpServers` map, and applies it to the launched agent's config. Hooked into `LaunchService.launch()` pre-spawn.
+- **Gemini**: project servers are merged into `<crewPath>/.gemini/settings.json` (created if absent). Existing entries are preserved; project entries win on key conflict. A `_joindMergedAt` timestamp is written for traceability.
+- **Claude / OpenClaw**: skipped — they read `.mcp.json` natively, no work needed.
+- **Codex / Copilot**: discovery runs and the count is logged, but mutation is deferred (TOML and per-user config formats need agent-specific testing).
+
+### Why
+Inspired by agentchattr 0.3.x — `feat: merge project .mcp.json servers into Gemini/Kimi agent configs`. Lets a project's MCP setup automatically reach non-Claude agents launched by Joind, without users hand-editing each agent's config.
+
+### Notes
+- Failures never block a launch: every step is wrapped in `try/catch`, status is logged.
+- Walks up to the filesystem root looking for `.mcp.json`. The first one with a non-empty `mcpServers` wins.
+
 ## 2026-05-03 — Conversation Export/Import Bundle (#3)
 
 ### Added
