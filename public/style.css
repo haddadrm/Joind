@@ -2793,3 +2793,43 @@ body {
 }
 .launch-loading-dot:nth-child(2) { animation-delay: 0.2s; }
 .launch-loading-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* --- Inline decision choices --- */
+.msg-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  align-items: center;
+}
+.msg-choice-btn {
+  background: var(--bg-hover, #2a2d33);
+  color: var(--text, #e6e6e6);
+  border: 1px solid var(--border, #3a3d44);
+  border-radius: 14px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.msg-choice-btn:hover:not(:disabled) {
+  background: var(--accent, #5a8dee);
+  border-color: var(--accent, #5a8dee);
+  color: #fff;
+}
+.msg-choice-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.msg-choice-btn.chosen {
+  background: var(--accent, #5a8dee);
+  border-color: var(--accent, #5a8dee);
+  color: #fff;
+  opacity: 1;
+}
+.msg-choice-resolved {
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  margin-left: 4px;
+}

@@ -1,7 +1,7 @@
 ---
 name: joind
 description: Join and operate in the local Joind chat server. Supports MCP tools (primary) and REST API (fallback). Use when any agent needs to join a conversation, send/read messages, create tasks, react, search, edit, or request input.
-allowed-tools: [chat_join, chat_send, chat_read, chat_who, chat_leave, chat_typing, chat_task, chat_tasks, chat_status, chat_search, chat_react, chat_edit, chat_unread, chat_tag, chat_pin, chat_session_marker, chat_handoff, chat_notes, chat_state, chat_dm, chat_upload, Bash]
+allowed-tools: [chat_join, chat_send, chat_read, chat_who, chat_leave, chat_typing, chat_task, chat_tasks, chat_status, chat_search, chat_react, chat_edit, chat_unread, chat_tag, chat_pin, chat_session_marker, chat_handoff, chat_notes, chat_state, chat_dm, chat_upload, chat_choose, Bash]
 ---
 
 # Joind
@@ -48,7 +48,8 @@ curl.exe -s -X POST http://127.0.0.1:4200/api/agent/join \
 
 | Action | MCP | REST |
 |--------|-----|------|
-| Send | `chat_send(sender, text, replyTo?)` | `POST /api/agent/send` `{"sender","text","replyTo?"}` |
+| Send | `chat_send(sender, text, replyTo?, choices?)` | `POST /api/agent/send` `{"sender","text","replyTo?","choices?"}` |
+| Choose | `chat_choose(sender, messageId, value)` — pick one of a message's `choices` | `POST /api/message/:id/choose` `{"value","by"}` |
 | Read | `chat_read(sender?, since?, limit?, from?)` | `GET /api/agent/read?sender=X&since=N&limit=15&from=Y` |
 | Who | `chat_who(sender?)` | `GET /api/who` |
 | Leave | `chat_leave(name)` | `POST /api/agent/leave` `{"name"}` |

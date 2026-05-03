@@ -202,6 +202,14 @@ function connect() {
         staleNames.add(event.data.name);
         renderPills();
         break;
+      case 'message-choice':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        var chId = event.data.id;
+        var chMsg = allMessages.find(function(m) { return m.id === chId; });
+        if (chMsg) chMsg.choiceResponse = event.data.response;
+        var chEl = document.querySelector('.msg-choices[data-message-id="' + chId + '"]');
+        if (chEl) renderChoices(chEl, chMsg);
+        break;
       case 'message-deleted':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         var delId = event.data.id;
@@ -629,6 +637,15 @@ function appendMessage(msg, scroll) {
 
     body.appendChild(hdr); body.appendChild(tw);
 
+    // Inline decision choices
+    if (msg.choices && msg.choices.length > 0) {
+      var choicesRow = document.createElement('div');
+      choicesRow.className = 'msg-choices';
+      choicesRow.dataset.messageId = msg.id;
+      renderChoices(choicesRow, msg);
+      body.appendChild(choicesRow);
+    }
+
     // Reactions row
     var reactRow = document.createElement('div');
     reactRow.className = 'msg-reactions';
@@ -715,6 +732,39 @@ function appendMessage(msg, scroll) {
     updateNewMsgsPill();
   }
   addCodeCopyButtons(el);
+}
+
+function renderChoices(container, msg) {
+  if (!container || !msg || !msg.choices) return;
+  container.innerHTML = '';
+  var resolved = msg.choiceResponse;
+  msg.choices.forEach(function(opt) {
+    var btn = document.createElement('button');
+    btn.className = 'msg-choice-btn';
+    btn.type = 'button';
+    btn.textContent = opt;
+    if (resolved) {
+      btn.disabled = true;
+      if (resolved.value === opt) btn.classList.add('chosen');
+    }
+    btn.addEventListener('click', function() {
+      if (btn.disabled) return;
+      var by = (document.getElementById('sender-name') && document.getElementById('sender-name').value) || 'human';
+      btn.disabled = true;
+      fetch('/api/message/' + msg.id + '/choose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: opt, by: by })
+      }).catch(function() { btn.disabled = false; });
+    });
+    container.appendChild(btn);
+  });
+  if (resolved) {
+    var note = document.createElement('span');
+    note.className = 'msg-choice-resolved';
+    note.textContent = resolved.by + ' picked "' + resolved.value + '"';
+    container.appendChild(note);
+  }
 }
 
 function renderContent(parent, text) {

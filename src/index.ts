@@ -634,6 +634,19 @@ app.get("/api/pins", (_req, res) => {
   res.json(room.getPinnedMessages());
 });
 
+// --- Inline decision choices ---
+app.post("/api/message/:id/choose", express.json(), (req, res) => {
+  const room = activeRoom(res);
+  if (!room) return;
+  const messageId = Number(req.params.id);
+  if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const { value, by } = req.body as { value?: string; by?: string };
+  if (!value || !by) { res.status(400).json({ error: "value and by required" }); return; }
+  const msg = room.chooseMessage(messageId, value, by);
+  if (!msg) { res.status(400).json({ error: "Message not found, has no choices, or value not in choices" }); return; }
+  res.json({ id: msg.id, choiceResponse: msg.choiceResponse });
+});
+
 // --- Session markers ---
 app.post("/api/session-marker", express.json(), (req, res) => {
   const room = activeRoom(res);
@@ -1058,8 +1071,8 @@ app.get("/api/agent/read", (req, res) => {
 });
 
 app.post("/api/agent/send", express.json(), (req, res) => {
-  const { sender, text, replyTo, pid, paneId } = req.body as {
-    sender?: string; text?: string; replyTo?: number; pid?: number; paneId?: number;
+  const { sender, text, replyTo, choices, pid, paneId } = req.body as {
+    sender?: string; text?: string; replyTo?: number; choices?: string[]; pid?: number; paneId?: number;
   };
   if (!sender || !text) { res.status(400).json({ error: "sender and text required" }); return; }
   const ctx = agentRoom(sender, res, pid, paneId);
@@ -1067,8 +1080,8 @@ app.post("/api/agent/send", express.json(), (req, res) => {
   ctx.room.touch(sender);
   ctx.room.setTyping(sender, false);
   manager.autoName(ctx.convId, text);
-  const msg = ctx.room.send(sender, text, { replyTo });
-  res.json({ id: msg.id, sender: msg.sender, text: msg.text });
+  const msg = ctx.room.send(sender, text, { replyTo, choices });
+  res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices });
 });
 
 app.post("/api/agent/leave", express.json(), (req, res) => {

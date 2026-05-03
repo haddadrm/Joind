@@ -20,6 +20,8 @@ export interface ChatMessage {
   tag?: string;
   pinned?: boolean;
   to?: string[];  // targeted recipients (DM-style visibility)
+  choices?: string[];  // inline decision buttons
+  choiceResponse?: { value: string; by: string; at: number };
 }
 
 export interface Agent {
@@ -123,7 +125,7 @@ export class ChatRoom extends EventEmitter {
     }
   }
 
-  send(sender: string, text: string, opts?: { image?: string; replyTo?: number; to?: string[] }): ChatMessage {
+  send(sender: string, text: string, opts?: { image?: string; replyTo?: number; to?: string[]; choices?: string[] }): ChatMessage {
     const msg: ChatMessage = {
       id: this.nextId++,
       sender,
@@ -133,6 +135,7 @@ export class ChatRoom extends EventEmitter {
     if (opts?.image) msg.image = opts.image;
     if (opts?.replyTo) msg.replyTo = opts.replyTo;
     if (opts?.to && opts.to.length > 0) msg.to = opts.to;
+    if (opts?.choices && opts.choices.length > 0) msg.choices = opts.choices;
 
     this.messages.push(msg);
     this.persist(msg);
@@ -384,6 +387,16 @@ export class ChatRoom extends EventEmitter {
     if (!msg) return null;
     msg.pinned = pinned;
     this.emit("room", { type: "message-pinned", data: { id: messageId, pinned } } as unknown as RoomEvent);
+    return msg;
+  }
+
+  chooseMessage(messageId: number, value: string, by: string): ChatMessage | null {
+    const msg = this.messages.find(m => m.id === messageId);
+    if (!msg) return null;
+    if (!msg.choices || !msg.choices.includes(value)) return null;
+    if (msg.choiceResponse) return msg;  // already resolved — first answer wins
+    msg.choiceResponse = { value, by, at: Date.now() };
+    this.emit("room", { type: "message-choice", data: { id: messageId, response: msg.choiceResponse } } as unknown as RoomEvent);
     return msg;
   }
 

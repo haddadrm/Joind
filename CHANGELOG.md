@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-05-03 — Inline Decision Cards (#2)
+
+### Added
+- **`choices` parameter on send**: pass `choices: string[]` to `chat_send` (MCP) or `POST /api/agent/send` (REST) and the message renders clickable decision buttons under the text. First answer wins; subsequent clicks are no-ops.
+- **`chat_choose(sender, messageId, value)`** MCP tool — agent-driven selection of one of a message's choices.
+- **`POST /api/message/:id/choose`** `{value, by}` REST endpoint.
+- **WS event `message-choice`** broadcasts the resolution so all clients update the message in place.
+- `ChatMessage` gains `choices?: string[]` and `choiceResponse?: { value, by, at }`.
+
+### Why
+`chat_task` is the right tool for tracked decisions, but it's heavy. Inline choices give agents a way to ask quick yes/no/pick-one questions without spinning up a task entry. Inspired by agentchattr 0.3.x.
+
 ## 2026-05-03 — Per-Project Instance Isolation (#1)
 
 ### Added

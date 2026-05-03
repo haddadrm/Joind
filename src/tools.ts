@@ -172,14 +172,15 @@ export function registerTools(
     "chat_send",
     {
       title: "Send a chat message",
-      description: "Send a message in your current conversation. Use @name to mention agents.",
+      description: "Send a message in your current conversation. Use @name to mention agents. Pass choices to render inline decision buttons.",
       inputSchema: z.object({
         sender: z.string().describe("Your name"),
         text: z.string().describe("Message text. Use @name to mention agents."),
         replyTo: z.number().optional().describe("Message ID to reply to"),
+        choices: z.array(z.string()).optional().describe("Inline decision options. Renders clickable buttons; first answer wins."),
       }),
     },
-    async ({ sender, text, replyTo }, extra) => {
+    async ({ sender, text, replyTo, choices }, extra) => {
       const target = getRoom(manager, extra, sender);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
@@ -190,8 +191,9 @@ export function registerTools(
       // Auto-name conversation from first non-system message
       manager.autoName(target.convId, text);
 
-      const msg = target.room.send(sender, text, { replyTo });
-      return { content: [{ type: "text" as const, text: `Message #${msg.id} sent` }] };
+      const msg = target.room.send(sender, text, { replyTo, choices });
+      const suffix = choices && choices.length > 0 ? ` with ${choices.length} choices` : "";
+      return { content: [{ type: "text" as const, text: `Message #${msg.id} sent${suffix}` }] };
     }
   );
 
@@ -601,6 +603,33 @@ export function registerTools(
       target.room.setTyping(sender, false);
       const msg = target.room.send(sender, text, { to });
       return { content: [{ type: "text" as const, text: `DM #${msg.id} sent to ${to.join(", ")}` }] };
+    }
+  );
+
+  // --- Inline decision choice tool ---
+
+  server.registerTool(
+    "chat_choose",
+    {
+      title: "Resolve an inline decision",
+      description: "Pick one of the options on a message that has `choices`. First answer wins; subsequent calls are no-ops.",
+      inputSchema: z.object({
+        sender: z.string().describe("Your name"),
+        messageId: z.number().describe("Message ID with choices"),
+        value: z.string().describe("One of the message's choice values"),
+      }),
+    },
+    async ({ sender, messageId, value }, extra) => {
+      const target = getRoom(manager, extra, sender);
+      if (!target) {
+        return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
+      }
+      const msg = target.room.chooseMessage(messageId, value, sender);
+      if (!msg) {
+        return { content: [{ type: "text" as const, text: `Cannot choose: message #${messageId} not found, has no choices, or value is not one of the options.` }] };
+      }
+      const r = msg.choiceResponse!;
+      return { content: [{ type: "text" as const, text: `Message #${messageId} resolved by ${r.by}: ${r.value}` }] };
     }
   );
 
