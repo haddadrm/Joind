@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-05-03 — Conversation Export/Import Bundle (#3)
+
+### Added
+- **`GET /api/conversations/:id/export.json`** — structured JSON bundle (version 1) containing the conversation meta, full message list (preserving IDs, timestamps, tags, pins, choices, replies, DMs), and tasks. Served as a downloadable attachment.
+- **`POST /api/conversations/import`** — accepts a v1 bundle and creates a fresh conversation: writes messages directly to the new JSONL so original IDs/timestamps are preserved, then imports tasks via `TaskStore.create`.
+- **`ConversationManager.importConversation(name, messages)`** — pre-writes the JSONL before instantiating the room so the loaded ChatRoom reflects imported state on first read.
+
+### Limitations (v1)
+- Uploaded files in `/data/files/` are not bundled; image/file links in imported messages will 404 unless the destination instance has the same files. Documented as a v2 follow-up (zip-with-files).
+- Reactions, edits, scratchpads, and state blocks are not yet exported. They round-trip cleanly within an instance but don't migrate.
+
+### Why
+Already had `/api/export` (markdown) for human consumption. Round-trippable JSON closes the gap for moving conversations between machines or instances — exactly the multi-machine sync use case (D: ↔ RAMIY530) that surfaced earlier.
+
 ## 2026-05-03 — Inline Decision Cards (#2)
 
 ### Added

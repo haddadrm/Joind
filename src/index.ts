@@ -444,6 +444,49 @@ app.get("/api/export", (_req, res) => {
   res.send(md);
 });
 
+// Structured JSON export — round-trippable bundle for importing into another instance.
+app.get("/api/conversations/:id/export.json", (req, res) => {
+  const convId = req.params.id;
+  const meta = manager.getMeta(convId);
+  const room = manager.getRoom(convId);
+  if (!meta || !room) { res.status(404).json({ error: "Conversation not found" }); return; }
+  const messages = room.read(undefined, 1000000);
+  const tasks = taskStore.list(convId, { status: "all" });
+  const bundle = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    instance: INSTANCE_NAME,
+    conversation: { id: meta.id, name: meta.name, createdAt: meta.createdAt, messageCount: meta.messageCount },
+    messages,
+    tasks,
+  };
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${meta.name.replace(/[^a-z0-9-]/gi, "_")}.joind.json"`);
+  res.send(JSON.stringify(bundle, null, 2));
+});
+
+app.post("/api/conversations/import", express.json({ limit: "50mb" }), (req, res) => {
+  const bundle = req.body as {
+    version?: number;
+    conversation?: { name?: string };
+    messages?: unknown;
+    tasks?: Array<{ title: string; description?: string; creator: string; assignee?: string; priority?: "normal" | "urgent" }>;
+  };
+  if (!bundle || bundle.version !== 1) { res.status(400).json({ error: "Unsupported or missing bundle version (expected 1)" }); return; }
+  if (!bundle.conversation || !bundle.conversation.name) { res.status(400).json({ error: "conversation.name required" }); return; }
+  if (!Array.isArray(bundle.messages)) { res.status(400).json({ error: "messages array required" }); return; }
+  const meta = manager.importConversation(bundle.conversation.name, bundle.messages as never);
+  let importedTasks = 0;
+  if (Array.isArray(bundle.tasks)) {
+    for (const t of bundle.tasks) {
+      if (!t || !t.title || !t.creator) continue;
+      taskStore.create(meta.id, { title: t.title, description: t.description, creator: t.creator, assignee: t.assignee, priority: t.priority });
+      importedTasks++;
+    }
+  }
+  res.json({ ok: true, conversation: meta, imported: { messages: (bundle.messages as unknown[]).length, tasks: importedTasks } });
+});
+
 app.post("/api/join", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;

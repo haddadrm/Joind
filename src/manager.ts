@@ -10,7 +10,7 @@ import { EventEmitter } from "events";
 import { join } from "path";
 import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } from "fs";
 import { ChatRoom, type ChatMessage, type Agent, type RoomEvent } from "./room.js";
-import { ensureDir, loadMessages, maxId } from "./persist.js";
+import { ensureDir, loadMessages, maxId, appendMessage } from "./persist.js";
 
 export interface ConversationMeta {
   id: string;
@@ -96,6 +96,36 @@ export class ConversationManager extends EventEmitter {
     if (cleaned.length === 0) return "New conversation";
     if (cleaned.length > 100) return cleaned.slice(0, 100);
     return cleaned;
+  }
+
+  /**
+   * Import a conversation from an export bundle. Writes messages to a fresh
+   * JSONL file before constructing the room so original IDs/timestamps are
+   * preserved. Returns the new conversation meta.
+   */
+  importConversation(name: string, messages: ChatMessage[]): ConversationMeta {
+    const now = new Date();
+    const id = "c-" + now.toISOString().replace(/[:.]/g, "-").replace("Z", "").slice(0, 19) +
+      "-" + Math.random().toString(36).slice(2, 6);
+    const filePath = join(this.dataDir, id + ".jsonl");
+    ensureDir(this.dataDir);
+    for (const msg of messages) {
+      if (msg.id == null) continue;
+      appendMessage(filePath, msg);
+    }
+    const meta: ConversationMeta = {
+      id,
+      name: this.validateName(name || "Imported conversation"),
+      createdAt: now.getTime(),
+      messageCount: messages.length,
+      starred: false,
+    };
+    this.meta.set(id, meta);
+    this.getOrCreateRoom(id);  // loads from JSONL we just wrote
+    this.saveIndex();
+    this.emitGlobal("conversation-created", meta);
+    console.log(`  Imported conversation: ${meta.name} (${id}) with ${messages.length} messages`);
+    return meta;
   }
 
   createConversation(name?: string): ConversationMeta {
