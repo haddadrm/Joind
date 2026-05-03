@@ -43,17 +43,30 @@ export class ConversationManager extends EventEmitter {
   // Index management
   // -----------------------------------------------------------------------
 
+  /**
+   * Sidecar suffixes for per-conversation auxiliary stores. Files matching
+   * `<convId>.<suffix>.jsonl` are NOT conversations and must be excluded
+   * from orphan discovery and the index.
+   */
+  private static readonly SIDECAR_SUFFIXES = [".reactions", ".tasks", ".edits", ".choices"];
+
+  private isSidecarId(id: string): boolean {
+    return ConversationManager.SIDECAR_SUFFIXES.some((s) => id.endsWith(s));
+  }
+
   private loadIndex(): void {
     if (existsSync(this.indexPath)) {
       try {
         const raw = JSON.parse(readFileSync(this.indexPath, "utf-8"));
         const items: ConversationMeta[] = raw.conversations ?? [];
         for (const m of items) {
+          // Skip phantom entries from a previous run that mistook sidecar files for conversations
+          if (this.isSidecarId(m.id)) continue;
           if (existsSync(join(this.dataDir, m.id + ".jsonl")) || existsSync(join(this.dataDir, m.id))) {
             this.meta.set(m.id, m);
           }
         }
-        this.activeId = raw.active ?? null;
+        this.activeId = raw.active && !this.isSidecarId(raw.active) ? raw.active : null;
       } catch {
         /* fresh start */
       }
@@ -63,6 +76,7 @@ export class ConversationManager extends EventEmitter {
       for (const file of readdirSync(this.dataDir)) {
         if (!file.endsWith(".jsonl")) continue;
         const id = file.replace(".jsonl", "");
+        if (this.isSidecarId(id)) continue;
         if (!this.meta.has(id)) {
           const fullPath = join(this.dataDir, file);
           const stat = statSync(fullPath);

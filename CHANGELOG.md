@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-03 — Filter Sidecar Files Out of Conversation List
+
+### Fixed
+- Sidecar JSONL files (`<convId>.reactions.jsonl`, `.tasks.jsonl`, `.edits.jsonl`, `.choices.jsonl`) were being picked up by `ConversationManager.loadIndex()` orphan-discovery as if they were standalone conversations, cluttering the conversation list with entries like `c-XXX.reactions`. Pre-existing bug, made more visible by the new `.choices.jsonl` sidecar.
+- Phantom entries already saved into `conversations.json` from previous runs are now filtered on load and stripped from the index on next save (self-cleaning).
+
+### Implementation
+- `ConversationManager.SIDECAR_SUFFIXES` (`.reactions`, `.tasks`, `.edits`, `.choices`) — IDs ending in any of these are skipped both during persisted-index load and orphan discovery. Active conversation pointer is also cleared if it pointed at a phantom.
+
 ## 2026-05-03 — Persist Decision Card Resolutions
 
 ### Fixed
