@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -35,12 +35,15 @@
         <!-- Actions on top -->
         <div class="sidebar-section">
           <div class="quick-actions">
+            <button class="btn btn-action btn-launch" id="launch-btn" onclick="openLaunchDialog()" title="Launch Agent"><i data-lucide="rocket" width="18" height="18"></i></button>
+            <span class="btn-group-sep" aria-hidden="true"></span>
+            <button class="btn btn-action" onclick="toggleSearch()" title="Search messages"><i data-lucide="search" width="18" height="18"></i></button>
+            <button class="btn btn-action" onclick="exportChat()" title="Export conversation"><i data-lucide="download" width="18" height="18"></i></button>
+            <button class="btn btn-action" onclick="openImportDialog()" title="Import conversation"><i data-lucide="upload" width="18" height="18"></i></button>
+            <span class="btn-group-sep" aria-hidden="true"></span>
             <button class="btn btn-action" id="mute-btn" onclick="toggleMute()" title="Toggle sound"><i data-lucide="volume-2" width="18" height="18"></i></button>
             <button class="btn btn-action" onclick="openSoundSettings(event)" title="Settings"><i data-lucide="settings" width="18" height="18"></i></button>
-            <button class="btn btn-action" onclick="toggleSearch()" title="Search messages"><i data-lucide="search" width="18" height="18"></i></button>
-            <button class="btn btn-action" onclick="exportChat()" title="Export chat"><i data-lucide="download" width="18" height="18"></i></button>
-            <button class="btn btn-action" onclick="clearChat()" title="Clear chat view"><i data-lucide="trash-2" width="18" height="18"></i></button>
-            <button class="btn btn-action btn-launch" id="launch-btn" onclick="openLaunchDialog()" title="Launch Agent"><i data-lucide="rocket" width="18" height="18"></i></button>
+            <input type="file" id="import-file-input" accept="application/json,.json" hidden />
           </div>
           <div class="turn-guard-row" id="turn-guard-row">
             <label class="turn-guard-label" title="Limit consecutive agent turns before requiring human input">
@@ -184,7 +187,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();

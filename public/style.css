@@ -2939,3 +2939,23 @@ body {
 .btn-primary:hover {
   filter: brightness(1.1);
 }
+
+/* --- Header toolbar grouping --- */
+.btn-group-sep {
+  display: inline-block;
+  width: 1px;
+  height: 20px;
+  background: var(--border, #3a3d44);
+  margin: 0 6px;
+  flex: 0 0 auto;
+  opacity: 0.6;
+}
+.pop-divider {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim, #888);
+  margin: 12px 0 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #3a3d44);
+}

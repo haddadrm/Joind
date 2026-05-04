@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-05-04 — Header Toolbar Refresh + Import UI
+
+### Changed
+- **Header action row regrouped** into three semantic clusters with thin separators between them:
+  - **Create**: `Launch Agent` (far left — most generative action)
+  - **Conversation I/O**: `Search`, `Export`, `Import` (middle)
+  - **Ambient**: `Mute`, `Settings` (right)
+- **`Clear chat view` demoted** out of the toolbar. Was misleading next to `Launch` (different consequences, identical visual weight) and the trash-can icon implied destruction even though it only blanks the local DOM. Now lives inside Settings → Sounds panel under a "View" divider as a labelled "Clear view" button with a tooltip explaining it doesn't delete anything.
+
+### Added
+- **Import button** (`upload` icon) next to Export. Opens a file picker, reads a v1 conversation bundle, posts to `/api/conversations/import`, and switches the active conversation to the freshly imported one. Closes the loop on the export/import work shipped earlier today (#3) which had no UI.
+
+### Why
+The previous toolbar was six flat icons at equal weight: a destructive action sat next to a process-spawning one, a continuous toggle was wedged between two momentary actions, and the import endpoint was unreachable without curl. Grouping by intent and demoting the destructive entry removes mis-click risk and gives the import path a discoverable home.
+
 ## 2026-05-04 — Decision Card Composer (UI + Slash Command)
 
 ### Added

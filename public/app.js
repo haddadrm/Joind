@@ -1053,7 +1053,54 @@ function mentionAll() {
 function clearChat() { document.getElementById('messages').textContent = ''; }
 
 function exportChat() {
+  // Markdown export of the active conversation (existing behaviour).
   window.open('/api/export', '_blank');
+}
+
+function exportConversationJson(convId, name) {
+  // Round-trippable JSON bundle for moving a conversation between instances.
+  var safe = (name || convId).replace(/[^a-z0-9-]/gi, '_');
+  window.open('/api/conversations/' + encodeURIComponent(convId) + '/export.json', '_blank');
+  void safe;
+}
+
+function openImportDialog() {
+  var input = document.getElementById('import-file-input');
+  if (!input) return;
+  input.value = '';
+  input.onchange = function() {
+    var file = input.files && input.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function() {
+      try {
+        var bundle = JSON.parse(String(reader.result));
+        fetch('/api/conversations/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(bundle),
+        }).then(function(r) {
+          if (!r.ok) return r.json().then(function(j) { throw new Error(j.error || 'Import failed'); });
+          return r.json();
+        }).then(function(result) {
+          if (result && result.conversation) {
+            // Switch to the imported conversation
+            fetch('/api/conversations/select', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: result.conversation.id }),
+            });
+          }
+        }).catch(function(err) {
+          alert('Import failed: ' + err.message);
+        });
+      } catch (err) {
+        alert('Could not parse file: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
 }
 
 // --- Global sound setting (popover, not prompt) ---
@@ -1220,6 +1267,23 @@ function openSettings(evt, defaultTab) {
       soundsPanel.appendChild(row);
     });
   }
+
+  // Local-actions footer (demoted from the header toolbar)
+  var actionsDivider = document.createElement('div');
+  actionsDivider.className = 'pop-divider';
+  actionsDivider.textContent = 'View';
+  soundsPanel.appendChild(actionsDivider);
+
+  var clearViewBtn = document.createElement('button');
+  clearViewBtn.type = 'button';
+  clearViewBtn.className = 'btn btn-sm';
+  clearViewBtn.textContent = 'Clear view';
+  clearViewBtn.title = 'Hides messages from the page until you reload — does not delete anything';
+  clearViewBtn.addEventListener('click', function() {
+    clearChat();
+    closePopover();
+  });
+  soundsPanel.appendChild(clearViewBtn);
 
   pop.appendChild(soundsPanel);
 
