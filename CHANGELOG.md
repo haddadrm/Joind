@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-04 — Decision Card Composer (UI + Slash Command)
+
+### Added
+- **Composer toolbar button** ("Decide", `list-checks` icon next to the message input). Opens an inline popover above the composer with a Question field, two starter Option rows (add up to 8, remove down to 2), Cancel and Post buttons. Enter inside any option submits.
+- **Slash command**: `/decide Question? | A | B | C` in the message input posts the same decision card. Validates that there's at least a question + 2 options before posting; otherwise falls through to a normal message.
+- Composer hint text updated to advertise both paths.
+
+### Implementation
+- `public/index.html`: new `.btn-decide` button, `.decide-popover` block, decide controls with options list.
+- `public/app.js`: `parseDecideCommand`, `postDecisionCard`, `toggleDecidePopover`, `addDecideOption`, `submitDecideForm`. Slash command intercepted in `sendMessage` before the regular post path.
+- `public/style.css`: pill-style decide button, popover layout, primary button variant.
+- Both flows post to existing `POST /api/send` with `choices` (shipped earlier today).
+
 ## 2026-05-03 — Filter Sidecar Files Out of Conversation List
 
 ### Fixed

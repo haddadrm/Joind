@@ -2833,3 +2833,109 @@ body {
   color: var(--text-dim, #888);
   margin-left: 4px;
 }
+
+/* --- Decide popover (composer toolbar) --- */
+.btn-decide {
+  background: transparent;
+  color: var(--text-dim, #888);
+  border: 1px solid var(--border, #3a3d44);
+  border-radius: 8px;
+  width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: all 0.12s;
+  margin-right: 6px;
+  flex: 0 0 auto;
+}
+.btn-decide:hover {
+  color: var(--text, #e6e6e6);
+  background: var(--bg-hover, #2a2d33);
+  border-color: var(--accent, #5a8dee);
+}
+.decide-popover {
+  background: var(--bg-card, #1e2127);
+  border: 1px solid var(--border, #3a3d44);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+}
+.decide-popover[hidden] { display: none; }
+.decide-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.decide-label {
+  font-size: 12px;
+  color: var(--text-dim, #888);
+  width: 64px;
+  flex: 0 0 auto;
+}
+.decide-popover input[type="text"] {
+  flex: 1;
+  background: var(--bg, #15171c);
+  color: var(--text, #e6e6e6);
+  border: 1px solid var(--border, #3a3d44);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 13px;
+}
+.decide-popover input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent, #5a8dee);
+}
+.decide-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 72px;
+}
+.decide-option-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.decide-remove {
+  background: transparent;
+  color: var(--text-dim, #888);
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  width: 24px; height: 24px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.decide-remove:hover {
+  background: var(--bg-hover, #2a2d33);
+  color: var(--text, #e6e6e6);
+}
+.decide-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 72px;
+}
+.decide-spacer { flex: 1; }
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent, #5a8dee);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.btn-link:hover { text-decoration: underline; }
+.btn-primary {
+  background: var(--accent, #5a8dee);
+  color: #fff;
+  border-color: var(--accent, #5a8dee);
+}
+.btn-primary:hover {
+  filter: brightness(1.1);
+}

@@ -932,6 +932,16 @@ function sendMessage() {
   var sender = document.getElementById('sender-name');
   var text = input.value.trim();
   if (!text && !pendingImage) return;
+
+  // /decide slash command: "/decide Question? | optA | optB | optC"
+  var decide = parseDecideCommand(text);
+  if (decide) {
+    postDecisionCard(decide.question, decide.choices);
+    input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
+    syncHighlight();
+    return;
+  }
+
   var payload = { sender: sender.value || 'human', text: text || '[image]' };
   if (replyingTo) payload.replyTo = replyingTo.id;
   if (pendingImage) payload.image = pendingImage.url;
@@ -941,6 +951,93 @@ function sendMessage() {
   clearImagePreview();
   fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) });
+}
+
+// --- Decision cards ---
+
+function parseDecideCommand(text) {
+  if (!text || text.indexOf('/decide ') !== 0) return null;
+  var rest = text.slice('/decide '.length).trim();
+  var parts = rest.split('|').map(function(s) { return s.trim(); }).filter(Boolean);
+  if (parts.length < 3) return null;  // need question + at least 2 options
+  return { question: parts[0], choices: parts.slice(1) };
+}
+
+function postDecisionCard(question, choices) {
+  var sender = document.getElementById('sender-name');
+  var payload = {
+    sender: sender.value || 'human',
+    text: question,
+    choices: choices,
+  };
+  fetch('/api/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+function toggleDecidePopover() {
+  var pop = document.getElementById('decide-popover');
+  if (pop.hasAttribute('hidden')) openDecidePopover();
+  else closeDecidePopover();
+}
+
+function openDecidePopover() {
+  var pop = document.getElementById('decide-popover');
+  pop.removeAttribute('hidden');
+  var opts = document.getElementById('decide-options');
+  opts.innerHTML = '';
+  addDecideOption();
+  addDecideOption();
+  document.getElementById('decide-question').value = '';
+  setTimeout(function() { document.getElementById('decide-question').focus(); }, 0);
+}
+
+function closeDecidePopover() {
+  document.getElementById('decide-popover').setAttribute('hidden', '');
+}
+
+function addDecideOption(value) {
+  var opts = document.getElementById('decide-options');
+  if (opts.children.length >= 8) return;
+  var row = document.createElement('div');
+  row.className = 'decide-option-row';
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Option ' + (opts.children.length + 1);
+  if (value) input.value = value;
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); submitDecideForm(); }
+  });
+  var rm = document.createElement('button');
+  rm.type = 'button';
+  rm.className = 'decide-remove';
+  rm.title = 'Remove option';
+  rm.textContent = '×';
+  rm.addEventListener('click', function() {
+    if (opts.children.length > 2) row.remove();
+  });
+  row.appendChild(input);
+  row.appendChild(rm);
+  opts.appendChild(row);
+}
+
+function submitDecideForm() {
+  var question = document.getElementById('decide-question').value.trim();
+  if (!question) {
+    document.getElementById('decide-question').focus();
+    return;
+  }
+  var inputs = document.querySelectorAll('#decide-options input');
+  var choices = [];
+  inputs.forEach(function(i) {
+    var v = i.value.trim();
+    if (v) choices.push(v);
+  });
+  if (choices.length < 2) return;
+  postDecisionCard(question, choices);
+  closeDecidePopover();
 }
 
 function mentionAll() {
@@ -2549,6 +2646,12 @@ document.addEventListener('DOMContentLoaded', function() {
   updateMuteBtn();
   connect();
   loadTemplates();
+  // Decide popover wiring
+  var decideAdd = document.getElementById('decide-add');
+  if (decideAdd) decideAdd.addEventListener('click', function() { addDecideOption(); });
+  var decidePost = document.getElementById('decide-post');
+  if (decidePost) decidePost.addEventListener('click', submitDecideForm);
+
   // Show instance name in header + page title
   fetch('/api/instance').then(function(r) { return r.json(); }).then(function(info) {
     if (!info || !info.name) return;

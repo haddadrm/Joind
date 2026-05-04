@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -153,22 +153,38 @@
 
         <footer class="chat-footer">
           <input type="hidden" id="sender-name" value="human" />
+          <div class="decide-popover" id="decide-popover" hidden>
+            <div class="decide-row">
+              <label class="decide-label">Question</label>
+              <input type="text" id="decide-question" placeholder="What needs deciding?" />
+            </div>
+            <div class="decide-options" id="decide-options"></div>
+            <div class="decide-actions">
+              <button type="button" class="btn-link" id="decide-add">+ Add option</button>
+              <span class="decide-spacer"></span>
+              <button type="button" class="btn btn-sm" onclick="closeDecidePopover()">Cancel</button>
+              <button type="button" class="btn btn-sm btn-primary" id="decide-post">Post</button>
+            </div>
+          </div>
           <div class="input-row">
+            <button class="btn btn-decide" id="decide-btn" onclick="toggleDecidePopover()" title="Post a decision card">
+              <i data-lucide="list-checks" width="18" height="18"></i>
+            </button>
             <div class="input-wrapper">
               <div class="input-highlight" id="input-highlight"></div>
-              <textarea id="message-input" placeholder="Type a message... @name to mention" rows="1" spellcheck="false"></textarea>
+              <textarea id="message-input" placeholder="Type a message... @name to mention &middot; /decide for a poll" rows="1" spellcheck="false"></textarea>
             </div>
             <button class="btn btn-send" id="send-btn" onclick="sendMessage()">
               <i data-lucide="send" width="20" height="20"></i>
             </button>
           </div>
-          <div class="input-hint">Enter send &middot; Shift+Enter newline &middot; @name mention &middot; @all everyone</div>
+          <div class="input-hint">Enter send &middot; Shift+Enter newline &middot; @name mention &middot; @all everyone &middot; /decide Q? | A | B</div>
         </footer>
       </main>
     </div>
   </div>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();
