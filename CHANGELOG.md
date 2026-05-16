@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-05-16 — UI/UX Audit + Token Consolidation
+
+### Changed
+- **Design tokens consolidated in `:root`** — single source of truth. Added scales for radius (`--radius-xs/sm/md/lg/xl/pill`), shadow (`--shadow-xs/sm/md/lg`, plus `--shadow-accent`), motion (`--ease-out`, `--ease-standard`, `--dur-fast/dur/dur-slow`), and status (`--success`, `--warn`, `--danger` each with `*-soft` and `*-border` variants). Kept the same visual identity — zinc 950 base + violet 500 accent, glassmorphism — but every surface now references tokens instead of literals.
+- **Token-drift sweep across `public/style.css`** — replaced every `rgba(124,58,237,…)` (violet 600) with `var(--accent-soft|hover)`; collapsed two overlapping greens (`74,222,128` / `16,185,129`) into `--success`; collapsed two reds (`248,113,113` / `239,68,68`) into `--danger`. Ad-hoc shadows and border-radii now use the scale.
+- **Decide popover + choice buttons** previously used a foreign system (`var(--bg-card)`, `var(--accent, #5a8dee)` — a blue fallback). Rebound to the canonical tokens; the decide button is now 44×44 to align with the send button.
+- **Welcome state** brought forward — heading uses `--text-bright`, glyph opacity raised from 0.25 to 0.55 with a soft accent glow, so the hex reads as a brand mark rather than a loading state.
+- Duplicate `.reply-quote` / `.reply-preview` definitions removed.
+
+### Added
+- **Global `:focus-visible` ring** — `--ring` token (offset against canvas) applied to buttons, inputs, role="button" elements. Custom overrides for `.you-pill` and the message input wrapper preserve their existing focus treatments.
+- **Accessibility on icon-only buttons** — `aria-label` on every header/sidebar/footer icon button; `aria-hidden="true"` on decorative Lucide icons; `aria-pressed` on the mute toggle; `aria-expanded` + `aria-controls` on the decide button; `aria-live="polite"` on typing bar, task badge count, reply preview, image preview; `role="search"` on the search overlay; task panel promoted to `<aside>` with `aria-label`.
+- **Keyboard activation** for `.you-pill` (Enter/Space).
+- **`prefers-reduced-motion`** honored globally — animations/transitions neutralized when requested.
+- **`::selection`** uses `--accent-hover` so highlights match the violet theme.
+- **`.sr-only` utility** for visually hidden but accessible labels.
+- `font-variant-numeric: tabular-nums` on counters and IDs (task badge, msg IDs, search result IDs, turn-guard spinner, new-msgs count).
+
+### Fixed
+- Search-close, reply-preview-cancel, image-preview-cancel, new-msgs-pill upgraded from `<span>`/`<div>` to `<button>` with proper button reset so they're keyboard-reachable and screen-reader-announced.
+- `updateMuteBtn` had a duplicated `var btn = …` declaration — consolidated.
+
+### Verification
+- `pnpm build` passes, server starts, browser visit shows zero console errors/warnings.
+- Token resolution confirmed in DevTools: `--accent=#8b5cf6`, `--success=#10b981`, `--danger=#ef4444`, focus ring computes to `0 0 0 2px #09090b, 0 0 0 4px #8b5cf6`.
+- Verified at 1440×900 (desktop) and 390×844 (iPhone-class mobile) — header collapses correctly, task panel becomes full-width overlay, no horizontal scroll.
+
 ## 2026-05-04 — Header Toolbar Refresh + Import UI
 
 ### Changed

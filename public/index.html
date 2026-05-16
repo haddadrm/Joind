@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -13,20 +13,20 @@
   <div class="app">
     <header class="header">
       <div class="header-left">
-        <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar"><i data-lucide="menu" width="18" height="18"></i></button>
-        <h1 class="logo"><span class="logo-icon"><i data-lucide="hexagon" width="18" height="18"></i></span><span id="instance-name">Joind</span></h1>
+        <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar"><i data-lucide="menu" width="18" height="18" aria-hidden="true"></i></button>
+        <h1 class="logo"><span class="logo-icon" aria-hidden="true"><i data-lucide="hexagon" width="18" height="18"></i></span><span id="instance-name">Joind</span></h1>
       </div>
-      <div class="agent-pills" id="agent-pills"></div>
-      <button class="task-badge" id="task-badge" onclick="toggleTaskPanel()" title="Tasks">
-        <i data-lucide="clipboard-list" width="16" height="16"></i>
-        <span class="task-badge-count" id="task-badge-count">0</span>
+      <div class="agent-pills" id="agent-pills" role="list" aria-label="Connected agents"></div>
+      <button class="task-badge" id="task-badge" onclick="toggleTaskPanel()" title="Tasks" aria-label="Open task panel">
+        <i data-lucide="clipboard-list" width="16" height="16" aria-hidden="true"></i>
+        <span class="task-badge-count" id="task-badge-count" aria-live="polite">0</span>
       </button>
-      <div class="you-pill" id="you-pill" title="Click to change your name">
+      <div class="you-pill" id="you-pill" title="Click to change your name" role="button" tabindex="0" aria-label="Change your name">
         <span class="you-label">you</span>
         <span class="you-name" id="you-name-display">human</span>
       </div>
       <div class="header-right">
-        <span class="connection-dot" id="connection-dot" title="Connected"></span>
+        <span class="connection-dot" id="connection-dot" title="Connected" role="status" aria-label="Connection status"></span>
       </div>
     </header>
 
@@ -34,15 +34,15 @@
       <aside class="sidebar" id="sidebar">
         <!-- Actions on top -->
         <div class="sidebar-section">
-          <div class="quick-actions">
-            <button class="btn btn-action btn-launch" id="launch-btn" onclick="openLaunchDialog()" title="Launch Agent"><i data-lucide="rocket" width="18" height="18"></i></button>
+          <div class="quick-actions" role="toolbar" aria-label="Conversation actions">
+            <button class="btn btn-action btn-launch" id="launch-btn" onclick="openLaunchDialog()" title="Launch Agent" aria-label="Launch Agent"><i data-lucide="rocket" width="18" height="18" aria-hidden="true"></i></button>
             <span class="btn-group-sep" aria-hidden="true"></span>
-            <button class="btn btn-action" onclick="toggleSearch()" title="Search messages"><i data-lucide="search" width="18" height="18"></i></button>
-            <button class="btn btn-action" onclick="exportChat()" title="Export conversation"><i data-lucide="download" width="18" height="18"></i></button>
-            <button class="btn btn-action" onclick="openImportDialog()" title="Import conversation"><i data-lucide="upload" width="18" height="18"></i></button>
+            <button class="btn btn-action" onclick="toggleSearch()" title="Search messages" aria-label="Search messages"><i data-lucide="search" width="18" height="18" aria-hidden="true"></i></button>
+            <button class="btn btn-action" onclick="exportChat()" title="Export conversation" aria-label="Export conversation"><i data-lucide="download" width="18" height="18" aria-hidden="true"></i></button>
+            <button class="btn btn-action" onclick="openImportDialog()" title="Import conversation" aria-label="Import conversation"><i data-lucide="upload" width="18" height="18" aria-hidden="true"></i></button>
             <span class="btn-group-sep" aria-hidden="true"></span>
-            <button class="btn btn-action" id="mute-btn" onclick="toggleMute()" title="Toggle sound"><i data-lucide="volume-2" width="18" height="18"></i></button>
-            <button class="btn btn-action" onclick="openSoundSettings(event)" title="Settings"><i data-lucide="settings" width="18" height="18"></i></button>
+            <button class="btn btn-action" id="mute-btn" onclick="toggleMute()" title="Toggle sound" aria-label="Toggle sound" aria-pressed="false"><i data-lucide="volume-2" width="18" height="18" aria-hidden="true"></i></button>
+            <button class="btn btn-action" onclick="openSoundSettings(event)" title="Settings" aria-label="Open settings"><i data-lucide="settings" width="18" height="18" aria-hidden="true"></i></button>
             <input type="file" id="import-file-input" accept="application/json,.json" hidden />
           </div>
           <div class="turn-guard-row" id="turn-guard-row">
@@ -98,10 +98,10 @@
       </aside>
 
       <main class="chat-area">
-        <div class="search-bar hidden" id="search-bar">
-          <input type="text" id="search-input" placeholder="Search messages..." spellcheck="false" />
-          <span class="search-close" onclick="closeSearch()"><i data-lucide="x" width="16" height="16"></i></span>
-          <div id="search-results" class="search-results"></div>
+        <div class="search-bar hidden" id="search-bar" role="search">
+          <input type="text" id="search-input" placeholder="Search messages..." spellcheck="false" aria-label="Search messages" />
+          <button class="search-close" onclick="closeSearch()" type="button" aria-label="Close search"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
+          <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
         </div>
         <div class="chat-messages" id="messages">
           <div class="welcome-message" id="welcome">
@@ -120,39 +120,39 @@
 
         <div class="mention-menu hidden" id="mention-menu"></div>
 
-        <div class="reply-preview hidden" id="reply-preview">
+        <div class="reply-preview hidden" id="reply-preview" role="status" aria-live="polite">
           <span class="reply-preview-text" id="reply-preview-text"></span>
-          <span class="reply-preview-cancel" onclick="clearReply()"><i data-lucide="x" width="16" height="16"></i></span>
+          <button class="reply-preview-cancel" onclick="clearReply()" type="button" aria-label="Cancel reply"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
         </div>
 
-        <div class="image-preview hidden" id="image-preview">
-          <img id="image-preview-thumb" class="image-preview-thumb" src="" alt="preview" />
+        <div class="image-preview hidden" id="image-preview" role="status" aria-live="polite">
+          <img id="image-preview-thumb" class="image-preview-thumb" src="" alt="Attached image preview" />
           <span class="image-preview-label">Image attached</span>
-          <span class="image-preview-cancel" onclick="clearImagePreview()"><i data-lucide="x" width="16" height="16"></i></span>
+          <button class="image-preview-cancel" onclick="clearImagePreview()" type="button" aria-label="Remove attached image"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
         </div>
 
-        <div class="typing-bar" id="typing-bar"></div>
-        <div class="new-msgs-pill hidden" id="new-msgs-pill" onclick="jumpToBottom()">
-          <span class="new-msgs-arrow">↓</span>
+        <div class="typing-bar" id="typing-bar" aria-live="polite"></div>
+        <button class="new-msgs-pill hidden" id="new-msgs-pill" onclick="jumpToBottom()" type="button" aria-label="Jump to new messages">
+          <span class="new-msgs-arrow" aria-hidden="true">↓</span>
           <span id="new-msgs-count">0</span> new messages
-        </div>
+        </button>
 
-        <div class="task-panel hidden" id="task-panel">
+        <aside class="task-panel hidden" id="task-panel" aria-label="Tasks">
           <div class="task-panel-header">
             <h3>Tasks</h3>
-            <div class="task-panel-tabs">
-              <button class="task-tab active" data-filter="open" onclick="setTaskFilter('open', this)">Open</button>
-              <button class="task-tab" data-filter="done" onclick="setTaskFilter('done', this)">Done</button>
+            <div class="task-panel-tabs" role="tablist">
+              <button class="task-tab active" data-filter="open" onclick="setTaskFilter('open', this)" role="tab" aria-selected="true">Open</button>
+              <button class="task-tab" data-filter="done" onclick="setTaskFilter('done', this)" role="tab" aria-selected="false">Done</button>
             </div>
-            <button class="task-panel-close" onclick="toggleTaskPanel()" title="Close">
-              <i data-lucide="x" width="16" height="16"></i>
+            <button class="task-panel-close" onclick="toggleTaskPanel()" title="Close" aria-label="Close tasks panel">
+              <i data-lucide="x" width="16" height="16" aria-hidden="true"></i>
             </button>
           </div>
           <div class="task-panel-body" id="task-panel-body"></div>
           <div class="task-panel-footer">
             <button class="btn btn-sm" onclick="showCreateTaskForm()">+ New Task</button>
           </div>
-        </div>
+        </aside>
 
         <footer class="chat-footer">
           <input type="hidden" id="sender-name" value="human" />
@@ -170,15 +170,16 @@
             </div>
           </div>
           <div class="input-row">
-            <button class="btn btn-decide" id="decide-btn" onclick="toggleDecidePopover()" title="Post a decision card">
-              <i data-lucide="list-checks" width="18" height="18"></i>
+            <button class="btn btn-decide" id="decide-btn" onclick="toggleDecidePopover()" type="button" title="Post a decision card" aria-label="Post a decision card" aria-expanded="false" aria-controls="decide-popover">
+              <i data-lucide="list-checks" width="18" height="18" aria-hidden="true"></i>
             </button>
             <div class="input-wrapper">
-              <div class="input-highlight" id="input-highlight"></div>
+              <div class="input-highlight" id="input-highlight" aria-hidden="true"></div>
+              <label for="message-input" class="sr-only">Message</label>
               <textarea id="message-input" placeholder="Type a message... @name to mention &middot; /decide for a poll" rows="1" spellcheck="false"></textarea>
             </div>
-            <button class="btn btn-send" id="send-btn" onclick="sendMessage()">
-              <i data-lucide="send" width="20" height="20"></i>
+            <button class="btn btn-send" id="send-btn" onclick="sendMessage()" type="button" aria-label="Send message">
+              <i data-lucide="send" width="20" height="20" aria-hidden="true"></i>
             </button>
           </div>
           <div class="input-hint">Enter send &middot; Shift+Enter newline &middot; @name mention &middot; @all everyone &middot; /decide Q? | A | B</div>
@@ -187,7 +188,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();

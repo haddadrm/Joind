@@ -91,9 +91,11 @@ function toggleMute() {
 function updateMuteBtn() {
   var btn = document.getElementById('mute-btn');
   if (btn) {
-    btn.innerHTML = isMuted ? '<i data-lucide="volume-x" width="18" height="18"></i>' : '<i data-lucide="volume-2" width="18" height="18"></i>';
+    btn.innerHTML = isMuted ? '<i data-lucide="volume-x" width="18" height="18" aria-hidden="true"></i>' : '<i data-lucide="volume-2" width="18" height="18" aria-hidden="true"></i>';
     btn.style.opacity = isMuted ? '0.5' : '1';
     btn.title = isMuted ? 'Unmute' : 'Mute';
+    btn.setAttribute('aria-label', isMuted ? 'Unmute' : 'Mute');
+    btn.setAttribute('aria-pressed', isMuted ? 'true' : 'false');
     if (window.lucide) lucide.createIcons({ root: btn });
   }
 }
@@ -986,6 +988,8 @@ function toggleDecidePopover() {
 function openDecidePopover() {
   var pop = document.getElementById('decide-popover');
   pop.removeAttribute('hidden');
+  var btn = document.getElementById('decide-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
   var opts = document.getElementById('decide-options');
   opts.innerHTML = '';
   addDecideOption();
@@ -996,6 +1000,8 @@ function openDecidePopover() {
 
 function closeDecidePopover() {
   document.getElementById('decide-popover').setAttribute('hidden', '');
+  var btn = document.getElementById('decide-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
 }
 
 function addDecideOption(value) {
@@ -1787,6 +1793,14 @@ function setupYouPill() {
   }
   senderInput.addEventListener('input', syncName);
   senderInput.addEventListener('change', syncName);
+
+  // Keyboard activation (role="button" needs Enter/Space)
+  pill.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      pill.click();
+    }
+  });
 
   // Click pill → popover with name, color, sound
   pill.addEventListener('click', function(e) {
