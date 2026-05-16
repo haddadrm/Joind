@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-05-16 — Message Input Fixes
+
+### Fixed
+- **Greyed text while typing** — `#message-input:focus { background: var(--bg-elevated) }` was painting an 85% opaque grey *on top of* the colored highlight overlay (textarea was z-index:2 above `.input-highlight` at z-index:1, with `color: transparent`). Removed the focus background.
+- **Caret / last-letter misalignment** — the visible glyphs lived on `.input-highlight` while the real caret + text were in an invisible textarea. On fractional-DPR displays (computed border was `0.571429px` at 1.75x), sub-pixel font rendering shifted the overlay relative to the caret so the last letter appeared ahead of the cursor. Killed the overlay entirely: textarea now renders its own text in `--text` with caret in `--accent`. Mentions are still colored in *rendered* messages — only the in-progress input is plain.
+- **Input row vertical misalignment** — wrapper auto-heighted to 49px while decide/send buttons were 44px exactly. Pinned wrapper to `min-height: 44px` with `box-sizing: border-box`, switched `.input-row` to `align-items: stretch`. All three elements now share the same 44px baseline.
+
+### Changed
+- `.input-highlight` element kept in DOM for safety but `display: none`; `syncHighlight()` / `syncHighlightScroll()` are no-ops so existing call sites stay valid without churn.
+
 ## 2026-05-16 — UI/UX Audit + Token Consolidation
 
 ### Changed

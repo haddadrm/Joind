@@ -1512,30 +1512,11 @@ function resolveMentionColor(name) {
   return null;
 }
 
-function syncHighlight() {
-  var input = document.getElementById('message-input');
-  var highlight = document.getElementById('input-highlight');
-  if (!highlight) return;
-
-  var text = input.value;
-  // Escape HTML, then color exact or uniquely identifiable @mentions inline.
-  var escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  var html = escaped.replace(/@(\w[\w-]*)/g, function(match, name) {
-    var color = resolveMentionColor(name);
-    if (!color) return match;
-    return '<span class="hl-mention" style="color:' + color + '">' + match + '</span>';
-  });
-  // Add trailing space so highlight div matches textarea height
-  highlight.innerHTML = html + '\n';
-  // Sync scroll
-  highlight.scrollTop = input.scrollTop;
-}
-
-function syncHighlightScroll() {
-  var input = document.getElementById('message-input');
-  var highlight = document.getElementById('input-highlight');
-  if (highlight) highlight.scrollTop = input.scrollTop;
-}
+// Overlay-based mention coloring was removed (caused caret/letter drift on
+// fractional-pixel DPRs and required a focus background that greyed the text).
+// Mentions are still colored in rendered messages; the input itself is plain.
+function syncHighlight() {}
+function syncHighlightScroll() {}
 
 function updateSendBtn() {
   document.getElementById('send-btn').classList.toggle('inactive', !document.getElementById('message-input').value.trim());
