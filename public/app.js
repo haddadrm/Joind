@@ -2697,10 +2697,24 @@ function timeAgo(ts) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
+// --- Responsive placeholder swap (avoids wrapping at mobile widths) ---
+function syncInputPlaceholder() {
+  var input = document.getElementById('message-input');
+  if (!input) return;
+  var w = window.innerWidth;
+  var ph;
+  if (w <= 400) ph = 'Type a message…';
+  else if (w <= 560) ph = 'Type a message… @name · /decide';
+  else ph = 'Type a message... @name to mention · /decide for a poll';
+  if (input.placeholder !== ph) input.placeholder = ph;
+}
+window.addEventListener('resize', syncInputPlaceholder);
+
 // --- Init ---
 document.addEventListener('DOMContentLoaded', function() {
   setupInput();
   setupYouPill();
+  syncInputPlaceholder();
   updateSendBtn();
   updateMuteBtn();
   connect();

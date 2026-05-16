@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-05-16 — Responsive Audit (Tablet + Mobile)
+
+### Added
+- **New tablet band `@media (max-width: 1024px)`** — sidebar narrowed to 220px, role pills hidden, header gap tightened, toolbar-rail padding reduced, chat-messages padding reduced, task panel narrowed to 320px. Previously the 769–1024 range inherited desktop values, which left the sidebar at full width on portrait iPad / small laptops.
+- **New tablet-portrait band `@media (max-width: 820px)`** — sidebar to 200px, you-pill loses its "YOU" label, agent-pill role hidden, header padding tightened to `0 12px`, chat-messages + chat-footer to 12px horizontal. The input hint row now uses `flex-wrap: wrap` with `row-gap: 2px` so it lays out cleanly when it can't fit one line.
+- **Responsive placeholder** in `public/app.js` — `syncInputPlaceholder()` swaps the textarea placeholder at ≤560 ("Type a message… @name · /decide") and ≤400 ("Type a message…") to prevent two-line wrap on small phones. Re-runs on `resize`.
+
+### Fixed
+- **Mobile drawer overlapped the header** — `.sidebar` and `.sidebar-backdrop` (in the ≤560 band) now start at `top: 46px`, dropping to `42px` at ≤400 to match the smaller header. The hamburger toggle stays accessible above the drawer so you can dismiss it without hunting for the backdrop.
+- **Drawer width on tiny viewports** — `.sidebar` was 280px hard-coded, which overflowed on devices below 320px. Now `width: min(280px, 86vw)`.
+- **Drawer bottom safe area** — `padding-bottom: env(safe-area-inset-bottom, 0px)` so the sessions list doesn't sit under the iOS home indicator.
+
+### Verified
+- 1024 / 820 / 600 / 430 / 390 px viewports — no horizontal scroll, hamburger reaches header in drawer state, hint row wraps cleanly, placeholder no longer breaks across two lines. Zero console errors.
+
 ## 2026-05-16 — Message Input Fixes
 
 ### Fixed

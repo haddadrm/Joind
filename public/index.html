@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=9">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -65,7 +65,10 @@
           </div>
           <div class="section-body">
             <div id="active-session" class="active-session">No conversation selected</div>
-            <input type="text" class="conv-search" id="conv-search" placeholder="Search conversations..." spellcheck="false" />
+            <div class="conv-search-wrap">
+              <i data-lucide="search" width="12" height="12" aria-hidden="true" class="conv-search-icon"></i>
+              <input type="text" class="conv-search" id="conv-search" placeholder="Search conversations..." spellcheck="false" aria-label="Search conversations" />
+            </div>
             <ul id="conversation-list" class="conversation-list"></ul>
           </div>
         </div>
@@ -188,7 +191,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();
