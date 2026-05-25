@@ -45,6 +45,7 @@ export interface ChatRoomOptions {
   getCursor?: (agentName: string) => number;
   onChoice?: (messageId: number, value: string, by: string, at: number) => void;
   onPin?: (messageId: number, pinned: boolean, at: number) => void;
+  onTag?: (messageId: number, tag: string, at: number) => void;
 }
 
 export class ChatRoom extends EventEmitter {
@@ -61,6 +62,7 @@ export class ChatRoom extends EventEmitter {
   turnGuard: { enabled: boolean; limit: number } | null = null;
   private onChoice?: (messageId: number, value: string, by: string, at: number) => void;
   private onPin?: (messageId: number, pinned: boolean, at: number) => void;
+  private onTag?: (messageId: number, tag: string, at: number) => void;
 
   constructor(chatFilePathOrOptions?: string | ChatRoomOptions) {
     super();
@@ -73,6 +75,7 @@ export class ChatRoom extends EventEmitter {
     this.getCursor = options.getCursor ?? (() => 0);
     this.onChoice = options.onChoice;
     this.onPin = options.onPin;
+    this.onTag = options.onTag;
 
     if (options.chatFilePath) {
       this.chatFile = options.chatFilePath;
@@ -385,7 +388,18 @@ export class ChatRoom extends EventEmitter {
     const msg = this.messages.find(m => m.id === messageId);
     if (!msg) return null;
     msg.tag = tag || undefined;
+    this.onTag?.(messageId, tag || "", Date.now());
     return msg;
+  }
+
+  /** Replay persisted tags onto loaded messages. Latest record per messageId wins; empty clears. */
+  applyTagRecords(records: { messageId: number; tag: string }[]): void {
+    const latest = new Map<number, string>();
+    for (const r of records) latest.set(r.messageId, r.tag);
+    for (const [messageId, tag] of latest) {
+      const msg = this.messages.find(m => m.id === messageId);
+      if (msg) msg.tag = tag || undefined;
+    }
   }
 
   pinMessage(messageId: number, pinned: boolean): ChatMessage | null {

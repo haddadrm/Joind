@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-05-25 — Persist Message Tags Across Restart (#6)
+
+### Fixed
+- Message tags (decision / status / question / evidence / handoff / custom) now survive a server restart. Previously `tagMessage()` only mutated the message in memory, so a rebuild/restart wiped every tag.
+- Combined with #5, `chat_handoff` notes are now fully durable: the note is tagged `handoff` **and** pinned, and both now persist — so "find the handoff later" works across restarts.
+
+### Added
+- **`src/tags.ts`** (`TagStore`): append-only JSONL sidecar at `<convId>.tags.jsonl`. Tags are overwriteable, so on replay the **latest** record per `messageId` wins; an empty tag clears it.
+- `ChatRoom` accepts an `onTag` callback (invoked by `tagMessage`) and exposes `applyTagRecords()` to replay the sidecar after JSONL load.
+- `ConversationManager.getOrCreateRoom()` wires the callback and replays existing tags.
+- `.tags` added to `SIDECAR_SUFFIXES`.
+
+### Notes
+- Tags set before this commit are not recoverable (never written anywhere).
+
 ## 2026-05-25 — Persist Pin State Across Restart (#5)
 
 ### Fixed

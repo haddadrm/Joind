@@ -13,6 +13,7 @@ import { ChatRoom, type ChatMessage, type Agent, type RoomEvent } from "./room.j
 import { ensureDir, loadMessages, maxId, appendMessage } from "./persist.js";
 import { ChoiceStore } from "./choices.js";
 import { PinStore } from "./pins.js";
+import { TagStore } from "./tags.js";
 
 export interface ConversationMeta {
   id: string;
@@ -31,6 +32,7 @@ export class ConversationManager extends EventEmitter {
   private activeId: string | null = null; // web UI's currently viewed conversation
   private choiceStore: ChoiceStore;
   private pinStore: PinStore;
+  private tagStore: TagStore;
 
   constructor(dataDir: string) {
     super();
@@ -38,6 +40,7 @@ export class ConversationManager extends EventEmitter {
     this.indexPath = join(dataDir, "conversations.json");
     this.choiceStore = new ChoiceStore(this.dataDir);
     this.pinStore = new PinStore(this.dataDir);
+    this.tagStore = new TagStore(this.dataDir);
     ensureDir(this.dataDir);
     this.loadIndex();
   }
@@ -51,7 +54,7 @@ export class ConversationManager extends EventEmitter {
    * `<convId>.<suffix>.jsonl` are NOT conversations and must be excluded
    * from orphan discovery and the index.
    */
-  private static readonly SIDECAR_SUFFIXES = [".reactions", ".tasks", ".edits", ".choices", ".pins"];
+  private static readonly SIDECAR_SUFFIXES = [".reactions", ".tasks", ".edits", ".choices", ".pins", ".tags"];
 
   private isSidecarId(id: string): boolean {
     return ConversationManager.SIDECAR_SUFFIXES.some((s) => id.endsWith(s));
@@ -174,10 +177,12 @@ export class ConversationManager extends EventEmitter {
       const filePath = join(this.dataDir, id + ".jsonl");
       const choiceStore = this.choiceStore;
       const pinStore = this.pinStore;
+      const tagStore = this.tagStore;
       room = new ChatRoom({
         chatFilePath: filePath,
         onChoice: (messageId, value, by, at) => choiceStore.record(id, { messageId, value, by, at }),
         onPin: (messageId, pinned, at) => pinStore.record(id, { messageId, pinned, at }),
+        onTag: (messageId, tag, at) => tagStore.record(id, { messageId, tag, at }),
       });
       // Replay any persisted choice resolutions onto the freshly loaded messages
       const persistedChoices = choiceStore.load(id);
@@ -185,6 +190,9 @@ export class ConversationManager extends EventEmitter {
       // Replay any persisted pin state
       const persistedPins = pinStore.load(id);
       if (persistedPins.length > 0) room.applyPinRecords(persistedPins);
+      // Replay any persisted tags
+      const persistedTags = tagStore.load(id);
+      if (persistedTags.length > 0) room.applyTagRecords(persistedTags);
       // Forward room events with conversation ID
       room.on("room", (event: RoomEvent) => {
         this.emit("room", { ...event, conversationId: id });
