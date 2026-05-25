@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-05-25 — Persist Pin State Across Restart (#5)
+
+### Fixed
+- Pinned messages now survive a server restart. Previously `pinMessage()` only mutated the message in memory and broadcast a WS event, so a rebuild/restart wiped every pin (and, via `chat_handoff`, every auto-pinned handoff note).
+
+### Added
+- **`src/pins.ts`** (`PinStore`): append-only JSONL sidecar at `<convId>.pins.jsonl`. Pins are toggleable, so on replay the **latest** record per `messageId` wins (contrast with `ChoiceStore`'s first-wins).
+- `ChatRoom` accepts an `onPin` callback (invoked by `pinMessage`) and exposes `applyPinRecords()` to replay the sidecar after JSONL load.
+- `ConversationManager.getOrCreateRoom()` wires the callback and replays existing pin state.
+- `.pins` added to `SIDECAR_SUFFIXES` so the new file isn't mistaken for a conversation.
+
+### Notes
+- Tags still have the same in-memory-only behaviour — tracked in #6.
+- Pins set before this commit are not recoverable (never written anywhere).
+
 ## 2026-05-16 — Responsive Audit (Tablet + Mobile)
 
 ### Added

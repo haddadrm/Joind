@@ -44,6 +44,7 @@ export interface ChatRoomOptions {
   chatFilePath?: string;
   getCursor?: (agentName: string) => number;
   onChoice?: (messageId: number, value: string, by: string, at: number) => void;
+  onPin?: (messageId: number, pinned: boolean, at: number) => void;
 }
 
 export class ChatRoom extends EventEmitter {
@@ -59,6 +60,7 @@ export class ChatRoom extends EventEmitter {
   getCursor: (agentName: string) => number;
   turnGuard: { enabled: boolean; limit: number } | null = null;
   private onChoice?: (messageId: number, value: string, by: string, at: number) => void;
+  private onPin?: (messageId: number, pinned: boolean, at: number) => void;
 
   constructor(chatFilePathOrOptions?: string | ChatRoomOptions) {
     super();
@@ -70,6 +72,7 @@ export class ChatRoom extends EventEmitter {
 
     this.getCursor = options.getCursor ?? (() => 0);
     this.onChoice = options.onChoice;
+    this.onPin = options.onPin;
 
     if (options.chatFilePath) {
       this.chatFile = options.chatFilePath;
@@ -389,8 +392,19 @@ export class ChatRoom extends EventEmitter {
     const msg = this.messages.find(m => m.id === messageId);
     if (!msg) return null;
     msg.pinned = pinned;
+    this.onPin?.(messageId, pinned, Date.now());
     this.emit("room", { type: "message-pinned", data: { id: messageId, pinned } } as unknown as RoomEvent);
     return msg;
+  }
+
+  /** Replay persisted pin state onto loaded messages. Latest record per messageId wins. */
+  applyPinRecords(records: { messageId: number; pinned: boolean }[]): void {
+    const latest = new Map<number, boolean>();
+    for (const r of records) latest.set(r.messageId, r.pinned);
+    for (const [messageId, pinned] of latest) {
+      const msg = this.messages.find(m => m.id === messageId);
+      if (msg) msg.pinned = pinned;
+    }
   }
 
   chooseMessage(messageId: number, value: string, by: string): ChatMessage | null {

@@ -12,6 +12,7 @@ import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statS
 import { ChatRoom, type ChatMessage, type Agent, type RoomEvent } from "./room.js";
 import { ensureDir, loadMessages, maxId, appendMessage } from "./persist.js";
 import { ChoiceStore } from "./choices.js";
+import { PinStore } from "./pins.js";
 
 export interface ConversationMeta {
   id: string;
@@ -29,12 +30,14 @@ export class ConversationManager extends EventEmitter {
   private indexPath: string;
   private activeId: string | null = null; // web UI's currently viewed conversation
   private choiceStore: ChoiceStore;
+  private pinStore: PinStore;
 
   constructor(dataDir: string) {
     super();
     this.dataDir = join(dataDir, "conversations");
     this.indexPath = join(dataDir, "conversations.json");
     this.choiceStore = new ChoiceStore(this.dataDir);
+    this.pinStore = new PinStore(this.dataDir);
     ensureDir(this.dataDir);
     this.loadIndex();
   }
@@ -48,7 +51,7 @@ export class ConversationManager extends EventEmitter {
    * `<convId>.<suffix>.jsonl` are NOT conversations and must be excluded
    * from orphan discovery and the index.
    */
-  private static readonly SIDECAR_SUFFIXES = [".reactions", ".tasks", ".edits", ".choices"];
+  private static readonly SIDECAR_SUFFIXES = [".reactions", ".tasks", ".edits", ".choices", ".pins"];
 
   private isSidecarId(id: string): boolean {
     return ConversationManager.SIDECAR_SUFFIXES.some((s) => id.endsWith(s));
@@ -170,13 +173,18 @@ export class ConversationManager extends EventEmitter {
     if (!room) {
       const filePath = join(this.dataDir, id + ".jsonl");
       const choiceStore = this.choiceStore;
+      const pinStore = this.pinStore;
       room = new ChatRoom({
         chatFilePath: filePath,
         onChoice: (messageId, value, by, at) => choiceStore.record(id, { messageId, value, by, at }),
+        onPin: (messageId, pinned, at) => pinStore.record(id, { messageId, pinned, at }),
       });
       // Replay any persisted choice resolutions onto the freshly loaded messages
       const persistedChoices = choiceStore.load(id);
       if (persistedChoices.length > 0) room.applyChoiceRecords(persistedChoices);
+      // Replay any persisted pin state
+      const persistedPins = pinStore.load(id);
+      if (persistedPins.length > 0) room.applyPinRecords(persistedPins);
       // Forward room events with conversation ID
       room.on("room", (event: RoomEvent) => {
         this.emit("room", { ...event, conversationId: id });
