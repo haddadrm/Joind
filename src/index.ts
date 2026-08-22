@@ -47,6 +47,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 const PORT = CONFIG.port;
+const HOST = CONFIG.host;
 const DATA_DIR = CONFIG.dataDir;
 const INSTANCE_NAME = CONFIG.instance;
 initCrewStore(DATA_DIR);
@@ -1462,10 +1463,15 @@ app.get("/api/launch/:launchId", (req, res) => {
 app.use(express.static(join(__dirname, "..", "public")));
 
 // --- Start ---
-httpServer.listen(PORT, "127.0.0.1", () => {
+httpServer.listen(PORT, HOST, () => {
+  const shown = HOST === "0.0.0.0" ? "127.0.0.1" : HOST;
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║  Joind v0.2.0 — Agent Chat via MCP    ║`);
-  console.log(`  ║  MCP:  http://127.0.0.1:${PORT}/mcp${" ".repeat(Math.max(0, 9 - String(PORT).length))}║`);
-  console.log(`  ║  Web:  http://127.0.0.1:${PORT}/${" ".repeat(Math.max(0, 12 - String(PORT).length))}║`);
+  console.log(`  ║  MCP:  http://${shown}:${PORT}/mcp`);
+  console.log(`  ║  Web:  http://${shown}:${PORT}/`);
+  console.log(`  ║  Bind: ${HOST}`);
   console.log(`  ╚═══════════════════════════════════════╝\n`);
+  if (HOST !== "127.0.0.1") {
+    console.log(`  [network] Bound to ${HOST} — reachable by remote agents. Ensure this is a private (e.g. Tailscale) interface, not the public internet.\n`);
+  }
 });

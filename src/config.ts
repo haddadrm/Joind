@@ -16,9 +16,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DATA_DIR = join(__dirname, "..", "data");
 const DEFAULT_PORT = 4200;
 const DEFAULT_INSTANCE = "Joind";
+// Bind to loopback by default so a stock install is never exposed to the
+// network. Set --host / JOIND_HOST to a Tailscale IP (e.g. 100.x.y.z) to make
+// the room reachable by remote agents over the tailnet, or 0.0.0.0 for all
+// interfaces. Never expose to a public interface without auth in front.
+const DEFAULT_HOST = "127.0.0.1";
 
 export interface JoindConfig {
   port: number;
+  host: string;
   dataDir: string;
   instance: string;
 }
@@ -45,7 +51,9 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig 
 
   const instance = getFlag(argv, "name") ?? process.env.JOIND_INSTANCE ?? DEFAULT_INSTANCE;
 
-  return { port, dataDir, instance };
+  const host = getFlag(argv, "host") ?? process.env.JOIND_HOST ?? DEFAULT_HOST;
+
+  return { port, host, dataDir, instance };
 }
 
 /**

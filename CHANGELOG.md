@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
+
+### Added
+- `--host` CLI flag and `JOIND_HOST` env var to control the listen interface. Default stays `127.0.0.1`, so a stock install is never exposed to the network. Set it to a Tailscale IP (e.g. `100.x.y.z`) to make the room reachable by remote agents over the tailnet, or `0.0.0.0` for all interfaces.
+- Startup banner now shows the bind host, and a `[network]` warning prints whenever the server is bound to anything other than loopback.
+
+### Verified
+- Bound to the tailnet IP: `GET /api/who` returns 200 on `http://100.113.239.70:4200`, connection refused on `127.0.0.1` (single-interface bind confirmed).
+- Windows firewall path: the Tailscale interface is categorised Private and the `Tailscale-In` rule allows any protocol/port on the Private profile, so no extra port-4200 rule is needed for tailnet peers.
+
 ## 2026-05-25 — Persist Message Tags Across Restart (#6)
 
 ### Fixed
