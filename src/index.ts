@@ -1295,6 +1295,33 @@ app.delete("/api/crew/:name", (req, res) => {
   res.json({ ok: true });
 });
 
+app.patch("/api/crew/:name", express.json(), (req, res) => {
+  const body = req.body as Partial<CrewFolder>;
+  const allowed: Partial<Omit<CrewFolder, "name">> = {};
+  if (typeof body.path === "string") allowed.path = body.path;
+  if (typeof body.joinAs === "string") allowed.joinAs = body.joinAs;
+  if (typeof body.defaultHarness === "string") allowed.defaultHarness = body.defaultHarness;
+  if (typeof body.defaultConversation === "string") allowed.defaultConversation = body.defaultConversation;
+  if (typeof body.role === "string") allowed.role = body.role;
+  if (typeof body.emoji === "string") allowed.emoji = body.emoji;
+  if (body.defaultFlags && typeof body.defaultFlags === "object") allowed.defaultFlags = body.defaultFlags;
+
+  if (allowed.path !== undefined) {
+    const check = validateCrewFolder({ name: req.params.name, path: allowed.path });
+    if (!check.valid) {
+      res.status(400).json({ error: check.errors.join("; ") });
+      return;
+    }
+  }
+
+  const updated = CrewStore.update(req.params.name, allowed);
+  if (!updated) {
+    res.status(404).json({ error: `Unknown crew member: ${req.params.name}` });
+    return;
+  }
+  res.json(updated);
+});
+
 // --- Launcher terminal picker ---
 
 /** Resolve a command name via where/which, preferring .exe/.cmd/.bat on Windows. */

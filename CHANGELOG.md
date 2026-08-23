@@ -4,6 +4,9 @@
 
 ### Added
 - vitest test infrastructure (`npm test`), first tests for crew validation.
+- Crew model extended with `role`, `emoji`, and `defaultFlags` fields.
+- `CrewStore.update()` method for patching crew entries without renaming.
+- `PATCH /api/crew/:name` endpoint to update crew member metadata.
 
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 

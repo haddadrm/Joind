@@ -32,6 +32,9 @@ export interface CrewFolder {
   joinAs?: string;         // extracted name from identity file (editable)
   defaultHarness?: string; // "claude" | "codex" | "gemini" | "openclaw"
   defaultConversation?: string;
+  role?: string;
+  emoji?: string;
+  defaultFlags?: Record<string, string | string[] | boolean>;
 }
 
 /** Candidate identity filenames in priority order. */
@@ -166,6 +169,15 @@ class CrewStoreImpl {
       return true;
     }
     return false;
+  }
+
+  /** Merge a patch into an existing entry. `name` is the key and cannot change. */
+  update(name: string, patch: Partial<Omit<CrewFolder, "name">>): CrewFolder | null {
+    const entry = this.entries.find((e) => e.name === name);
+    if (!entry) return null;
+    Object.assign(entry, patch, { name: entry.name });
+    saveCrew(this.entries);
+    return entry;
   }
 
   save(): void {
