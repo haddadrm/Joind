@@ -22,7 +22,13 @@ export type LaunchStatus =
   | "waiting"
   | "injecting"
   | "done"
-  | "failed";
+  | "failed"
+  | "waiting-join"
+  | "joined"
+  | "join-timeout";
+
+/** Checks whether `joinAs` is present and active in a conversation, at the moment of the call. */
+export type PresenceProbe = (joinAs: string, conversation?: string) => boolean;
 
 export interface LaunchRequest {
   crewName: string;
@@ -47,6 +53,7 @@ export interface LaunchResult {
   paneId?: number;           // WezTerm pane ID if available
   command: string;           // full command string for copy fallback
   error?: string;
+  joinedAt?: number;         // epoch ms, set when the presence probe confirms the join
 }
 
 interface LaunchState {
@@ -202,6 +209,47 @@ function buildJoinCommand(req: LaunchRequest): string {
 
 class LaunchServiceImpl {
   private launches = new Map<string, LaunchState>();
+  private presenceProbe?: PresenceProbe;
+
+  /** Register the callback used by startJoinWatch to check whether an agent has joined. */
+  setPresenceProbe(probe: PresenceProbe): void {
+    this.presenceProbe = probe;
+  }
+
+  /**
+   * Poll the presence probe until the agent shows up in the room or the
+   * timeout elapses. Safe to call once per launch; replaces any pending timer.
+   */
+  startJoinWatch(
+    launchId: string,
+    opts?: { intervalMs?: number; timeoutMs?: number }
+  ): void {
+    const state = this.launches.get(launchId);
+    if (!state || !this.presenceProbe) return;
+    const probe = this.presenceProbe;
+    const intervalMs = opts?.intervalMs ?? 3000;
+    const timeoutMs = opts?.timeoutMs ?? 120000;
+    const startedAt = Date.now();
+
+    if (state.timer) clearTimeout(state.timer);
+    state.result.status = "waiting-join";
+
+    const tick = (): void => {
+      if (probe(state.req.joinAs, state.req.conversation)) {
+        state.result.status = "joined";
+        state.result.joinedAt = Date.now();
+        state.timer = undefined;
+        return;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        state.result.status = "join-timeout";
+        state.timer = undefined;
+        return;
+      }
+      state.timer = setTimeout(tick, intervalMs);
+    };
+    state.timer = setTimeout(tick, intervalMs);
+  }
 
   /**
    * Spawn a TUI agent process for the given launch request.
@@ -280,6 +328,9 @@ class LaunchServiceImpl {
         });
         child.unref();
         result.status = "spawned";
+        if (req.joinAs && this.presenceProbe) {
+          this.startJoinWatch(launchId);
+        }
       } catch (spawnErr) {
         result.status = "spawned";
         result.error = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
@@ -303,6 +354,9 @@ class LaunchServiceImpl {
       result.paneId = paneId;
       // Prompt is in argv → TUI starts already running it. No auto-inject needed.
       result.status = "done";
+      if (req.joinAs && this.presenceProbe) {
+        this.startJoinWatch(launchId);
+      }
     } catch (spawnErr) {
       // WezTerm not available or failed — return command for manual use
       result.status = "spawned";

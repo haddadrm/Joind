@@ -14,6 +14,7 @@
 - `crewHome` configuration: `--crew-home` CLI flag, `JOIND_CREW_HOME` env var, and `join(homedir(), "joind-crew")` default. Used as the default parent directory for crew scaffolding.
 - `GET /api/crew/meta` endpoint: returns `{ crewHome, serverUrl }` for clients to discover the crew home directory and server location.
 - `POST /api/crew/scaffold` parentDir now optional: if missing or empty, defaults to `CONFIG.crewHome`.
+- Launch join verification: `LaunchStatus` gains `waiting-join`, `joined`, and `join-timeout`; `LaunchResult` gains `joinedAt`. `LaunchService.setPresenceProbe()` registers a callback that checks whether an agent is active in a conversation, and `LaunchService.startJoinWatch()` polls it (default every 3s, 120s timeout) until the agent joins or the watch times out. Runs automatically after a successful `launch()` when `joinAs` and a probe are set, for the wezterm and wt terminal branches (not for `terminal: "manual"`). `src/index.ts` wires the probe to `ConversationManager`, checking `room.who()` for an agent whose name matches and whose `active` flag is true.
 
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 

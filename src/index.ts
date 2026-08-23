@@ -164,6 +164,14 @@ function applyTurnGuard(): void {
 
 // --- Conversation manager + stores ---
 const manager = new ConversationManager(DATA_DIR);
+
+// Presence probe for launch join verification: is `joinAs` active in the target room?
+LaunchService.setPresenceProbe((joinAs, conversation) => {
+  const room = conversation ? manager.getRoom(conversation) : manager.getActiveRoom();
+  const agents = room?.who() ?? [];
+  return agents.some((a) => a.name === joinAs && a.active);
+});
+
 const taskStore = new TaskStore(DATA_DIR);
 const reactionStore = new ReactionStore(join(DATA_DIR, "conversations"));
 const cursorStore = new CursorStore(DATA_DIR);
