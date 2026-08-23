@@ -3,7 +3,9 @@
 ## 2026-08-23: Crew Lifecycle
 
 ### Added
-- Crew panel in the web UI: list members with identity badges, scaffold new members (crewHome prefill, joinAs autofill), inline edit, two-click delete, and per-member launch with the launch dialog preselected; crew defaultFlags now auto-apply in the launch dialog.
+- Crew panel in the web UI: a `Crew` button in the sidebar action row (`#crew-btn`) opens a panel listing every crew member with emoji, name, role, folder path, and identity/MCP/default-harness badges. Each row has Launch, Edit, and Delete. Launch closes the panel and opens the launch dialog with that member preselected. Edit swaps the row into inline inputs for role, emoji, join name, and default conversation, saved via `PATCH /api/crew/:name`. Delete is a two-click confirm (the button reads "Really delete?" for 3 seconds) and removes the registry entry only, never the folder on disk.
+- Crew panel scaffold form: "New crew member" toggles a form (name, join name, role, emoji, parent folder, harness, conversation) that posts to `POST /api/crew/scaffold`. The parent folder is prefilled from `GET /api/crew/meta`'s `crewHome`, the join name tracks the name field until it is edited by hand, and the harness options mirror the launch dialog's `/api/harnesses` list. On success the form shows which files were created (green) and which already existed (amber); a duplicate name shows the 409 error inline.
+- Launch dialog accepts an optional preselected crew name (`openLaunchDialog(preselectCrewName)`), and `autoFillFromCrew()` now also applies a crew entry's `defaultFlags` to the rendered harness flag inputs: booleans tick the checkbox, arrays fill multi-text fields one value per line, everything else sets the value. Flags the crew entry does not mention keep their harness defaults, and a saved enum value that is not among the selected harness's options is ignored rather than blanking the control.
 - vitest test infrastructure (`npm test`), first tests for crew validation.
 - Crew model extended with `role`, `emoji`, and `defaultFlags` fields.
 - `CrewStore.update()` method for patching crew entries without renaming.
