@@ -165,9 +165,23 @@ function applyTurnGuard(): void {
 // --- Conversation manager + stores ---
 const manager = new ConversationManager(DATA_DIR);
 
+// Resolve a launch's target room for the presence probe below. `conversation` may be a
+// conversation id (the common case for MCP callers) or a conversation NAME (the join
+// prompt and chat_join both accept "join <conversation> as <name>" by name), so an id
+// lookup alone would miss a name-carrying launch and report a spurious join-timeout.
+function resolveProbeRoom(conversation?: string) {
+  if (!conversation) return manager.getActiveRoom();
+  const byId = manager.getRoom(conversation);
+  if (byId) return byId;
+  const lower = conversation.toLowerCase();
+  const byName = manager.listConversations().find((c) => c.name.toLowerCase() === lower);
+  if (byName) return manager.getRoom(byName.id);
+  return manager.getActiveRoom();
+}
+
 // Presence probe for launch join verification: is `joinAs` active in the target room?
 LaunchService.setPresenceProbe((joinAs, conversation) => {
-  const room = conversation ? manager.getRoom(conversation) : manager.getActiveRoom();
+  const room = resolveProbeRoom(conversation);
   const agents = room?.who() ?? [];
   return agents.some((a) => a.name === joinAs && a.active);
 });

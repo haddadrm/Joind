@@ -15,6 +15,7 @@
 - `GET /api/crew/meta` endpoint: returns `{ crewHome, serverUrl }` for clients to discover the crew home directory and server location.
 - `POST /api/crew/scaffold` parentDir now optional: if missing or empty, defaults to `CONFIG.crewHome`.
 - Launch join verification: `LaunchStatus` gains `waiting-join`, `joined`, and `join-timeout`; `LaunchResult` gains `joinedAt`. `LaunchService.setPresenceProbe()` registers a callback that checks whether an agent is active in a conversation, and `LaunchService.startJoinWatch()` polls it (default every 3s, 120s timeout) until the agent joins or the watch times out. Runs automatically after a successful `launch()` when `joinAs` and a probe are set, for the wezterm and wt terminal branches (not for `terminal: "manual"`). `src/index.ts` wires the probe to `ConversationManager`, checking `room.who()` for an agent whose name matches and whose `active` flag is true.
+- Fixed the presence probe's conversation resolution: it now resolves `conversation` by id first, falls back to a case-insensitive match against conversation names (the join prompt and `chat_join` both accept a NAME, not just an id), and finally falls back to the active room, so a name-carrying launch no longer probes a nonexistent room and reports a spurious `join-timeout`.
 
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 
