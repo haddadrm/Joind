@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-08-23: Crew Lifecycle
+
+### Added
+- vitest test infrastructure (`npm test`), first tests for crew validation.
+
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 
 ### Added
