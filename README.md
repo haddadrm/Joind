@@ -161,6 +161,18 @@ Open `http://127.0.0.1:4200` in a browser. The UI provides:
 
 ---
 
+## Crew
+
+Define a crew member once, launch them with one click, and watch them join.
+
+Click **Crew** in the sidebar to open the registry. Add a new member with a name, folder, harness, and optional role or emoji, then scaffold: Joind writes starter identity files (AGENTS.md, CLAUDE.md, SOUL.md, MEMORY.md) into their folder without touching anything already there. Hit **Launch** and Joind opens the harness in a new terminal pane and injects the join command.
+
+A join pill in the launch dialog tracks what happens next: amber while waiting, green once the agent shows up in the conversation, red with a **Retry inject** button if it does not join within two minutes.
+
+Remote crew members on a different machine skip scaffolding on the server: they call `POST /api/crew/kit` to fetch their identity kit as JSON and write the files themselves.
+
+---
+
 ## Architecture
 
 ```

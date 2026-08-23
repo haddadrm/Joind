@@ -104,6 +104,17 @@ Key endpoints: `/api/agent/join`, `/api/agent/read`, `/api/agent/send`, `/api/ag
 
 Detected agent types: Claude, Codex, Gemini, OpenClaw, Copilot.
 
+## Crew
+
+Agent Launcher's crew registry: define a working folder once, scaffold its identity files, and launch it with join verification.
+
+- **`data/crew-folders.json`**: `CrewFolder` entries with `name`, `path`, `identityFile` (auto-detected: CLAUDE.md, AGENTS.md, IDENTITY.md, or identity.md), `joinAs`, `defaultHarness`, `defaultConversation`, `role`, `emoji`, `defaultFlags` (harness flag values applied on launch).
+- **Scaffold** (`src/identity-kit.ts`, `src/scaffold.ts`): `scaffoldCrewMember()` writes AGENTS.md, CLAUDE.md, SOUL.md, MEMORY.md plus a `memory/` dir into the member's folder and registers it in `CrewStore`. Non-destructive: any file that already exists is skipped, never overwritten. Throws a `DUPLICATE` error (409) if the name is already registered.
+- **`crewHome`**: default parent directory for scaffolding, set via `--crew-home` CLI flag, `JOIND_CREW_HOME` env var, or default `<home>/joind-crew` (`src/config.ts`). Discoverable via `GET /api/crew/meta`.
+- **Endpoints:** `GET /api/crew` (enriched with `identityExists`/`mcpConfig`), `POST /api/crew` (register an existing folder), `POST /api/crew/scaffold` (`parentDir` optional, defaults to `crewHome`; 409 on duplicate name), `POST /api/crew/kit` (returns the identity kit JSON, no disk writes), `GET /api/crew/meta`, `PATCH /api/crew/:name`, `DELETE /api/crew/:name` (registry only, never touches the folder).
+- **Join verification** (`src/launcher.ts`): `LaunchStatus` gains `waiting-join`, `joined`, and `join-timeout`; `LaunchResult.joinedAt` is set once confirmed. `LaunchService.startJoinWatch()` polls a presence probe (agent active in the target conversation) every 3s up to a 120s timeout, wired automatically after `launch()` for the wezterm and wt terminal branches. `inject()` (the manual retry path) restarts the watch so a launch stuck on `"done"` can still reach `joined` or `join-timeout`.
+- **Remote limitation:** scaffolding only writes to the server machine's disk. A remote crew member on a different machine instead calls `POST /api/crew/kit` to get the identity kit as JSON and writes the files itself.
+
 ## Build & Run
 
 ```bash
