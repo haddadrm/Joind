@@ -8,6 +8,9 @@
 - `CrewStore.update()` method for patching crew entries without renaming.
 - `PATCH /api/crew/:name` endpoint to update crew member metadata.
 - Identity kit builder (`src/identity-kit.ts`): pure module generating starter identity files (AGENTS.md, CLAUDE.md, SOUL.md, MEMORY.md) + memory folder scaffold for new crew members.
+- Scaffold service (`src/scaffold.ts`): `scaffoldCrewMember()` writes an identity kit into a crew member's folder, never overwrites existing files, and registers the entry in `CrewStore`; throws a `DUPLICATE` error for an already registered name.
+- `POST /api/crew/scaffold` endpoint: scaffolds a crew folder on disk and registers it (409 on duplicate name, 400 on missing name/parentDir).
+- `POST /api/crew/kit` endpoint: returns the identity kit JSON with no disk writes, for remote machines to scaffold themselves.
 
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 

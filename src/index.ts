@@ -31,6 +31,8 @@ import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWe
 import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from "./crew.js";
 import { loadConfig, acquireLock } from "./config.js";
 import type { CrewFolder } from "./crew.js";
+import { scaffoldCrewMember } from "./scaffold.js";
+import { buildIdentityKit } from "./identity-kit.js";
 import { getHarnesses, pickBestExePath } from "./harnesses.js";
 import { listSessionsForHarness } from "./launch-sessions.js";
 import LaunchService from "./launcher.js";
@@ -1284,6 +1286,56 @@ app.post("/api/crew", express.json(), (req, res) => {
 
   CrewStore.add(entry);
   res.json(entry);
+});
+
+function publicServerUrl(): string {
+  const shown = HOST === "0.0.0.0" ? "127.0.0.1" : HOST;
+  return `http://${shown}:${PORT}`;
+}
+
+app.post("/api/crew/scaffold", express.json(), (req, res) => {
+  const body = req.body as {
+    name?: string; parentDir?: string; joinAs?: string; role?: string;
+    emoji?: string; defaultHarness?: string; defaultConversation?: string;
+  };
+  if (!body.name || !body.parentDir) {
+    res.status(400).json({ error: "name and parentDir are required" });
+    return;
+  }
+  try {
+    const result = scaffoldCrewMember({
+      name: body.name,
+      parentDir: body.parentDir,
+      joinAs: body.joinAs,
+      role: body.role,
+      emoji: body.emoji,
+      defaultHarness: body.defaultHarness,
+      defaultConversation: body.defaultConversation,
+      serverUrl: publicServerUrl(),
+    });
+    res.json(result);
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    res.status(e.code === "DUPLICATE" ? 409 : 400).json({ error: e.message });
+  }
+});
+
+app.post("/api/crew/kit", express.json(), (req, res) => {
+  const body = req.body as {
+    name?: string; joinAs?: string; role?: string; emoji?: string; conversation?: string;
+  };
+  if (!body.name) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  res.json(buildIdentityKit({
+    name: body.name,
+    joinAs: body.joinAs ?? body.name,
+    role: body.role,
+    emoji: body.emoji,
+    serverUrl: publicServerUrl(),
+    conversation: body.conversation,
+  }));
 });
 
 app.delete("/api/crew/:name", (req, res) => {
