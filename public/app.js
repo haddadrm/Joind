@@ -2985,12 +2985,15 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
       crewSelect.appendChild(ao);
       crewList = updated;
       addCrewForm.style.display = 'none';
-      // Select the newly added crew
+      // Select the newly added crew. POST /api/crew returns the raw entry, with
+      // no identityExists/mcpConfig, so use the enriched one just fetched or the
+      // badges would read "no identity" for a folder that has one.
       if (newCrew) {
-        crewSelect.value = newCrew.name;
-        updateCrewMeta(newCrew);
-        selectedCrew = newCrew;
-        autoFillFromCrew(newCrew);
+        var added = updated.find(function(c) { return c.name === newCrew.name; }) || newCrew;
+        crewSelect.value = added.name;
+        updateCrewMeta(added);
+        selectedCrew = added;
+        autoFillFromCrew(added);
       }
       updateLaunchBtn();
     }).catch(function() {});
