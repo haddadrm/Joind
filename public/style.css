@@ -2894,6 +2894,44 @@ body {
   border-color: var(--success-border);
 }
 
+/* Join-status pill */
+.join-pill {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.join-pill.waiting {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+  animation: join-pill-pulse 1.4s ease-in-out infinite;
+}
+.join-pill.ok {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: var(--success-border);
+}
+.join-pill.fail {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+@keyframes join-pill-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.join-timeout-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
 /* Done line */
 .launch-done-line {
   font-size: 12px;

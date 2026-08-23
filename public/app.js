@@ -3986,6 +3986,53 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
   pollIndicator.textContent = 'Waiting for agent...';
   view.appendChild(pollIndicator);
 
+  var joinPill = null;
+
+  function renderJoinPill(kind, text) {
+    if (!joinPill) {
+      joinPill = document.createElement('div');
+      view.appendChild(joinPill);
+    }
+    joinPill.className = 'join-pill ' + kind;
+    joinPill.textContent = text;
+    return joinPill;
+  }
+
+  function renderJoinTimeoutActions() {
+    var actions = document.createElement('div');
+    actions.className = 'join-timeout-actions';
+
+    var retryBtn = document.createElement('button');
+    retryBtn.className = 'btn-inject-now';
+    retryBtn.textContent = 'Retry inject';
+    retryBtn.addEventListener('click', function() {
+      actions.remove();
+      doInject(launchId, view, convId, joinAs);
+    });
+
+    var copyBtn = document.createElement('button');
+    copyBtn.className = 'btn-copy-cmd';
+    copyBtn.textContent = 'Copy command';
+    copyBtn.addEventListener('click', function() {
+      fetch('/api/launch/' + encodeURIComponent(launchId))
+        .then(function(r) { return r.json(); })
+        .then(function(res) {
+          navigator.clipboard.writeText(res.command || '').then(function() {
+            copyBtn.textContent = '\u2713 Copied';
+            copyBtn.classList.add('copied');
+            setTimeout(function() {
+              copyBtn.textContent = 'Copy command';
+              copyBtn.classList.remove('copied');
+            }, 1500);
+          });
+        });
+    });
+
+    actions.appendChild(retryBtn);
+    actions.appendChild(copyBtn);
+    view.appendChild(actions);
+  }
+
   var pollCount = 0;
   launchPollInterval = setInterval(function() {
     pollCount++;
@@ -4013,6 +4060,19 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
           errLine.className = 'launch-status-line err';
           errLine.textContent = '\u2716 Failed: ' + (res.error || 'unknown error');
           view.appendChild(errLine);
+        } else if (res.status === 'waiting-join') {
+          renderJoinPill('waiting', 'waiting for ' + joinAs + ' to join...');
+        } else if (res.status === 'joined') {
+          pollIndicator.remove();
+          renderJoinPill('ok', '\u2713 ' + joinAs + ' joined');
+          setTimeout(function() {
+            clearInterval(launchPollInterval); launchPollInterval = null;
+          }, 2000);
+        } else if (res.status === 'join-timeout') {
+          clearInterval(launchPollInterval); launchPollInterval = null;
+          pollIndicator.remove();
+          renderJoinPill('fail', joinAs + ' did not join');
+          renderJoinTimeoutActions();
         }
         // else still pending — keep polling
       }).catch(function() { /* keep polling */ });
