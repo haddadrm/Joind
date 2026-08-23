@@ -3,6 +3,7 @@
 ## 2026-08-23: Crew Lifecycle
 
 ### Added
+- Crew panel in the web UI: list members with identity badges, scaffold new members (crewHome prefill, joinAs autofill), inline edit, two-click delete, and per-member launch with the launch dialog preselected; crew defaultFlags now auto-apply in the launch dialog.
 - vitest test infrastructure (`npm test`), first tests for crew validation.
 - Crew model extended with `role`, `emoji`, and `defaultFlags` fields.
 - `CrewStore.update()` method for patching crew entries without renaming.

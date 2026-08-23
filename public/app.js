@@ -2836,7 +2836,7 @@ var launchPollInterval = null;
 var launchCurrentId = null;
 var launchCancelledInject = false;
 
-function openLaunchDialog() {
+function openLaunchDialog(preselectCrewName) {
   closeLaunchDialog();
   launchCancelledInject = false;
 
@@ -2893,7 +2893,7 @@ function openLaunchDialog() {
     var convList = convData.conversations || convData || [];
     content.textContent = '';
     footer.textContent = '';
-    buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo);
+    buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo, preselectCrewName);
   }).catch(function(err) {
     content.textContent = '';
     var errMsg = document.createElement('div');
@@ -2923,7 +2923,7 @@ function buildLaunchLoading() {
   return wrap;
 }
 
-function buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo) {
+function buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo, preselectCrewName) {
   // Track selected state
   var selectedCrew = null;
   var selectedHarness = null;
@@ -3088,6 +3088,9 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
       lbl.classList.add('selected');
       selectedHarness = h;
       renderFlagsForm(h, flagsForm);
+      // Picking a harness by hand must land on the same flag values that
+      // autoFillFromCrew produces for the crew's default harness.
+      if (selectedCrew && selectedCrew.defaultFlags) applyDefaultFlags(flagsForm, selectedCrew.defaultFlags);
       updateMcpWarning();
       if (typeof reloadResumeIfOpen === 'function') reloadResumeIfOpen();
       updateLaunchBtn();
@@ -3485,6 +3488,9 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
     if (crew.defaultConversation) {
       convSelect.value = crew.defaultConversation;
     }
+    // Crew-specific flag defaults win over the harness defaults just rendered.
+    // Flags the crew entry does not mention keep whatever the harness set.
+    if (crew.defaultFlags) applyDefaultFlags(flagsForm, crew.defaultFlags);
     // Update WezTerm status
     var ts = document.getElementById('launch-terminal-status');
     if (ts) {
@@ -3519,6 +3525,44 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
 
   // Expose resume state to executeLaunch via a getter on the closure
   window.__getLaunchResumeId = function() { return resumeSessionId; };
+
+  // Preselect a crew member (used by the crew panel's Launch button). Done last
+  // so the change handler runs against a fully built form.
+  if (preselectCrewName) {
+    crewSelect.value = preselectCrewName;
+    if (crewSelect.value === preselectCrewName) {
+      crewSelect.dispatchEvent(new Event('change'));
+    }
+  }
+}
+
+/**
+ * Apply a crew entry's saved flag values to the currently rendered flag inputs.
+ * Booleans tick the checkbox, arrays fill multi-text fields one value per line,
+ * everything else sets the input value. Unknown flag ids are ignored.
+ */
+function applyDefaultFlags(container, defaultFlags) {
+  if (!container || !defaultFlags || typeof defaultFlags !== 'object') return;
+  container.querySelectorAll('[data-flag-id]').forEach(function(el) {
+    var id = el.dataset.flagId;
+    if (!id || !Object.prototype.hasOwnProperty.call(defaultFlags, id)) return;
+    var value = defaultFlags[id];
+    if (el.dataset.flagType === 'boolean') {
+      el.checked = value === true || value === 'true';
+    } else if (el.tagName === 'SELECT') {
+      // A value saved for one harness can be meaningless for another harness's
+      // same-named enum. Assigning it would blank the select, so keep the
+      // harness default instead.
+      var match = Array.prototype.some.call(el.options, function(o) { return o.value === String(value); });
+      if (match) el.value = String(value);
+    } else if (Array.isArray(value)) {
+      el.value = value.join('\n');
+    } else if (value === null || value === undefined) {
+      el.value = '';
+    } else {
+      el.value = String(value);
+    }
+  });
 }
 
 function renderFlagsForm(harness, container) {
@@ -3973,6 +4017,526 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
 }
 
 // END LAUNCH DIALOG
+// =============================================================================
+
+// =============================================================================
+// CREW PANEL
+// =============================================================================
+
+var crewPanelOverlay = null;
+
+function openCrewPanel() {
+  closeCrewPanel();
+
+  var overlay = document.createElement('div');
+  overlay.className = 'crew-panel-overlay';
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) closeCrewPanel();
+  });
+
+  var box = document.createElement('div');
+  box.className = 'crew-panel-box';
+
+  var hdr = document.createElement('div');
+  hdr.className = 'crew-panel-header';
+  var title = document.createElement('div');
+  title.className = 'crew-panel-title';
+  title.textContent = '\u{1F465} Crew';
+  var closeBtn = document.createElement('button');
+  closeBtn.className = 'crew-panel-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Close';
+  closeBtn.addEventListener('click', closeCrewPanel);
+  hdr.appendChild(title);
+  hdr.appendChild(closeBtn);
+  box.appendChild(hdr);
+
+  var content = document.createElement('div');
+  content.className = 'crew-panel-content';
+  content.appendChild(buildLaunchLoading());
+  box.appendChild(content);
+
+  var footer = document.createElement('div');
+  footer.className = 'crew-panel-footer';
+  var doneBtn = document.createElement('button');
+  doneBtn.className = 'btn-launch-cancel';
+  doneBtn.textContent = 'Close';
+  doneBtn.addEventListener('click', closeCrewPanel);
+  footer.appendChild(doneBtn);
+  box.appendChild(footer);
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  crewPanelOverlay = overlay;
+
+  Promise.all([
+    fetch('/api/crew').then(function(r) { return r.json(); }).catch(function() { return []; }),
+    fetch('/api/crew/meta').then(function(r) { return r.json(); }).catch(function() { return {}; }),
+    fetch('/api/harnesses').then(function(r) { return r.json(); }).catch(function() { return []; })
+  ]).then(function(results) {
+    buildCrewPanel(content, results[0] || [], results[1] || {}, results[2] || []);
+  }).catch(function(err) {
+    content.textContent = '';
+    var errMsg = document.createElement('div');
+    errMsg.className = 'launch-error';
+    errMsg.textContent = 'Failed to load crew: ' + (err && err.message ? err.message : 'network error');
+    content.appendChild(errMsg);
+  });
+}
+
+function closeCrewPanel() {
+  if (crewPanelOverlay) { crewPanelOverlay.remove(); crewPanelOverlay = null; }
+}
+
+function buildCrewPanel(content, crewList, meta, harnesses) {
+  content.textContent = '';
+
+  var actions = document.createElement('div');
+  actions.className = 'crew-panel-actions';
+  var newBtn = document.createElement('button');
+  newBtn.className = 'btn-crew-new';
+  newBtn.textContent = '+ New crew member';
+  actions.appendChild(newBtn);
+  content.appendChild(actions);
+
+  var list = document.createElement('div');
+  list.className = 'crew-panel-list';
+
+  function refreshList() {
+    fetch('/api/crew').then(function(r) { return r.json(); }).then(function(updated) {
+      renderCrewRows(list, updated || [], refreshList);
+    }).catch(function() {
+      renderCrewRows(list, [], refreshList);
+    });
+  }
+
+  var form = buildCrewScaffoldForm(meta, harnesses, refreshList);
+  form.style.display = 'none';
+  content.appendChild(form);
+
+  newBtn.addEventListener('click', function() {
+    var opening = form.style.display === 'none';
+    form.style.display = opening ? '' : 'none';
+    newBtn.textContent = opening ? 'Cancel' : '+ New crew member';
+    if (opening) {
+      var nameInput = document.getElementById('crew-new-name');
+      if (nameInput) nameInput.focus();
+    }
+  });
+
+  content.appendChild(list);
+  renderCrewRows(list, crewList, refreshList);
+}
+
+function renderCrewRows(list, crewList, onChanged) {
+  list.textContent = '';
+  if (!Array.isArray(crewList) || crewList.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'crew-panel-empty';
+    empty.textContent = 'No crew members yet. Use "New crew member" to scaffold one.';
+    list.appendChild(empty);
+    return;
+  }
+  crewList.forEach(function(crew) {
+    list.appendChild(buildCrewRow(crew, onChanged));
+  });
+}
+
+function buildCrewRow(crew, onChanged) {
+  var row = document.createElement('div');
+  row.className = 'crew-row';
+
+  var emoji = document.createElement('span');
+  emoji.className = 'crew-row-emoji';
+  emoji.textContent = crew.emoji || '\u{1F464}';
+  row.appendChild(emoji);
+
+  var main = document.createElement('div');
+  main.className = 'crew-row-main';
+
+  var titleLine = document.createElement('div');
+  titleLine.className = 'crew-row-title';
+  var nameEl = document.createElement('span');
+  nameEl.className = 'crew-row-name';
+  nameEl.textContent = crew.name;
+  titleLine.appendChild(nameEl);
+  if (crew.role) {
+    var roleEl = document.createElement('span');
+    roleEl.className = 'crew-row-role';
+    roleEl.textContent = crew.role;
+    titleLine.appendChild(roleEl);
+  }
+  main.appendChild(titleLine);
+
+  var pathEl = document.createElement('div');
+  pathEl.className = 'crew-row-path';
+  pathEl.textContent = crew.path || '(no path)';
+  if (crew.path) pathEl.title = crew.path;
+  main.appendChild(pathEl);
+
+  var badges = document.createElement('div');
+  badges.className = 'crew-row-badges';
+
+  var idBadge = document.createElement('span');
+  idBadge.className = 'status-badge ' + (crew.identityExists ? 'ok' : 'warn');
+  idBadge.textContent = crew.identityExists ? '✓ identity' : '⚠ no identity';
+  if (crew.identityFile) idBadge.title = crew.identityFile;
+  badges.appendChild(idBadge);
+
+  var hasSomeMcp = crew.hasMcpConfig ||
+    (crew.mcpConfig && typeof crew.mcpConfig === 'object' &&
+      Object.values(crew.mcpConfig).some(function(v) { return !!v; }));
+  var mcpBadge = document.createElement('span');
+  mcpBadge.className = 'status-badge ' + (hasSomeMcp ? 'ok' : 'warn');
+  mcpBadge.textContent = hasSomeMcp ? '✓ MCP' : '⚠ no MCP';
+  badges.appendChild(mcpBadge);
+
+  if (crew.defaultHarness) {
+    var harnessBadge = document.createElement('span');
+    harnessBadge.className = 'status-badge missing';
+    harnessBadge.textContent = crew.defaultHarness;
+    harnessBadge.title = 'Default harness';
+    badges.appendChild(harnessBadge);
+  }
+
+  main.appendChild(badges);
+  row.appendChild(main);
+
+  var btns = document.createElement('div');
+  btns.className = 'crew-row-btns';
+
+  var launchBtn = document.createElement('button');
+  launchBtn.className = 'crew-row-btn';
+  launchBtn.textContent = 'Launch';
+  launchBtn.title = 'Open the launch dialog with ' + crew.name + ' selected';
+  launchBtn.addEventListener('click', function() {
+    closeCrewPanel();
+    openLaunchDialog(crew.name);
+  });
+  btns.appendChild(launchBtn);
+
+  var editBtn = document.createElement('button');
+  editBtn.className = 'crew-row-btn';
+  editBtn.textContent = '✎ Edit';
+  editBtn.title = 'Edit role, emoji, join name and default conversation';
+  editBtn.addEventListener('click', function() {
+    row.textContent = '';
+    row.classList.add('editing');
+    buildCrewEditForm(row, crew, onChanged);
+  });
+  btns.appendChild(editBtn);
+
+  var errLine = document.createElement('div');
+  errLine.className = 'launch-error crew-row-error';
+  errLine.style.display = 'none';
+
+  var deleteBtn = document.createElement('button');
+  deleteBtn.className = 'crew-row-btn danger';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.title = 'Remove the crew entry only. The folder on disk is left in place.';
+  var armed = false;
+  var armTimer = null;
+  function disarmDelete() {
+    armed = false;
+    if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.classList.remove('armed');
+  }
+  deleteBtn.addEventListener('click', function() {
+    if (!armed) {
+      armed = true;
+      deleteBtn.textContent = 'Really delete?';
+      deleteBtn.classList.add('armed');
+      armTimer = setTimeout(disarmDelete, 3000);
+      return;
+    }
+    if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = 'Deleting...';
+    fetch('/api/crew/' + encodeURIComponent(crew.name), { method: 'DELETE' })
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (res && res.error) {
+          deleteBtn.disabled = false;
+          disarmDelete();
+          errLine.textContent = res.error;
+          errLine.style.display = '';
+          return;
+        }
+        onChanged();
+      })
+      .catch(function() {
+        deleteBtn.disabled = false;
+        disarmDelete();
+        errLine.textContent = 'Delete failed';
+        errLine.style.display = '';
+      });
+  });
+  btns.appendChild(deleteBtn);
+
+  row.appendChild(btns);
+  row.appendChild(errLine);
+  return row;
+}
+
+function buildCrewEditForm(row, crew, onChanged) {
+  var form = document.createElement('div');
+  form.className = 'crew-edit-form';
+
+  var heading = document.createElement('div');
+  heading.className = 'crew-edit-heading';
+  heading.textContent = 'Editing ' + crew.name;
+  form.appendChild(heading);
+
+  function addField(labelText, value, placeholder, maxLength) {
+    var fieldRow = document.createElement('div');
+    fieldRow.className = 'add-crew-form-row';
+    var label = document.createElement('span');
+    label.className = 'add-crew-form-label';
+    label.textContent = labelText;
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'launch-input';
+    input.value = value || '';
+    if (placeholder) input.placeholder = placeholder;
+    if (maxLength) input.maxLength = maxLength;
+    fieldRow.appendChild(label);
+    fieldRow.appendChild(input);
+    form.appendChild(fieldRow);
+    return input;
+  }
+
+  var roleInput = addField('Role', crew.role, 'e.g. reviewer');
+  var emojiInput = addField('Emoji', crew.emoji, '\u{1F464}', 4);
+  var joinAsInput = addField('Join as', crew.joinAs, 'agent name');
+  var convInput = addField('Conv', crew.defaultConversation, 'default conversation');
+
+  var errLine = document.createElement('div');
+  errLine.className = 'launch-error';
+  errLine.style.display = 'none';
+  form.appendChild(errLine);
+
+  var btnRow = document.createElement('div');
+  btnRow.className = 'add-crew-btns';
+
+  var cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-launch-cancel';
+  cancelBtn.style.padding = '4px 12px';
+  cancelBtn.style.fontSize = '11px';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', function() { onChanged(); });
+
+  var saveBtn = document.createElement('button');
+  saveBtn.className = 'btn-launch-go';
+  saveBtn.style.padding = '4px 12px';
+  saveBtn.style.fontSize = '11px';
+  saveBtn.textContent = 'Save';
+  saveBtn.addEventListener('click', function() {
+    errLine.style.display = 'none';
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+    var payload = {
+      role: roleInput.value.trim(),
+      emoji: emojiInput.value.trim(),
+      joinAs: joinAsInput.value.trim(),
+      defaultConversation: convInput.value.trim()
+    };
+    fetch('/api/crew/' + encodeURIComponent(crew.name), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function(r) { return r.json(); }).then(function(res) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+      if (res && res.error) {
+        errLine.textContent = res.error;
+        errLine.style.display = '';
+        return;
+      }
+      onChanged();
+    }).catch(function() {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+      errLine.textContent = 'Save failed';
+      errLine.style.display = '';
+    });
+  });
+
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(saveBtn);
+  form.appendChild(btnRow);
+
+  row.appendChild(form);
+  roleInput.focus();
+}
+
+function buildCrewScaffoldForm(meta, harnesses, onScaffolded) {
+  var form = document.createElement('div');
+  form.className = 'add-crew-form crew-scaffold-form';
+
+  function addRow(labelText, input) {
+    var fieldRow = document.createElement('div');
+    fieldRow.className = 'add-crew-form-row';
+    var label = document.createElement('span');
+    label.className = 'add-crew-form-label';
+    label.textContent = labelText;
+    fieldRow.appendChild(label);
+    fieldRow.appendChild(input);
+    form.appendChild(fieldRow);
+  }
+
+  function textInput(id, placeholder, maxLength) {
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'launch-input';
+    input.id = id;
+    if (placeholder) input.placeholder = placeholder;
+    if (maxLength) input.maxLength = maxLength;
+    return input;
+  }
+
+  var nameInput = textInput('crew-new-name', 'Scout');
+  addRow('Name', nameInput);
+
+  var joinAsInput = textInput('crew-new-join-as', 'agent name used to join');
+  addRow('Join as', joinAsInput);
+
+  // Join name tracks the name until the user types their own.
+  var joinAsTouched = false;
+  joinAsInput.addEventListener('input', function() { joinAsTouched = true; });
+  nameInput.addEventListener('input', function() {
+    if (!joinAsTouched) joinAsInput.value = nameInput.value;
+  });
+
+  var roleInput = textInput('crew-new-role', 'e.g. reviewer');
+  addRow('Role', roleInput);
+
+  var emojiInput = textInput('crew-new-emoji', '\u{1F464}', 4);
+  addRow('Emoji', emojiInput);
+
+  var parentInput = textInput('crew-new-parent', 'parent folder');
+  parentInput.value = meta && meta.crewHome ? meta.crewHome : '';
+  parentInput.title = 'The crew folder is created inside this directory';
+  addRow('Folder', parentInput);
+
+  var harnessSelect = document.createElement('select');
+  harnessSelect.className = 'launch-select';
+  harnessSelect.id = 'crew-new-harness';
+  var noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = '(no default)';
+  harnessSelect.appendChild(noneOpt);
+  (harnesses || []).forEach(function(h) {
+    var opt = document.createElement('option');
+    opt.value = h.id;
+    opt.textContent = h.installed ? h.label : h.label + ' (not installed)';
+    harnessSelect.appendChild(opt);
+  });
+  addRow('Harness', harnessSelect);
+
+  var convInput = textInput('crew-new-conversation', 'optional');
+  addRow('Conv', convInput);
+
+  var errLine = document.createElement('div');
+  errLine.className = 'launch-error';
+  errLine.style.display = 'none';
+  form.appendChild(errLine);
+
+  var resultBlock = document.createElement('div');
+  resultBlock.className = 'crew-scaffold-result';
+  resultBlock.style.display = 'none';
+  form.appendChild(resultBlock);
+
+  var btnRow = document.createElement('div');
+  btnRow.className = 'add-crew-btns';
+
+  var createBtn = document.createElement('button');
+  createBtn.className = 'btn-launch-go';
+  createBtn.style.padding = '4px 12px';
+  createBtn.style.fontSize = '11px';
+  createBtn.textContent = 'Create';
+  createBtn.addEventListener('click', function() {
+    var name = nameInput.value.trim();
+    errLine.style.display = 'none';
+    if (!name) {
+      errLine.textContent = 'Name is required';
+      errLine.style.display = '';
+      return;
+    }
+    var payload = { name: name };
+    if (parentInput.value.trim()) payload.parentDir = parentInput.value.trim();
+    if (joinAsInput.value.trim()) payload.joinAs = joinAsInput.value.trim();
+    if (roleInput.value.trim()) payload.role = roleInput.value.trim();
+    if (emojiInput.value.trim()) payload.emoji = emojiInput.value.trim();
+    if (harnessSelect.value) payload.defaultHarness = harnessSelect.value;
+    if (convInput.value.trim()) payload.defaultConversation = convInput.value.trim();
+
+    createBtn.disabled = true;
+    createBtn.textContent = 'Creating...';
+    fetch('/api/crew/scaffold', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function(r) {
+      return r.json().then(function(body) { return { ok: r.ok, body: body }; });
+    }).then(function(res) {
+      createBtn.disabled = false;
+      createBtn.textContent = 'Create';
+      if (!res.ok || (res.body && res.body.error)) {
+        errLine.textContent = (res.body && res.body.error) || 'Scaffold failed';
+        errLine.style.display = '';
+        return;
+      }
+      renderScaffoldResult(resultBlock, res.body);
+      nameInput.value = '';
+      joinAsInput.value = '';
+      roleInput.value = '';
+      emojiInput.value = '';
+      convInput.value = '';
+      joinAsTouched = false;
+      onScaffolded();
+    }).catch(function() {
+      createBtn.disabled = false;
+      createBtn.textContent = 'Create';
+      errLine.textContent = 'Request failed';
+      errLine.style.display = '';
+    });
+  });
+
+  btnRow.appendChild(createBtn);
+  form.appendChild(btnRow);
+
+  return form;
+}
+
+function renderScaffoldResult(block, result) {
+  block.textContent = '';
+  block.style.display = '';
+
+  var folderLine = document.createElement('div');
+  folderLine.className = 'crew-scaffold-folder';
+  folderLine.textContent = result.folder || '';
+  folderLine.title = result.folder || '';
+  block.appendChild(folderLine);
+
+  var items = document.createElement('div');
+  items.className = 'crew-scaffold-items';
+  (result.created || []).forEach(function(entry) {
+    var badge = document.createElement('span');
+    badge.className = 'status-badge ok';
+    badge.textContent = '✓ ' + entry;
+    items.appendChild(badge);
+  });
+  (result.skipped || []).forEach(function(entry) {
+    var badge = document.createElement('span');
+    badge.className = 'status-badge warn';
+    badge.textContent = '• ' + entry + ' (existed)';
+    items.appendChild(badge);
+  });
+  block.appendChild(items);
+}
+
+// END CREW PANEL
 // =============================================================================
 
 function sendReaction(messageId, emoji) {
