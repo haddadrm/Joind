@@ -7,6 +7,7 @@
 - Crew model extended with `role`, `emoji`, and `defaultFlags` fields.
 - `CrewStore.update()` method for patching crew entries without renaming.
 - `PATCH /api/crew/:name` endpoint to update crew member metadata.
+- Identity kit builder (`src/identity-kit.ts`): pure module generating starter identity files (AGENTS.md, CLAUDE.md, SOUL.md, MEMORY.md) + memory folder scaffold for new crew members.
 
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 
