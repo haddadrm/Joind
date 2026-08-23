@@ -23,6 +23,10 @@
 - Fixed `LaunchService.inject()` stranding a launch on `"done"` forever: it shares `LaunchState.timer` with the join watch, so a manual inject (e.g. the "Retry inject" path after a `join-timeout`) cleared any pending watch without restarting it. `inject()` now restarts the join watch at the end (when a probe is registered and `joinAs` is set), mirroring `launch()`, so the launch can still reach `joined` or `join-timeout` afterward.
 - Launch dialog join-status pill: the post-launch poller (`startLaunchPolling()` in `public/app.js`) now renders a pill for `waiting-join` (amber, pulsing, "waiting for &lt;joinAs&gt; to join..."), `joined` (green, "joined", stops polling two seconds later), and `join-timeout` (red, "did not join", with `Retry inject` and `Copy command` buttons). `Retry inject` re-calls `POST /api/launch/:id/inject` and resumes polling; `Copy command` re-fetches the launch result and copies `result.command` to the clipboard. New `.join-pill` styles in `public/style.css` reuse the existing `--warn`/`--success`/`--danger` tokens. Cache-bust bumped to `v=12` for `style.css` and `app.js`.
 
+### Fixed
+- `scaffoldCrewMember()` (`src/scaffold.ts`) now rejects a `name` that does not match `^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$`, throwing a plain `name contains invalid characters` error. This closes a path traversal / absolute path escape (`join(parentDir, name)` previously accepted values like `..\\..\\Evil` or `C:\\Evil`) for both `POST /api/crew/scaffold` and any future caller; the endpoint's existing catch already maps thrown errors to a 400.
+- `POST /api/crew/scaffold` now trims `parentDir` before using it, and both `POST /api/crew/scaffold` and `POST /api/crew/kit` only accept `name`, `joinAs`, `role`, `emoji`, `defaultHarness`, and `defaultConversation` when they are strings (matching the discipline already used by `PATCH /api/crew/:name`), instead of passing arbitrary request-body types straight into the identity kit templates.
+
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 
 ### Added

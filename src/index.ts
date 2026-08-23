@@ -1320,22 +1320,22 @@ app.post("/api/crew/scaffold", express.json(), (req, res) => {
     name?: string; parentDir?: string; joinAs?: string; role?: string;
     emoji?: string; defaultHarness?: string; defaultConversation?: string;
   };
-  if (!body.name) {
+  if (!body.name || typeof body.name !== "string") {
     res.status(400).json({ error: "name is required" });
     return;
   }
-  const parentDir = body.parentDir && body.parentDir.trim().length > 0
-    ? body.parentDir
+  const parentDir = typeof body.parentDir === "string" && body.parentDir.trim().length > 0
+    ? body.parentDir.trim()
     : CONFIG.crewHome;
   try {
     const result = scaffoldCrewMember({
       name: body.name,
       parentDir: parentDir,
-      joinAs: body.joinAs,
-      role: body.role,
-      emoji: body.emoji,
-      defaultHarness: body.defaultHarness,
-      defaultConversation: body.defaultConversation,
+      joinAs: typeof body.joinAs === "string" ? body.joinAs : undefined,
+      role: typeof body.role === "string" ? body.role : undefined,
+      emoji: typeof body.emoji === "string" ? body.emoji : undefined,
+      defaultHarness: typeof body.defaultHarness === "string" ? body.defaultHarness : undefined,
+      defaultConversation: typeof body.defaultConversation === "string" ? body.defaultConversation : undefined,
       serverUrl: publicServerUrl(),
     });
     res.json(result);
@@ -1349,17 +1349,17 @@ app.post("/api/crew/kit", express.json(), (req, res) => {
   const body = req.body as {
     name?: string; joinAs?: string; role?: string; emoji?: string; conversation?: string;
   };
-  if (!body.name) {
+  if (!body.name || typeof body.name !== "string") {
     res.status(400).json({ error: "name is required" });
     return;
   }
   res.json(buildIdentityKit({
     name: body.name,
-    joinAs: body.joinAs ?? body.name,
-    role: body.role,
-    emoji: body.emoji,
+    joinAs: typeof body.joinAs === "string" ? body.joinAs : body.name,
+    role: typeof body.role === "string" ? body.role : undefined,
+    emoji: typeof body.emoji === "string" ? body.emoji : undefined,
     serverUrl: publicServerUrl(),
-    conversation: body.conversation,
+    conversation: typeof body.conversation === "string" ? body.conversation : undefined,
   }));
 });
 

@@ -51,4 +51,26 @@ describe("scaffoldCrewMember", () => {
       scaffoldCrewMember({ name: "Uhura", parentDir: parent, serverUrl: "http://x" })
     ).toThrowError(/already/i);
   });
+
+  it("rejects a name with path traversal separators", () => {
+    expect(() =>
+      scaffoldCrewMember({ name: "..\\..\\Evil", parentDir: parent, serverUrl: "http://x" })
+    ).toThrowError(/invalid/i);
+  });
+
+  it("rejects an absolute-path name", () => {
+    expect(() =>
+      scaffoldCrewMember({ name: "C:\\Evil", parentDir: parent, serverUrl: "http://x" })
+    ).toThrowError(/invalid/i);
+  });
+
+  it("still allows a normal name with a space and punctuation", () => {
+    const result = scaffoldCrewMember({
+      name: "Uhura Jr.",
+      parentDir: parent,
+      serverUrl: "http://127.0.0.1:4200",
+    });
+    expect(existsSync(join(parent, "Uhura Jr.", "AGENTS.md"))).toBe(true);
+    expect(result.entry.name).toBe("Uhura Jr.");
+  });
 });

@@ -27,9 +27,14 @@ export interface ScaffoldResult {
   entry: CrewFolder;
 }
 
+const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/;
+
 export function scaffoldCrewMember(req: ScaffoldRequest): ScaffoldResult {
   const name = req.name.trim();
   if (!name) throw new Error("name must be non-empty");
+  if (!VALID_NAME.test(name)) {
+    throw new Error("name contains invalid characters");
+  }
   if (CrewStore.getAll().some((c) => c.name === name)) {
     const err = new Error(`Crew member already registered: ${name}`) as Error & { code?: string };
     err.code = "DUPLICATE";
