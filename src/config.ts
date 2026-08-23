@@ -10,6 +10,7 @@
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
+import { homedir } from "os";
 import { ensureDir } from "./persist.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,7 @@ export interface JoindConfig {
   host: string;
   dataDir: string;
   instance: string;
+  crewHome: string;
 }
 
 function getFlag(argv: string[], name: string): string | undefined {
@@ -53,7 +55,10 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig 
 
   const host = getFlag(argv, "host") ?? process.env.JOIND_HOST ?? DEFAULT_HOST;
 
-  return { port, host, dataDir, instance };
+  const crewHome =
+    getFlag(argv, "crew-home") ?? process.env.JOIND_CREW_HOME ?? join(homedir(), "joind-crew");
+
+  return { port, host, dataDir, instance, crewHome };
 }
 
 /**

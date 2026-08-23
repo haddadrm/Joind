@@ -1298,14 +1298,17 @@ app.post("/api/crew/scaffold", express.json(), (req, res) => {
     name?: string; parentDir?: string; joinAs?: string; role?: string;
     emoji?: string; defaultHarness?: string; defaultConversation?: string;
   };
-  if (!body.name || !body.parentDir) {
-    res.status(400).json({ error: "name and parentDir are required" });
+  if (!body.name) {
+    res.status(400).json({ error: "name is required" });
     return;
   }
+  const parentDir = body.parentDir && body.parentDir.trim().length > 0
+    ? body.parentDir
+    : CONFIG.crewHome;
   try {
     const result = scaffoldCrewMember({
       name: body.name,
-      parentDir: body.parentDir,
+      parentDir: parentDir,
       joinAs: body.joinAs,
       role: body.role,
       emoji: body.emoji,
@@ -1336,6 +1339,10 @@ app.post("/api/crew/kit", express.json(), (req, res) => {
     serverUrl: publicServerUrl(),
     conversation: body.conversation,
   }));
+});
+
+app.get("/api/crew/meta", (_req, res) => {
+  res.json({ crewHome: CONFIG.crewHome, serverUrl: publicServerUrl() });
 });
 
 app.delete("/api/crew/:name", (req, res) => {

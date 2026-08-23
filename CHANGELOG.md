@@ -11,6 +11,9 @@
 - Scaffold service (`src/scaffold.ts`): `scaffoldCrewMember()` writes an identity kit into a crew member's folder, never overwrites existing files, and registers the entry in `CrewStore`; throws a `DUPLICATE` error for an already registered name.
 - `POST /api/crew/scaffold` endpoint: scaffolds a crew folder on disk and registers it (409 on duplicate name, 400 on missing name/parentDir).
 - `POST /api/crew/kit` endpoint: returns the identity kit JSON with no disk writes, for remote machines to scaffold themselves.
+- `crewHome` configuration: `--crew-home` CLI flag, `JOIND_CREW_HOME` env var, and `join(homedir(), "joind-crew")` default. Used as the default parent directory for crew scaffolding.
+- `GET /api/crew/meta` endpoint: returns `{ crewHome, serverUrl }` for clients to discover the crew home directory and server location.
+- `POST /api/crew/scaffold` parentDir now optional: if missing or empty, defaults to `CONFIG.crewHome`.
 
 ## 2026-08-22 — Configurable Bind Host for Tailnet Remote Agents
 
