@@ -404,6 +404,14 @@ class LaunchServiceImpl {
     );
 
     result.status = "done";
+
+    // Manual inject shares LaunchState.timer with the join watch, so the
+    // clearTimeout above (if it caught a pending watch) would otherwise
+    // strand the launch on "done" forever. Restart the watch so the launch
+    // can still reach joined/join-timeout, mirroring what launch() does.
+    if (req.joinAs && this.presenceProbe) {
+      this.startJoinWatch(launchId);
+    }
   }
 
   /** Get the current status of a launch by ID. Returns null if not found. */
