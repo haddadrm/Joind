@@ -1,35 +1,54 @@
-# Headless Agent Launching via ACP: Engineering Brief for Joind
+# Headless agent launching via ACP: engineering brief for Joind
 
-Research date: 2026-08-23. Produced to scope a future `terminal: "acp"` launch mode. Verify adapter versions before implementation; this space moves fast.
+Research date: 2026-08-23, to scope a future headless launch mode. Epistemic status per section: VERIFIED means checked against live web sources on the research date; RECALLED means an agent's training knowledge (May 2026 cutoff) that was NOT verified against primary sources and needs a live check before anyone builds on it.
 
-## 1. ACP (Agent Client Protocol)
+## 1. BUZZ, identified (VERIFIED)
 
-**What it is.** ACP is Zed Industries' open protocol for connecting agent CLIs to host UIs: JSON-RPC 2.0 over the agent subprocess's stdio, newline-delimited. The host spawns the agent binary, negotiates capabilities (initialize), creates a session (session/new), sends prompts (session/prompt), and receives streamed updates (session/update notifications: message chunks, tool-call starts/results, plan updates). Sessions are long-lived; a host can run several sessions against one agent process or spawn one process per session. Spec and TypeScript/Rust SDKs: https://agentclientprotocol.com and https://github.com/zed-industries/agent-client-protocol (v0.x line as of mid-2026; pre-1.0, minor breaking changes are called out in the changelog).
+BUZZ is **Buzz by Block** (Jack Dorsey's company), at buzz.xyz: a group chat workspace where AI agents are first-class channel members alongside humans, described as "Slack for humans and coding agents". The parts relevant to Joind:
 
-**Permissions over ACP.** Tool approvals surface as session/request_permission round-trips: the agent asks, the host renders allow/deny UI and replies. A host that wants autonomous operation can auto-approve categories or pass through harness-level bypass flags instead.
+- **It uses ACP.** Buzz connects to locally installed agent harnesses (goose, Claude Code, Codex) through the Agent Client Protocol. The desktop app detects installed harnesses and installs missing adapters with a click; each agent can override the default harness/model pair. So the "hidden window" is in fact no window: agents run as headless ACP subprocesses while Buzz renders the chat.
+- **Identity rides on Nostr.** Every participant, human or agent, holds its own cryptographic keypair; channels, threads, DMs and workflows ride the Nostr protocol. That is Buzz's answer to the crew-identity problem Joind solves with crew folders + identity kits.
+- **Known pain:** on Windows 11 the adapter installation has failed for both Claude Code and Codex even when both CLIs work in PowerShell, and a recent release (Desktop v0.5.8) fixed managed agents not reading/replying. The polish gap is real and recent.
+- Joind's differentiator stands: Buzz manages the agent lifecycle inside its app; Joind's philosophy keeps each agent in its own harness with its own memory system, with the room as a meeting place. ACP for Joind is a launch transport option, not an architecture change.
 
-**Adapters shipping today (re-verify at implementation time):**
-- **Claude Code:** official adapter, package `@zed-industries/claude-code-acp`; invocation `npx @zed-industries/claude-code-acp` (or a global install). Wraps the Claude Code SDK; reads CLAUDE.md, MCP config, hooks; near-full feature coverage minus TUI-only affordances. Uncertain: exact Windows npx quirks; test cmd.exe wrapping (same .cmd caveat Joind already handles in buildCommand).
-- **Gemini CLI:** native ACP support via `gemini --experimental-acp`.
-- **Codex:** no first-party ACP adapter from OpenAI as of this research; community bridges exist (e.g. codex-acp projects); uncertain, re-verify.
-- Zed's external-agents docs list the current adapter matrix: https://zed.dev/docs/ai/external-agents
+Sources: [Block's announcement](https://block.xyz/inside/introducing-buzz-where-humans-and-agents-work-together), [hands-on review](https://www.devtoolsdaily.com/blog/a-week-with-buzz-coding-agents/), [setup guide](https://www.dplooy.com/blog/buzz-by-block-setup-claude-code-agents-channels), [use cases](https://www.hostinger.com/tutorials/buzz-use-cases/), [v0.5.8 fix note](https://digg.com/tech/ljcko1wt).
 
-## 2. BUZZ
+## 2. Adapters (VERIFIED, decay-prone: re-check at implementation time)
 
-No product named BUZZ matching "Slack-style chat for coding agents" could be identified with high confidence; no authoritative public documentation was found under that name. CONFIDENCE: LOW on any specific claim about BUZZ's internals. Candidates in the space commonly embed agents via ACP or spawn CLI subprocesses with JSON streaming flags (`claude -p --output-format stream-json` etc.). The pattern Rami described (agents defined in-app with name/model/workdir/system prompt, launched headless, chat rendered natively) is exactly the ACP host pattern, which is the mainstream implementation route today. If a site or repo for BUZZ is available, a short targeted read would settle it.
+- **Claude:** `@zed-industries/claude-code-acp` (npm, v0.16.x) exists and is succeeded by **`@zed-industries/claude-agent-acp`** (v0.23.x), powered by the Claude Agent SDK. There is also `agentclientprotocol/claude-agent-acp` under the ACP org itself, implementing the permission extension. Zed ships prebuilt single-file binaries per platform on its releases page, which sidesteps the Windows npx/.cmd problem entirely: prefer the binary.
+- **Codex:** no first-party ACP adapter found; community bridges exist (e.g. `zedcode-acps` supports both Claude Code and Codex with streaming and tool-call mapping; `claude-code-cli-acp` is a Rust PTY bridge for the real CLI).
+- **Neovim (CodeCompanion) and Emacs consume ACP** via the same adapters, which is good evidence the adapter surface is stable enough to build on.
 
-## 3. A2A in one paragraph
+Sources: [npm claude-code-acp](https://www.npmjs.com/package/@zed-industries/claude-code-acp), [npm claude-agent-acp](https://www.npmjs.com/package/@zed-industries/claude-agent-acp), [ACP org adapter](https://github.com/agentclientprotocol/claude-agent-acp), [Zed blog](https://zed.dev/blog/claude-code-via-acp), [Zed agent page](https://zed.dev/acp/agent/claude-agent), [zedcode-acps](https://github.com/SuperagenticAI/zedcode-acps).
 
-A2A (Agent2Agent) is a Linux Foundation project (donated by Google, 2025) for interoperability between independent agent SERVICES over HTTP(S): agent cards for discovery, task lifecycle objects, artifacts, push notifications. It targets cross-vendor, cross-network meshes. For a local-first chat bus like Joind, A2A is architecturally adjacent but overweight: Joind's agents are local processes joining a room, not network services publishing capability cards. Relevant only if Joind ever federates rooms across machines beyond a tailnet. https://a2a-protocol.org
+## 3. ACP protocol shape (RECALLED, verify against https://agentclientprotocol.com and the JSON schema)
 
-## 4. Recommendation for Joind: ACP launch mode on Windows
+JSON-RPC 2.0 over the subprocess's stdin/stdout, newline-delimited, LSP-shaped. Terminology inverts the usual sense: the client is the host app (Joind), the agent is the CLI, and the client spawns the agent. Protocol version is an integer negotiated in `initialize`. Stdout is protocol-only; agent logging goes to stderr.
 
-- **Spawn:** per crew member, spawn the adapter as a child process with cwd = crewPath: Claude Code via `cmd.exe /c npx @zed-industries/claude-code-acp` (stdio pipes, no PTY, no window); Gemini via `gemini --experimental-acp`. Keep the existing terminal modes; add `terminal: "acp"` as a third branch in LaunchService.
-- **Session flow:** initialize → session/new (cwd; mcpServers can be injected here: Joind could pass its own MCP endpoint so the agent gets chat tools without touching user config) → session/prompt with the same default prompt Joind already builds ("Read AGENTS.md then join X as Y").
-- **Message injection replacement:** today's keystroke injection becomes session/prompt calls: lossless, acknowledged, no timing guesses. Replies stream back as session/update; Joind can mirror them into the room or rely on the agent's own chat_send.
-- **Lifecycle/health:** the child process handle gives liveness for free; session/cancel for interrupts; kill on room leave. Map process exit to an agent-leave in the room.
-- **Permissions:** render session/request_permission as a Joind decision card in the chat (the feature already exists); default-deny with timeout.
-- **Risks/limitations:** adapters lag harness features (Claude Code tracks closely; Codex has no official adapter); no TUI means no manual rescue when an agent wedges (mitigate: keep terminal launch as the debug mode, add a transcript drawer fed from session/update); pre-1.0 protocol churn; Windows stdio quirks with npx (.cmd wrapping) and console encoding (set UTF-8).
-- **Effort estimate:** the ACP client side is a few hundred lines with the official TS SDK (`@zed-industries/agent-client-protocol` on npm); the Joind-side plumbing (third launch branch, session registry, decision-card bridge) is the real work.
+Method surface (names medium-confidence):
+- `initialize`, then `authenticate` if required.
+- `session/new` with `cwd` and an `mcpServers` array returns a `sessionId`; `session/load` only if the agent advertises `loadSession`.
+- `session/prompt` (MCP-style content blocks) returns a `stopReason` (`end_turn`, `max_tokens`, `refusal`, `cancelled`). **Turn-based: one prompt in flight per session.**
+- Agent-to-client `session/update` notifications: `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan`.
+- `session/cancel` as a client notification.
+- Client-implemented, capability-gated services: `fs/read_text_file`, `fs/write_text_file`, and a `terminal/*` group.
+- **Permissions are first class:** the agent calls `session/request_permission` with options (`allow_once`, `allow_always`, `reject_once`, `reject_always`); the request blocks the agent's turn until the client answers.
 
-Sources: agentclientprotocol.com; github.com/zed-industries/agent-client-protocol; github.com/zed-industries/claude-code-acp; zed.dev/docs/ai/external-agents; a2a-protocol.org; Gemini CLI docs. Uncertainties marked inline.
+SDKs: Rust crate `agent-client-protocol`; TypeScript `@zed-industries/agent-client-protocol` on npm.
+
+## 4. A2A in one paragraph (RECALLED, medium-high confidence)
+
+Agent2Agent originated at Google and moved to the Linux Foundation in 2025 (a2a-protocol.org): JSON-RPC over HTTPS with Agent Cards at `/.well-known/agent-card.json`, a task lifecycle, artifacts, SSE streaming and webhook push. It targets discovery and delegation between independently deployed, network-addressable agent services across vendor boundaries. Wrong layer for Joind: attaching a local subprocess to a local UI is exactly ACP's problem; A2A becomes relevant only if Joind rooms federate across machines or call hosted third-party agents.
+
+## 5. Recommendation for Joind (design reasoning grounded in Joind's actual code and skill surface)
+
+Add a per-harness `LaunchStrategy` of `acp | terminal` rather than replacing the terminal path. Claude (and later Gemini) go ACP first; Codex and Copilot stay on terminal until their adapter story is verified.
+
+- **Spawn:** `child_process.spawn` with piped stdio and `windowsHide: true`. Prefer Zed's prebuilt adapter binary on Windows; if using the npm package, resolve the JS entry and spawn `node <entry>` (never npx directly: .cmd shim quoting and orphaned shims). Pin adapter versions in a Joind-managed install dir. Inherit the environment so existing Claude Code credentials resolve; force UTF-8 stdio.
+- **Message injection becomes `session/prompt`,** replacing keystroke injection: lossless and acknowledged. Critical constraint: one prompt in flight per session, no mid-turn injection except cancel. Joind needs a per-agent inbox queue that buffers messages arriving mid-turn and flushes them as one combined prompt on `stopReason`, with queue depth visible in the UI.
+- **Streaming out:** map `agent_message_chunk` to a streaming room message, `agent_thought_chunk` to a collapsed thinking block, `tool_call`/`tool_call_update` to a mutating tool card, `plan` to the task list.
+- **Permissions:** map `session/request_permission` onto Joind's existing decision-card/task system (urgent task whose response options are the ACP option IDs; resolve the RPC when the human answers). Default to no timeout plus a visible blocked-status pill rather than auto-reject.
+- **Capabilities to decline in v1:** advertise `fs` and `terminal` false; the agent uses its own tools and Joind implements no terminal service on day one.
+- **MCP relationship:** pass Joind's MCP server via `session/new` `mcpServers` so agents keep chat tools without touching user config. For ACP-launched agents, drop the self-join requirement: Joind owns the transcript mapping directly, removing "agent forgot to post" failures and idle polling burn.
+- **Lifecycle/health:** process alive + successful initialize + last-activity timestamp; no protocol heartbeat expected. On crash: restart, `session/load` if advertised, else new session seeded with a Joind-generated context summary. Kill child trees with a job object or `taskkill /T /F`; expect EPIPE on shutdown.
+- **Risks:** adapter lag vs harness-native features (hooks, subagents, slash commands); no TUI means no manual rescue, so keep a "reveal in terminal" fallback (respawn same workdir in WezTerm) and write per-agent stdio JSONL to disk for post-mortems; auth breaks silently under a different user/service context; pin and assert protocol/adapter versions; and the turn model is a real UX regression vs a TUI that visibly queues input, so build the queue indicator before shipping.
