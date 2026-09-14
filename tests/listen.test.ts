@@ -48,6 +48,12 @@ describe("mentionsAgent", () => {
     expect(mentionsAgent("email codex@example.com", "Codex")).toBe(false);
     expect(mentionsAgent("@CodexBot is different", "Codex")).toBe(false);
   });
+
+  it("handles names ending in punctuation or Unicode letters", () => {
+    expect(mentionsAgent("over to @C++ now", "C++")).toBe(true);
+    expect(mentionsAgent("hola @José", "José")).toBe(true);
+    expect(mentionsAgent("hola @Josée", "José")).toBe(false);
+  });
 });
 
 describe("waitForMessage hardening", () => {
@@ -102,6 +108,29 @@ describe("waitForMessage hardening", () => {
     const result = await waitForMessage(room, "Claude", 999_999, 1_000);
     expect(result.timedOut).toBe(true);
     expect(result.lastId).toBe(real.id);
+  });
+
+  it("an immediate-path call still replaces an older parked listen", async () => {
+    const room = new ChatRoom();
+    // A mentionsOnly listen sleeps through unaddressed traffic...
+    const parked = waitForMessage(room, "Claude", 0, 30_000, { mentionsOnly: true });
+    await new Promise((r) => setTimeout(r, 20));
+    room.send("Codex", "unaddressed, parked listener stays asleep");
+    // ...so a plain listen now takes the immediate path, and must still
+    // replace the parked one on its way out.
+    const immediate = await waitForMessage(room, "Claude", 0, 5_000);
+    expect(immediate.messages.length).toBe(1);
+    const parkedResult = await parked;
+    expect(parkedResult.aborted).toBe(true);
+  });
+
+  it("destroying the room cancels its parked listens", async () => {
+    const room = new ChatRoom();
+    const parked = waitForMessage(room, "Claude", 0, 30_000);
+    await new Promise((r) => setTimeout(r, 20));
+    room.destroy();
+    const result = await parked;
+    expect(result.aborted).toBe(true);
   });
 
   it("own posts never appear in delivery even on the immediate path", async () => {

@@ -58,6 +58,15 @@ function sanitizeSince(since: number | undefined): number | undefined {
 const activeListens = new WeakMap<ChatRoom, Map<string, () => void>>();
 let parkedCount = 0;
 
+/** Cancel every parked listen on a room. Called from ChatRoom.destroy() so a
+ *  deleted conversation frees its listeners, timers, and slots immediately. */
+export function cancelRoomListens(room: ChatRoom): void {
+  const perRoom = activeListens.get(room);
+  if (!perRoom) return;
+  for (const abort of [...perRoom.values()]) abort();
+  perRoom.clear();
+}
+
 /**
  * Resolve as soon as a deliverable message lands after cursor `since`, or
  * after `timeoutMs` with an empty result. Messages already waiting past the
@@ -74,6 +83,16 @@ export function waitForMessage(
 ): Promise<ListenResult> {
   const mentionsOnly = options?.mentionsOnly === true;
   const signal = options?.signal;
+
+  // A newer call replaces any parked listen for this agent BEFORE any return
+  // path, immediate ones included: the old hold must never outlive the call
+  // that superseded it, or it could double-deliver later.
+  let perRoom = activeListens.get(room);
+  if (!perRoom) {
+    perRoom = new Map();
+    activeListens.set(room, perRoom);
+  }
+  perRoom.get(sender)?.();
 
   const deliverable = (m: ChatMessage): boolean =>
     m.sender !== sender && visibleTo(m, sender) && (!mentionsOnly || mentionsAgent(m.text, sender));
@@ -109,14 +128,6 @@ export function waitForMessage(
   return new Promise<ListenResult>((resolve) => {
     let settled = false;
     parkedCount++;
-
-    let perRoom = activeListens.get(room);
-    if (!perRoom) {
-      perRoom = new Map();
-      activeListens.set(room, perRoom);
-    }
-    // Abort any previous parked listen for this agent in this room.
-    perRoom.get(sender)?.();
 
     const finish = (timedOut: boolean, aborted = false): void => {
       if (settled) return;

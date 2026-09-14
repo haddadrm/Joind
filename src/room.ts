@@ -7,6 +7,7 @@ import { EventEmitter } from "events";
 import { writeFileSync } from "fs";
 import { dirname } from "path";
 import { inject } from "./inject.js";
+import { cancelRoomListens } from "./listen.js";
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
@@ -493,5 +494,6 @@ export class ChatRoom extends EventEmitter {
     for (const t of this.typingState.values()) clearTimeout(t);
     for (const t of this.statusTimeouts.values()) clearTimeout(t);
     for (const t of this.pendingMentions.values()) clearTimeout(t);
+    cancelRoomListens(this);
   }
 }
