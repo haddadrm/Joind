@@ -50,6 +50,69 @@ describe("mentionsAgent", () => {
   });
 });
 
+describe("waitForMessage hardening", () => {
+  it("aborts promptly on signal without advancing past undelivered messages", async () => {
+    const room = new ChatRoom();
+    const abort = new AbortController();
+    const promise = waitForMessage(room, "Claude", 0, 30_000, { signal: abort.signal });
+    setTimeout(() => abort.abort(), 50);
+    const result = await promise;
+    expect(result.aborted).toBe(true);
+    expect(result.messages).toEqual([]);
+  });
+
+  it("does not wake on a DM addressed to someone else", async () => {
+    const room = new ChatRoom();
+    const promise = waitForMessage(room, "Claude", 0, 1_200);
+    room.send("Codex", "secret for Jadzia only", { to: ["Jadzia"] });
+    const result = await promise;
+    expect(result.timedOut).toBe(true);
+    expect(result.messages).toEqual([]);
+  });
+
+  it("a second listen for the same agent aborts the first (no double delivery)", async () => {
+    const room = new ChatRoom();
+    const first = waitForMessage(room, "Claude", 0, 30_000);
+    await new Promise((r) => setTimeout(r, 20));
+    const second = waitForMessage(room, "Claude", 0, 5_000);
+    const firstResult = await first;
+    expect(firstResult.aborted).toBe(true);
+    room.send("Codex", "only the live listener gets this");
+    const secondResult = await second;
+    expect(secondResult.messages.some((m) => m.sender === "Codex")).toBe(true);
+  });
+
+  it("pages a large backlog ascending instead of skipping past it", async () => {
+    const room = new ChatRoom();
+    for (let i = 0; i < 150; i++) room.send("Claude", `own backlog ${i}`);
+    const target = room.send("Codex", "buried but not lost");
+    for (let i = 0; i < 10; i++) room.send("Claude", `more noise ${i}`);
+    // First call scans only the first page of the backlog: cursor moves, no skip.
+    const scan1 = await waitForMessage(room, "Claude", 0, 1_000);
+    expect(scan1.messages).toEqual([]);
+    expect(scan1.lastId).toBeLessThan(target.id);
+    // Following the returned cursor eventually delivers the buried message.
+    const scan2 = await waitForMessage(room, "Claude", scan1.lastId, 1_000);
+    expect(scan2.messages.some((m) => m.id === target.id)).toBe(true);
+  });
+
+  it("clamps a bogus future cursor to the room high-water mark", async () => {
+    const room = new ChatRoom();
+    const real = room.send("Codex", "actual last message");
+    const result = await waitForMessage(room, "Claude", 999_999, 1_000);
+    expect(result.timedOut).toBe(true);
+    expect(result.lastId).toBe(real.id);
+  });
+
+  it("own posts never appear in delivery even on the immediate path", async () => {
+    const room = new ChatRoom();
+    room.send("Claude", "mine");
+    const foreign = room.send("Codex", "yours");
+    const result = await waitForMessage(room, "Claude", 0, 1_000);
+    expect(result.messages.map((m) => m.id)).toEqual([foreign.id]);
+  });
+});
+
 describe("waitForMessage mentionsOnly", () => {
   it("stays asleep through unaddressed traffic, wakes on @Name, delivers only addressed messages", async () => {
     const room = new ChatRoom();

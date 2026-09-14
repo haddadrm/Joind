@@ -1134,9 +1134,18 @@ app.get("/api/agent/listen", async (req, res) => {
     req.query.timeoutMs != null ? Number(req.query.timeoutMs) : undefined
   );
   const mentionsOnly = req.query.mentionsOnly === "true" || req.query.mentionsOnly === "1";
+  // A vanished client (curl --max-time, closed tab) aborts the wait so the
+  // room listener, timers, and slot free immediately and the cursor is not
+  // advanced for messages that were never delivered.
+  const abort = new AbortController();
+  req.on("close", () => abort.abort());
   ctx.room.touch(sender);
-  const result = await waitForMessage(ctx.room, sender, since, timeoutMs, { mentionsOnly });
+  const result = await waitForMessage(ctx.room, sender, since, timeoutMs, {
+    mentionsOnly,
+    signal: abort.signal,
+  });
   ctx.room.touch(sender);
+  if (result.aborted) return;
   if (result.lastId > 0) cursorStore.advance(sender, result.lastId);
   res.json(result);
 });

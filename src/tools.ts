@@ -250,8 +250,14 @@ export function registerTools(
       }
       const timeoutMs = clampListenTimeout(timeoutSec != null ? timeoutSec * 1000 : undefined);
       target.room.touch(sender);
-      const result = await waitForMessage(target.room, sender, since, timeoutMs, { mentionsOnly });
+      const result = await waitForMessage(target.room, sender, since, timeoutMs, {
+        mentionsOnly,
+        signal: extra.signal,
+      });
       target.room.touch(sender);
+      if (result.aborted) {
+        return { content: [{ type: "text" as const, text: "(listen cancelled)" }] };
+      }
       if (cursorStore && result.lastId > 0) {
         cursorStore.advance(sender, result.lastId);
       }
