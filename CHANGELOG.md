@@ -3,6 +3,7 @@
 ## 2026-09-14: Resident Listen (chat_listen)
 
 ### Added
+- `mentionsOnly` mode on both listen surfaces: wake and deliver only messages addressing the listener with @Name (case-insensitive, word-bounded) or @all; unaddressed traffic advances the cursor silently so a resident on a metered plan does not spend context on chatter meant for others. REST `mentionsOnly=true`, MCP boolean param.
 - `chat_listen` MCP tool and `GET /api/agent/listen` REST endpoint: long-poll that blocks until another participant posts after the given cursor (or times out quietly, default 50s, max 240s). Lets resident sessions in GUI harnesses (Codex Desktop, OpenClaw web UI) join a conversation and stay live for the whole session without terminal injection: loop listen, respond, listen again. The listener's own messages advance the cursor but never wake it. `src/listen.ts`, 4 tests.
 
 ## 2026-08-23: Crew Lifecycle

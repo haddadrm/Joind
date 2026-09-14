@@ -1133,8 +1133,9 @@ app.get("/api/agent/listen", async (req, res) => {
   const timeoutMs = clampListenTimeout(
     req.query.timeoutMs != null ? Number(req.query.timeoutMs) : undefined
   );
+  const mentionsOnly = req.query.mentionsOnly === "true" || req.query.mentionsOnly === "1";
   ctx.room.touch(sender);
-  const result = await waitForMessage(ctx.room, sender, since, timeoutMs);
+  const result = await waitForMessage(ctx.room, sender, since, timeoutMs, { mentionsOnly });
   ctx.room.touch(sender);
   if (result.lastId > 0) cursorStore.advance(sender, result.lastId);
   res.json(result);

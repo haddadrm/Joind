@@ -240,16 +240,17 @@ export function registerTools(
         sender: z.string().describe("Your name"),
         since: z.number().optional().describe("Message ID cursor (exclusive); pass the lastId from the previous listen or read"),
         timeoutSec: z.number().optional().describe("Seconds to wait before returning empty (default 50, max 240)"),
+        mentionsOnly: z.boolean().optional().describe("Wake and deliver only messages that address you with @YourName or @all; unaddressed traffic advances the cursor silently (protects your context budget; catch up with chat_read if needed)"),
       }),
     },
-    async ({ sender, since, timeoutSec }, extra) => {
+    async ({ sender, since, timeoutSec, mentionsOnly }, extra) => {
       const target = getRoom(manager, extra, sender);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
       const timeoutMs = clampListenTimeout(timeoutSec != null ? timeoutSec * 1000 : undefined);
       target.room.touch(sender);
-      const result = await waitForMessage(target.room, sender, since, timeoutMs);
+      const result = await waitForMessage(target.room, sender, since, timeoutMs, { mentionsOnly });
       target.room.touch(sender);
       if (cursorStore && result.lastId > 0) {
         cursorStore.advance(sender, result.lastId);

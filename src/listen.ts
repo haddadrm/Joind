@@ -22,6 +22,12 @@ export function clampListenTimeout(ms: number | undefined): number {
   return Math.max(1_000, Math.min(LISTEN_MAX_MS, ms));
 }
 
+/** True when the text addresses the agent: @Name (case-insensitive) or @all. */
+export function mentionsAgent(text: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`@(${escaped}|all)\\b`, "i").test(text);
+}
+
 /**
  * Resolve as soon as a message from someone other than `sender` lands after
  * cursor `since`, or after `timeoutMs` with an empty result. Messages already
@@ -31,16 +37,27 @@ export function waitForMessage(
   room: ChatRoom,
   sender: string,
   since: number | undefined,
-  timeoutMs: number
+  timeoutMs: number,
+  options?: { mentionsOnly?: boolean }
 ): Promise<ListenResult> {
+  const mentionsOnly = options?.mentionsOnly === true;
+  // A message wakes the listener when someone else sent it, and (in
+  // mentionsOnly mode) it addresses the listener with @Name or @all.
+  // mentionsOnly protects a resident's context budget: unaddressed traffic
+  // advances the cursor silently and can be caught up on via chat_read.
+  const wakes = (m: ChatMessage): boolean =>
+    m.sender !== sender && (!mentionsOnly || mentionsAgent(m.text, sender));
+  const deliver = (all: ChatMessage[]): ChatMessage[] =>
+    mentionsOnly ? all.filter(wakes) : all;
+
   const pending = room.read(since, 100, undefined, sender);
-  const foreign = pending.some((m) => m.sender !== sender);
-  if (foreign) {
+  if (pending.some(wakes)) {
     const lastId = pending[pending.length - 1]?.id ?? since ?? 0;
-    return Promise.resolve({ messages: pending, lastId, timedOut: false });
+    return Promise.resolve({ messages: deliver(pending), lastId, timedOut: false });
   }
-  // Own messages past the cursor do not wake the listener, but the cursor
-  // still moves past them so they are not re-delivered forever.
+  // Non-waking messages past the cursor (own posts, and unaddressed traffic
+  // in mentionsOnly mode) do not wake the listener, but the cursor still
+  // moves past them so they are not re-delivered forever.
   const skipTo = pending.length > 0 ? pending[pending.length - 1].id : since;
 
   return new Promise<ListenResult>((resolve) => {
@@ -51,12 +68,13 @@ export function waitForMessage(
       room.removeListener("room", onEvent);
       clearTimeout(timer);
       clearInterval(keepAlive);
-      const messages = room.read(skipTo, 100, undefined, sender);
-      const lastId = messages.length > 0 ? messages[messages.length - 1].id : (skipTo ?? 0);
-      resolve({ messages, lastId, timedOut });
+      const all = room.read(skipTo, 100, undefined, sender);
+      const lastId = all.length > 0 ? all[all.length - 1].id : (skipTo ?? 0);
+      resolve({ messages: deliver(all), lastId, timedOut });
     };
-    const onEvent = (event: { type: string; data?: { sender?: string } }): void => {
-      if (event.type === "message" && event.data?.sender !== sender) finish(false);
+    const onEvent = (event: { type: string; data?: { sender?: string; text?: string } }): void => {
+      if (event.type !== "message" || !event.data) return;
+      if (wakes(event.data as ChatMessage)) finish(false);
     };
     const timer = setTimeout(() => finish(true), timeoutMs);
     // A listening agent is present by definition: touch it through the hold
