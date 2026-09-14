@@ -19,6 +19,7 @@ const execFileAsync = promisify(execFile);
 import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { ensureDir } from "./persist.js";
+import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
@@ -1119,6 +1120,24 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
     recentMessages: recent,
     totalMessages: room.messageCount(),
   });
+});
+
+app.get("/api/agent/listen", async (req, res) => {
+  const sender = req.query.sender as string;
+  if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
+  const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
+  const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
+  const ctx = agentRoom(sender, res, pid, paneId);
+  if (!ctx) return;
+  const since = req.query.since != null ? Number(req.query.since) : undefined;
+  const timeoutMs = clampListenTimeout(
+    req.query.timeoutMs != null ? Number(req.query.timeoutMs) : undefined
+  );
+  ctx.room.touch(sender);
+  const result = await waitForMessage(ctx.room, sender, since, timeoutMs);
+  ctx.room.touch(sender);
+  if (result.lastId > 0) cursorStore.advance(sender, result.lastId);
+  res.json(result);
 });
 
 app.get("/api/agent/read", (req, res) => {

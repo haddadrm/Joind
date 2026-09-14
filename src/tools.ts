@@ -10,6 +10,7 @@ import { promisify } from "util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ConversationManager } from "./manager.js";
+import { waitForMessage, clampListenTimeout } from "./listen.js";
 import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
@@ -226,6 +227,43 @@ export function registerTools(
         })
         .join("\n");
       return { content: [{ type: "text" as const, text: formatted || "(no messages)" }] };
+    }
+  );
+
+  server.registerTool(
+    "chat_listen",
+    {
+      title: "Wait for the next message (long poll)",
+      description:
+        "Block until another participant posts a message after your cursor, or until the timeout passes. For resident sessions (GUI harnesses) that cannot receive terminal injection: loop chat_listen, respond to what it returns, then call it again with the returned lastId. A timeout result is normal; just call again.",
+      inputSchema: z.object({
+        sender: z.string().describe("Your name"),
+        since: z.number().optional().describe("Message ID cursor (exclusive); pass the lastId from the previous listen or read"),
+        timeoutSec: z.number().optional().describe("Seconds to wait before returning empty (default 50, max 240)"),
+      }),
+    },
+    async ({ sender, since, timeoutSec }, extra) => {
+      const target = getRoom(manager, extra, sender);
+      if (!target) {
+        return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
+      }
+      const timeoutMs = clampListenTimeout(timeoutSec != null ? timeoutSec * 1000 : undefined);
+      target.room.touch(sender);
+      const result = await waitForMessage(target.room, sender, since, timeoutMs);
+      target.room.touch(sender);
+      if (cursorStore && result.lastId > 0) {
+        cursorStore.advance(sender, result.lastId);
+      }
+      if (result.messages.length === 0) {
+        return { content: [{ type: "text" as const, text: `(no new messages after ${timeoutMs / 1000}s; lastId=${result.lastId}; call chat_listen again)` }] };
+      }
+      const formatted = result.messages
+        .map((m) => {
+          const reply = m.replyTo ? ` [reply to #${m.replyTo}]` : "";
+          return `[#${m.id} ${m.sender}${reply}] ${m.text}`;
+        })
+        .join("\n");
+      return { content: [{ type: "text" as const, text: `${formatted}\n(lastId=${result.lastId})` }] };
     }
   );
 
