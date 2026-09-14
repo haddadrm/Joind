@@ -50,6 +50,7 @@ export function waitForMessage(
       settled = true;
       room.removeListener("room", onEvent);
       clearTimeout(timer);
+      clearInterval(keepAlive);
       const messages = room.read(skipTo, 100, undefined, sender);
       const lastId = messages.length > 0 ? messages[messages.length - 1].id : (skipTo ?? 0);
       resolve({ messages, lastId, timedOut });
@@ -58,6 +59,10 @@ export function waitForMessage(
       if (event.type === "message" && event.data?.sender !== sender) finish(false);
     };
     const timer = setTimeout(() => finish(true), timeoutMs);
+    // A listening agent is present by definition: touch it through the hold
+    // so the 120s stale sweep (which also pid-probes, meaningless for remote
+    // or GUI-resident agents) neither dims nor removes it mid-listen.
+    const keepAlive = setInterval(() => room.touch(sender), 30_000);
     room.on("room", onEvent);
   });
 }
