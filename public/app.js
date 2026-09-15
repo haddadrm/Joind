@@ -4822,7 +4822,10 @@ function renderNotifyBadge() {
 
 function onNotification(n, generation) {
   if (generation && notifyGeneration === null) {
+    // First generation sighting still bumps the epoch so a fetch that was
+    // already in flight from an unknown world discards itself on arrival.
     notifyGeneration = generation;
+    notifyEpoch++;
   } else if (generation) {
     adoptNotifyGeneration(generation);
   }
