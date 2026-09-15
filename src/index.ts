@@ -226,7 +226,7 @@ function pushNotification(classified: Classified | null, conversationId: string)
   if (!classified) return;
   const name = manager.listConversations().find((c) => c.id === conversationId)?.name;
   const n = notificationStore.add(classified, conversationId, name);
-  const msg = JSON.stringify({ type: "notification", data: n });
+  const msg = JSON.stringify({ type: "notification", generation: notificationStore.generation, data: n });
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }

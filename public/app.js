@@ -247,7 +247,7 @@ function connect() {
         initTurnGuard(event.data);
         break;
       case 'notification':
-        onNotification(event.data);
+        onNotification(event.data, event.generation);
         break;
       case 'roles-updated':
         availableRoles = event.data;
@@ -4757,6 +4757,17 @@ var notifyItems = [];
 var notifyUnread = 0;
 var notifyPanelOpen = false;
 var notifyGeneration = null;
+// Bumped whenever we move to a new server generation; in-flight fetches
+// from an older world check it and discard themselves.
+var notifyEpoch = 0;
+
+function adoptNotifyGeneration(gen) {
+  if (!gen || gen === notifyGeneration) return;
+  notifyGeneration = gen;
+  notifyEpoch++;
+  notifyItems = [];
+  notifyUnread = 0;
+}
 
 var NOTIFY_ICONS = {
   'crew-joined': '👋',
@@ -4769,18 +4780,19 @@ var NOTIFY_ICONS = {
 };
 
 function loadNotifications() {
+  var epochAtStart = notifyEpoch;
   fetch('/api/notifications').then(function(r) { return r.json(); }).then(function(data) {
-    // A new server generation means ids restarted at 1: local state is
-    // from a previous world and must be replaced, never merged.
     if (data.generation && data.generation !== notifyGeneration) {
-      notifyGeneration = data.generation;
-      notifyItems = (data.notifications || []).slice().sort(function(a, b) { return b.id - a.id; });
-      notifyUnread = data.unread || 0;
-      renderNotifyBadge();
-      if (notifyPanelOpen) renderNotifyPanel();
-      return;
+      // A live WS event already moved us to a different world while this
+      // fetch was in flight: the response is from a dead server, drop it.
+      if (notifyEpoch !== epochAtStart) return;
+      // New server generation: ids restarted at 1, local state is from a
+      // previous world. Reset, then fall through to merge the snapshot
+      // (the merge also keeps any same-generation WS arrival that raced
+      // ahead of this fetch, because adoption via WS bumped the epoch).
+      adoptNotifyGeneration(data.generation);
     }
-    // Same generation: merge by id. WS arrivals during the fetch must
+    // Merge by id within one generation: WS arrivals during the fetch must
     // survive an older snapshot, and the snapshot must not resurrect rows
     // we marked read.
     var byId = {};
@@ -4808,7 +4820,12 @@ function renderNotifyBadge() {
   }
 }
 
-function onNotification(n) {
+function onNotification(n, generation) {
+  if (generation && notifyGeneration === null) {
+    notifyGeneration = generation;
+  } else if (generation) {
+    adoptNotifyGeneration(generation);
+  }
   notifyItems.unshift(n);
   if (notifyItems.length > 100) notifyItems.length = 100;
   notifyUnread++;
