@@ -4756,6 +4756,7 @@ function doSearch() {
 var notifyItems = [];
 var notifyUnread = 0;
 var notifyPanelOpen = false;
+var notifyGeneration = null;
 
 var NOTIFY_ICONS = {
   'crew-joined': '👋',
@@ -4769,8 +4770,19 @@ var NOTIFY_ICONS = {
 
 function loadNotifications() {
   fetch('/api/notifications').then(function(r) { return r.json(); }).then(function(data) {
-    // Merge by id: WS arrivals during the fetch must survive an older
-    // snapshot, and the snapshot must not resurrect rows we marked read.
+    // A new server generation means ids restarted at 1: local state is
+    // from a previous world and must be replaced, never merged.
+    if (data.generation && data.generation !== notifyGeneration) {
+      notifyGeneration = data.generation;
+      notifyItems = (data.notifications || []).slice().sort(function(a, b) { return b.id - a.id; });
+      notifyUnread = data.unread || 0;
+      renderNotifyBadge();
+      if (notifyPanelOpen) renderNotifyPanel();
+      return;
+    }
+    // Same generation: merge by id. WS arrivals during the fetch must
+    // survive an older snapshot, and the snapshot must not resurrect rows
+    // we marked read.
     var byId = {};
     (data.notifications || []).forEach(function(n) { byId[n.id] = n; });
     notifyItems.forEach(function(n) {

@@ -165,6 +165,9 @@ const CAP = 200;
 export class NotificationStore extends EventEmitter {
   private items: Notification[] = [];
   private nextId = 1;
+  /** Changes on every server start: ids restart at 1, so clients must treat
+   *  a new generation as a fresh world and replace, never merge. */
+  readonly generation = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
   add(kind: Classified, conversationId: string, conversationName?: string): Notification {
     const n: Notification = {

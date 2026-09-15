@@ -253,6 +253,7 @@ taskStore.on("task", (event) => {
 app.get("/api/notifications", (req, res) => {
   const limit = Number(req.query.limit ?? 50);
   res.json({
+    generation: notificationStore.generation,
     notifications: notificationStore.list(Number.isFinite(limit) ? limit : 50),
     unread: notificationStore.unreadCount(),
   });

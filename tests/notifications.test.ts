@@ -61,7 +61,17 @@ describe("TaskTracker", () => {
     const t = new TaskTracker();
     expect(t.classify("task-created", task({ id: 1, conversationId: "roomB", assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
     t.classify("task-created", task({ id: 1, conversationId: "roomA" }), HUMANS);
+    // Under numeric-only keys roomA's unassigned snapshot would shadow
+    // roomB's, so this unchanged-assignee update would falsely ring picked.
+    expect(t.classify("task-updated", task({ id: 1, conversationId: "roomB", assignee: "Codex" }), HUMANS)).toBeNull();
     expect(t.classify("task-updated", task({ id: 1, conversationId: "roomA", assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
+  });
+
+  it("exposes a per-boot generation for clients to detect id restarts", () => {
+    const a = new NotificationStore();
+    const b = new NotificationStore();
+    expect(a.generation).toBeTruthy();
+    expect(a.generation).not.toBe(b.generation);
   });
 
   it("urgent escalation and human reassignment on update ring action-required", () => {
