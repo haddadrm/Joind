@@ -20,6 +20,7 @@ import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { ensureDir } from "./persist.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
+import { NotificationStore, TaskTracker, classifyMessage, type Classified } from "./notifications.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
@@ -215,6 +216,54 @@ applyCursorProvider();
 manager.on("room-created", (room) => {
   if (turnGuard.enabled) room.turnGuard = turnGuard;
   room.getCursor = (name: string) => cursorStore.get(name);
+});
+
+// --- Notification bell: high-signal feed for the human ---
+const notificationStore = new NotificationStore();
+const taskTracker = new TaskTracker();
+
+function pushNotification(classified: Classified | null, conversationId: string): void {
+  if (!classified) return;
+  const name = manager.listConversations().find((c) => c.id === conversationId)?.name;
+  const n = notificationStore.add(classified, conversationId, name);
+  const msg = JSON.stringify({ type: "notification", data: n });
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  }
+}
+
+manager.on("room", (event) => {
+  if (event.type === "message" && event.data) {
+    pushNotification(
+      classifyMessage(event.data as Parameters<typeof classifyMessage>[0], CONFIG.humanNames),
+      event.conversationId as string
+    );
+  }
+});
+
+taskStore.on("task", (event) => {
+  if ((event.type === "task-created" || event.type === "task-updated") && event.data) {
+    pushNotification(
+      taskTracker.classify(event.type, event.data, CONFIG.humanNames),
+      event.conversationId
+    );
+  }
+});
+
+app.get("/api/notifications", (req, res) => {
+  const limit = Number(req.query.limit ?? 50);
+  res.json({
+    notifications: notificationStore.list(Number.isFinite(limit) ? limit : 50),
+    unread: notificationStore.unreadCount(),
+  });
+});
+
+app.post("/api/notifications/read", express.json(), (req, res) => {
+  const { upToId } = (req.body ?? {}) as { upToId?: number };
+  const changed = notificationStore.markRead(
+    typeof upToId === "number" && Number.isSafeInteger(upToId) ? upToId : undefined
+  );
+  res.json({ changed, unread: notificationStore.unreadCount() });
 });
 
 // Forward conversation room events to WebSocket clients (scoped by active conversation)

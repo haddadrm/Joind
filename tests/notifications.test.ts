@@ -1,0 +1,72 @@
+import { describe, it, expect } from "vitest";
+import { classifyMessage, TaskTracker, NotificationStore } from "../src/notifications.js";
+import type { ChatMessage } from "../src/room.js";
+import type { Task } from "../src/tasks.js";
+
+const HUMANS = ["Admiral", "Rami"];
+
+function msg(sender: string, text: string, extra?: Partial<ChatMessage>): ChatMessage {
+  return { id: 1, sender, text, timestamp: Date.now(), ...extra } as ChatMessage;
+}
+
+function task(overrides: Partial<Task>): Task {
+  return {
+    id: 1, conversationId: "c1", title: "Fix the denominator", creator: "Jadzia",
+    status: "open", priority: "normal", createdAt: 0, updatedAt: 0, ...overrides,
+  } as Task;
+}
+
+describe("classifyMessage", () => {
+  it("classifies joins, leaves, and session markers from system messages", () => {
+    expect(classifyMessage(msg("system", "Curzon joined the chat"), HUMANS)?.kind).toBe("crew-joined");
+    expect(classifyMessage(msg("system", "Codex left the chat"), HUMANS)?.kind).toBe("crew-left");
+    expect(classifyMessage(msg("system", "--- Session started: brainstorm ---"), HUMANS)?.kind).toBe("session-started");
+    expect(classifyMessage(msg("system", "--- Session ended: brainstorm ---"), HUMANS)?.kind).toBe("session-ended");
+    expect(classifyMessage(msg("system", "Turn limit reached"), HUMANS)).toBeNull();
+  });
+
+  it("rings action-required for direct human mentions but not @all or chatter", () => {
+    expect(classifyMessage(msg("Codex", "@Admiral please approve the export"), HUMANS)?.kind).toBe("action-required");
+    expect(classifyMessage(msg("Codex", "@rami quick check?"), HUMANS)?.kind).toBe("action-required");
+    expect(classifyMessage(msg("Codex", "@all stand-up in five"), HUMANS)).toBeNull();
+    expect(classifyMessage(msg("Codex", "@Curzon your turn"), HUMANS)).toBeNull();
+    expect(classifyMessage(msg("Codex", "long technical ramble with no tags"), HUMANS)).toBeNull();
+  });
+
+  it("rings action-required for decision cards", () => {
+    const decision = msg("Jadzia", "Ship it or hold?", { choices: ["Ship", "Hold"] });
+    expect(classifyMessage(decision, HUMANS)?.kind).toBe("action-required");
+  });
+});
+
+describe("TaskTracker", () => {
+  it("created-with-assignee is picked; urgent or human-assigned is action-required", () => {
+    const t = new TaskTracker();
+    expect(t.classify("task-created", task({ id: 1, assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
+    expect(t.classify("task-created", task({ id: 2, priority: "urgent" }), HUMANS)?.kind).toBe("action-required");
+    expect(t.classify("task-created", task({ id: 3, assignee: "Admiral" }), HUMANS)?.kind).toBe("action-required");
+    expect(t.classify("task-created", task({ id: 4 }), HUMANS)).toBeNull();
+  });
+
+  it("assignee transition is picked once; completion fires once", () => {
+    const t = new TaskTracker();
+    t.classify("task-created", task({ id: 5 }), HUMANS);
+    expect(t.classify("task-updated", task({ id: 5, assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
+    expect(t.classify("task-updated", task({ id: 5, assignee: "Codex" }), HUMANS)).toBeNull();
+    expect(t.classify("task-updated", task({ id: 5, assignee: "Codex", status: "done" }), HUMANS)?.kind).toBe("task-completed");
+  });
+});
+
+describe("NotificationStore", () => {
+  it("tracks unread, caps the feed, and marks read up to an id", () => {
+    const store = new NotificationStore();
+    for (let i = 0; i < 5; i++) store.add({ kind: "crew-joined", text: `agent ${i} joined` }, "c1", "Bridge");
+    expect(store.unreadCount()).toBe(5);
+    const newestFirst = store.list();
+    expect(newestFirst[0].text).toContain("agent 4");
+    store.markRead(newestFirst[2].id);
+    expect(store.unreadCount()).toBe(2);
+    store.markRead();
+    expect(store.unreadCount()).toBe(0);
+  });
+});

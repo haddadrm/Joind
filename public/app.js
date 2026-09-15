@@ -241,6 +241,9 @@ function connect() {
       case 'turn-guard':
         initTurnGuard(event.data);
         break;
+      case 'notification':
+        onNotification(event.data);
+        break;
       case 'roles-updated':
         availableRoles = event.data;
         break;
@@ -4738,3 +4741,197 @@ function doSearch() {
       });
     });
 }
+
+// ============================================================
+// Notification bell: high-signal feed (crew joins/leaves, action
+// required, task picked/completed, session start/end). Everything
+// else stays in the chat. Server classifies; this only renders.
+// ============================================================
+
+var notifyItems = [];
+var notifyUnread = 0;
+var notifyPanelOpen = false;
+
+var NOTIFY_ICONS = {
+  'crew-joined': '👋',
+  'crew-left': '🚪',
+  'action-required': '❗',
+  'task-picked': '🤝',
+  'task-completed': '✅',
+  'session-started': '🧠',
+  'session-ended': '🏁'
+};
+
+function loadNotifications() {
+  fetch('/api/notifications').then(function(r) { return r.json(); }).then(function(data) {
+    notifyItems = data.notifications || [];
+    notifyUnread = data.unread || 0;
+    renderNotifyBadge();
+    if (notifyPanelOpen) renderNotifyPanel();
+  }).catch(function() {});
+}
+
+function renderNotifyBadge() {
+  var badge = document.getElementById('notify-badge');
+  if (!badge) return;
+  if (notifyUnread > 0) {
+    badge.textContent = notifyUnread > 99 ? '99+' : String(notifyUnread);
+    badge.hidden = false;
+  } else {
+    badge.hidden = true;
+  }
+}
+
+function onNotification(n) {
+  notifyItems.unshift(n);
+  if (notifyItems.length > 100) notifyItems.length = 100;
+  notifyUnread++;
+  renderNotifyBadge();
+  if (notifyPanelOpen) renderNotifyPanel();
+  if (n.kind === 'action-required') {
+    playSound('alert-tone');
+    maybeBrowserNotify(n);
+  }
+}
+
+function maybeBrowserNotify(n) {
+  try {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'granted') return;
+    if (document.visibilityState === 'visible') return;
+    var title = (n.conversationName ? '[' + n.conversationName + '] ' : '') + 'Action required';
+    new Notification(title, { body: n.text, tag: 'joind-' + n.id });
+  } catch (err) { /* notification errors never break the app */ }
+}
+
+function toggleNotifyPanel() {
+  if (notifyPanelOpen) { closeNotifyPanel(); return; }
+  notifyPanelOpen = true;
+  var overlay = document.createElement('div');
+  overlay.className = 'notify-panel-overlay';
+  overlay.id = 'notify-panel-overlay';
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) closeNotifyPanel(); });
+
+  var box = document.createElement('div');
+  box.className = 'notify-panel';
+
+  var hdr = document.createElement('div');
+  hdr.className = 'notify-panel-header';
+  var title = document.createElement('span');
+  title.textContent = 'Notifications';
+  hdr.appendChild(title);
+
+  var actions = document.createElement('div');
+  actions.className = 'notify-panel-actions';
+  if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    var enableBtn = document.createElement('button');
+    enableBtn.className = 'btn notify-enable-btn';
+    enableBtn.textContent = 'Enable alerts';
+    enableBtn.title = 'Browser notifications for action-required items while this tab is in the background';
+    enableBtn.addEventListener('click', function() {
+      Notification.requestPermission().then(function() { enableBtn.remove(); });
+    });
+    actions.appendChild(enableBtn);
+  }
+  var markBtn = document.createElement('button');
+  markBtn.className = 'btn notify-mark-btn';
+  markBtn.textContent = 'Mark all read';
+  markBtn.addEventListener('click', function() {
+    fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        notifyUnread = d.unread || 0;
+        notifyItems.forEach(function(n) { n.read = true; });
+        renderNotifyBadge();
+        renderNotifyPanel();
+      }).catch(function() {});
+  });
+  actions.appendChild(markBtn);
+  hdr.appendChild(actions);
+  box.appendChild(hdr);
+
+  var list = document.createElement('div');
+  list.className = 'notify-panel-list';
+  list.id = 'notify-panel-list';
+  box.appendChild(list);
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  renderNotifyPanel();
+  loadNotifications();
+}
+
+function closeNotifyPanel() {
+  notifyPanelOpen = false;
+  var overlay = document.getElementById('notify-panel-overlay');
+  if (overlay) overlay.remove();
+}
+
+function renderNotifyPanel() {
+  var list = document.getElementById('notify-panel-list');
+  if (!list) return;
+  list.textContent = '';
+  if (notifyItems.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'notify-empty';
+    empty.textContent = 'All quiet. The bell only rings for the important stuff.';
+    list.appendChild(empty);
+    return;
+  }
+  notifyItems.forEach(function(n) {
+    var row = document.createElement('div');
+    row.className = 'notify-row' + (n.read ? '' : ' unread') + (n.kind === 'action-required' ? ' action' : '');
+    var icon = document.createElement('span');
+    icon.className = 'notify-icon';
+    icon.textContent = NOTIFY_ICONS[n.kind] || '🔔';
+    row.appendChild(icon);
+    var body = document.createElement('div');
+    body.className = 'notify-body';
+    var text = document.createElement('div');
+    text.className = 'notify-text';
+    text.textContent = n.text;
+    body.appendChild(text);
+    var meta = document.createElement('div');
+    meta.className = 'notify-meta';
+    var when = new Date(n.timestamp);
+    meta.textContent = (n.conversationName ? n.conversationName + ' · ' : '') +
+      when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    body.appendChild(meta);
+    row.appendChild(body);
+    row.addEventListener('click', function() {
+      fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ upToId: n.id }) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { notifyUnread = d.unread || 0; renderNotifyBadge(); })
+        .catch(function() {});
+      n.read = true;
+      row.classList.remove('unread');
+      if (n.conversationId && (!activeConversation || activeConversation.id !== n.conversationId)) {
+        selectConversation(n.conversationId);
+      }
+      closeNotifyPanel();
+    });
+    list.appendChild(row);
+  });
+}
+
+loadNotifications();
+
+// ============================================================
+// Mobile viewport: keep the composer visible above the keyboard.
+// 100vh lies on mobile; visualViewport tells the truth.
+// ============================================================
+
+(function() {
+  function syncViewportHeight() {
+    try {
+      var h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      document.documentElement.style.setProperty('--app-height', h + 'px');
+    } catch (err) { /* leave the CSS fallback in charge */ }
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', syncViewportHeight);
+    window.visualViewport.addEventListener('scroll', syncViewportHeight);
+  }
+  window.addEventListener('resize', syncViewportHeight);
+  syncViewportHeight();
+})();

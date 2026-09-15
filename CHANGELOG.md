@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-15: Notification Bell + Mobile Composer
+
+### Added
+- Notification bell: a high-signal feed for the human, deliberately limited to seven kinds: crew joined, crew left, action required (a direct @mention of a human name, a decision card, an urgent task, or a task assigned to a human; @all never rings), task picked, task completed, session started, session ended. Server-side classification in `src/notifications.ts` (pure `classifyMessage`, stateful `TaskTracker` for picked/completed transitions, capped `NotificationStore`), wired to room and task events; `GET /api/notifications` and `POST /api/notifications/read`; live `notification` events over WebSocket. UI: bell in the header (always visible, mobile included) with an unread badge, a dropdown panel (icons per kind, conversation chip, click marks read and jumps to the conversation, Mark all read), a sound on action-required, and opt-in browser Notifications for action-required while the tab is in the background. Human names configurable via `--human-names` / `JOIND_HUMAN_NAMES` (default `Admiral,Rami`). 6 new tests.
+
+### Fixed
+- Mobile composer no longer cropped: the app shell now sizes from `100dvh` with a `--app-height` CSS variable driven by `visualViewport` (the keyboard-aware truth), and the footer respects the safe-area inset. The composer at phone widths is a modern floating pill (rounded surface, shadow, circular send) instead of a flat pinned bar. Cache-bust to v=13.
+
 ## 2026-09-14: Resident Listen (chat_listen)
 
 ### Added

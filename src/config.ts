@@ -29,6 +29,7 @@ export interface JoindConfig {
   dataDir: string;
   instance: string;
   crewHome: string;
+  humanNames: string[];
 }
 
 function getFlag(argv: string[], name: string): string | undefined {
@@ -58,7 +59,15 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig 
   const crewHome =
     getFlag(argv, "crew-home") ?? process.env.JOIND_CREW_HOME ?? join(homedir(), "joind-crew");
 
-  return { port, host, dataDir, instance, crewHome };
+  // Names the human answers to in rooms; @mentions of these ring the bell.
+  const humanNamesRaw =
+    getFlag(argv, "human-names") ?? process.env.JOIND_HUMAN_NAMES ?? "Admiral,Rami";
+  const humanNames = humanNamesRaw
+    .split(",")
+    .map((n) => n.trim())
+    .filter((n) => n.length > 0);
+
+  return { port, host, dataDir, instance, crewHome, humanNames };
 }
 
 /**

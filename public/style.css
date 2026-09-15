@@ -125,12 +125,14 @@ body {
   background-image: radial-gradient(circle at top center, rgba(139, 92, 246, 0.05) 0%, transparent 50%);
   color: var(--text);
   height: 100vh;
+  height: 100dvh;
+  height: var(--app-height, 100dvh);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-.app { display: flex; flex-direction: column; height: 100vh; }
+.app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; height: var(--app-height, 100dvh); }
 .content { display: flex; flex: 1; overflow: hidden; }
 
 /* ================================================================
@@ -3451,4 +3453,128 @@ body {
   margin: 12px 0 4px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
+}
+
+
+/* ============================================================
+   Notification bell
+   ============================================================ */
+
+#notify-btn { position: relative; }
+
+.notify-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.notify-panel-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-start;
+  padding: 52px 12px 12px;
+}
+
+.notify-panel {
+  width: min(380px, 94vw);
+  max-height: min(70vh, 560px);
+  margin-right: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-bright);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: picker-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.notify-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.notify-panel-actions { display: flex; gap: 6px; }
+
+.notify-mark-btn, .notify-enable-btn {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.notify-panel-list { overflow-y: auto; padding: 6px; }
+
+.notify-row {
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  align-items: flex-start;
+}
+
+.notify-row:hover { background: var(--bg-elevated); }
+.notify-row.unread { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.notify-row.unread:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.notify-row.action .notify-text { font-weight: 600; }
+
+.notify-icon { font-size: 16px; line-height: 1.4; }
+.notify-body { min-width: 0; }
+.notify-text { font-size: 13px; overflow-wrap: anywhere; }
+.notify-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.notify-empty { padding: 24px 12px; text-align: center; color: var(--text-dim); font-size: 13px; }
+
+/* ============================================================
+   Mobile composer: floating pill above the keyboard
+   ============================================================ */
+
+@media (max-width: 560px) {
+  .chat-footer {
+    background: transparent;
+    padding: 4px 8px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+  .input-row {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-bright);
+    border-radius: 24px;
+    box-shadow: var(--shadow-lg);
+    padding: 4px 4px 4px 8px;
+    align-items: flex-end;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  #message-input {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    min-height: 36px;
+  }
+  #message-input:focus { outline: none; background: transparent; }
+  .btn-send { border-radius: 50%; }
+  .notify-panel-overlay { padding: 48px 8px 8px; }
+  .notify-panel { width: 100%; margin-left: 0; }
+  .launch-dialog-box, .crew-panel-box {
+    height: 100dvh;
+    max-height: 100dvh;
+  }
 }

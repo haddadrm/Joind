@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=12">
+  <link rel="stylesheet" href="style.css?v=13">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -17,6 +17,10 @@
         <h1 class="logo"><span class="logo-icon" aria-hidden="true"><i data-lucide="hexagon" width="18" height="18"></i></span><span id="instance-name">Joind</span></h1>
       </div>
       <div class="agent-pills" id="agent-pills" role="list" aria-label="Connected agents"></div>
+      <button class="task-badge" id="notify-btn" onclick="toggleNotifyPanel()" title="Notifications" aria-label="Notifications">
+        <i data-lucide="bell" width="16" height="16" aria-hidden="true"></i>
+        <span id="notify-badge" class="notify-badge" hidden aria-live="polite">0</span>
+      </button>
       <button class="task-badge" id="task-badge" onclick="toggleTaskPanel()" title="Tasks" aria-label="Open task panel">
         <i data-lucide="clipboard-list" width="16" height="16" aria-hidden="true"></i>
         <span class="task-badge-count" id="task-badge-count" aria-live="polite">0</span>
@@ -192,7 +196,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();
