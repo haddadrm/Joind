@@ -110,7 +110,12 @@ function connect() {
   ws = new WebSocket(proto + '//' + location.host + '/ws');
   var dot = document.getElementById('connection-dot');
 
-  ws.onopen = function() { dot.classList.remove('disconnected'); };
+  ws.onopen = function() {
+    dot.classList.remove('disconnected');
+    // Reconcile the bell after every (re)connection: alerts that arrived
+    // while the socket was down exist only server-side until this fetch.
+    if (typeof loadNotifications === 'function') loadNotifications();
+  };
   ws.onmessage = function(e) {
     var event = JSON.parse(e.data);
     switch (event.type) {
@@ -4764,8 +4769,17 @@ var NOTIFY_ICONS = {
 
 function loadNotifications() {
   fetch('/api/notifications').then(function(r) { return r.json(); }).then(function(data) {
-    notifyItems = data.notifications || [];
-    notifyUnread = data.unread || 0;
+    // Merge by id: WS arrivals during the fetch must survive an older
+    // snapshot, and the snapshot must not resurrect rows we marked read.
+    var byId = {};
+    (data.notifications || []).forEach(function(n) { byId[n.id] = n; });
+    notifyItems.forEach(function(n) {
+      if (!byId[n.id] || n.read) byId[n.id] = n;
+    });
+    notifyItems = Object.keys(byId).map(function(k) { return byId[k]; })
+      .sort(function(a, b) { return b.id - a.id; })
+      .slice(0, 100);
+    notifyUnread = notifyItems.reduce(function(acc, n) { return acc + (n.read ? 0 : 1); }, 0);
     renderNotifyBadge();
     if (notifyPanelOpen) renderNotifyPanel();
   }).catch(function() {});
@@ -4837,11 +4851,15 @@ function toggleNotifyPanel() {
   markBtn.className = 'btn notify-mark-btn';
   markBtn.textContent = 'Mark all read';
   markBtn.addEventListener('click', function() {
-    fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    // Capture a cutoff so an alert arriving mid-request stays unread on
+    // both sides instead of being cleared locally but not on the server.
+    var cutoff = notifyItems.length > 0 ? notifyItems[0].id : 0;
+    if (cutoff === 0) return;
+    fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ upToId: cutoff }) })
       .then(function(r) { return r.json(); })
       .then(function(d) {
-        notifyUnread = d.unread || 0;
-        notifyItems.forEach(function(n) { n.read = true; });
+        notifyItems.forEach(function(n) { if (n.id <= cutoff) n.read = true; });
+        notifyUnread = notifyItems.reduce(function(acc, n) { return acc + (n.read ? 0 : 1); }, 0);
         renderNotifyBadge();
         renderNotifyPanel();
       }).catch(function() {});

@@ -962,6 +962,7 @@ app.post("/api/conversations/delete", express.json(), (req, res) => {
     taskStore.deleteForConversation(id);
     reactionStore.deleteForConversation(id);
     editStore.deleteForConversation(id);
+    taskTracker.clearConversation(id);
   }
   res.json({ ok });
 });

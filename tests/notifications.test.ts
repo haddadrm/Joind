@@ -48,12 +48,43 @@ describe("TaskTracker", () => {
     expect(t.classify("task-created", task({ id: 4 }), HUMANS)).toBeNull();
   });
 
-  it("assignee transition is picked once; completion fires once", () => {
+  it("assignee transition is picked once; completion fires once and never re-rings", () => {
     const t = new TaskTracker();
     t.classify("task-created", task({ id: 5 }), HUMANS);
     expect(t.classify("task-updated", task({ id: 5, assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
     expect(t.classify("task-updated", task({ id: 5, assignee: "Codex" }), HUMANS)).toBeNull();
     expect(t.classify("task-updated", task({ id: 5, assignee: "Codex", status: "done" }), HUMANS)?.kind).toBe("task-completed");
+    expect(t.classify("task-updated", task({ id: 5, assignee: "Codex", status: "done", response: "edited" }), HUMANS)).toBeNull();
+  });
+
+  it("keys by conversation so same-numbered tasks in different rooms cannot collide", () => {
+    const t = new TaskTracker();
+    expect(t.classify("task-created", task({ id: 1, conversationId: "roomB", assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
+    t.classify("task-created", task({ id: 1, conversationId: "roomA" }), HUMANS);
+    expect(t.classify("task-updated", task({ id: 1, conversationId: "roomA", assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
+  });
+
+  it("urgent escalation and human reassignment on update ring action-required", () => {
+    const t = new TaskTracker();
+    t.classify("task-created", task({ id: 7 }), HUMANS);
+    expect(t.classify("task-updated", task({ id: 7, priority: "urgent" }), HUMANS)?.kind).toBe("action-required");
+    t.classify("task-created", task({ id: 8, assignee: "Codex" }), HUMANS);
+    expect(t.classify("task-updated", task({ id: 8, assignee: "Admiral" }), HUMANS)?.kind).toBe("action-required");
+  });
+
+  it("an update to a task with no known history stays silent", () => {
+    const t = new TaskTracker();
+    expect(t.classify("task-updated", task({ id: 9, status: "done" }), HUMANS)).toBeNull();
+    expect(t.classify("task-updated", task({ id: 9, status: "done" }), HUMANS)).toBeNull();
+  });
+
+  it("clearConversation drops only that conversation's state", () => {
+    const t = new TaskTracker();
+    t.classify("task-created", task({ id: 1, conversationId: "gone" }), HUMANS);
+    t.classify("task-created", task({ id: 1, conversationId: "kept" }), HUMANS);
+    t.clearConversation("gone");
+    expect(t.classify("task-updated", task({ id: 1, conversationId: "gone", assignee: "Codex" }), HUMANS)).toBeNull();
+    expect(t.classify("task-updated", task({ id: 1, conversationId: "kept", assignee: "Codex" }), HUMANS)?.kind).toBe("task-picked");
   });
 });
 

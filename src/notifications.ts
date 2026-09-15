@@ -91,22 +91,44 @@ function truncate(text: string, max = 120): string {
 interface TaskSnapshot {
   assignee?: string;
   status: string;
+  priority: string;
 }
 
 /**
  * Stateful task classifier: transitions matter (picked = assignee appears,
- * completed = open becomes done), so the store keeps last-seen snapshots.
+ * completed = open becomes done, escalation = priority turns urgent), so the
+ * store keeps last-seen snapshots keyed by conversation AND task id (task
+ * ids restart per conversation). Done snapshots are retained so a later
+ * update to a finished task cannot re-ring; an update to a task never seen
+ * before stays silent (no invented transition after a restart).
  */
 export class TaskTracker {
-  private snapshots = new Map<number, TaskSnapshot>();
+  private snapshots = new Map<string, TaskSnapshot>();
+
+  private key(task: Task): string {
+    return `${task.conversationId}:${task.id}`;
+  }
+
+  /** Drop all state for a deleted conversation. */
+  clearConversation(conversationId: string): void {
+    const prefix = `${conversationId}:`;
+    for (const k of this.snapshots.keys()) {
+      if (k.startsWith(prefix)) this.snapshots.delete(k);
+    }
+  }
 
   classify(eventType: string, task: Task, humanNames: string[]): Classified | null {
-    const prev = this.snapshots.get(task.id);
-    this.snapshots.set(task.id, { assignee: task.assignee, status: task.status });
+    const isHuman = (name?: string): boolean =>
+      name != null && humanNames.some((n) => n.toLowerCase() === name.toLowerCase());
+    const prev = this.snapshots.get(this.key(task));
+    this.snapshots.set(this.key(task), {
+      assignee: task.assignee,
+      status: task.status,
+      priority: task.priority,
+    });
 
     if (eventType === "task-created") {
-      const forHuman = task.assignee != null && humanNames.some((n) => n.toLowerCase() === task.assignee?.toLowerCase());
-      if (forHuman || task.priority === "urgent") {
+      if (isHuman(task.assignee) || task.priority === "urgent") {
         return { kind: "action-required", text: `Task for you: ${truncate(task.title)}`, refTaskId: task.id };
       }
       if (task.assignee) {
@@ -116,11 +138,21 @@ export class TaskTracker {
     }
 
     if (eventType === "task-updated") {
-      if (task.status === "done" && prev?.status !== "done") {
-        this.snapshots.delete(task.id);
-        return { kind: "task-completed", text: `Done: ${truncate(task.title)}`, refTaskId: task.id };
+      // Unknown history (e.g. after a restart): record and stay silent
+      // rather than inventing a transition.
+      if (!prev) return null;
+      if (task.status === "done") {
+        if (prev.status !== "done") {
+          return { kind: "task-completed", text: `Done: ${truncate(task.title)}`, refTaskId: task.id };
+        }
+        return null;
       }
-      if (task.assignee && task.assignee !== prev?.assignee && task.status !== "done") {
+      const becameHumanAssigned = isHuman(task.assignee) && !isHuman(prev.assignee);
+      const becameUrgent = task.priority === "urgent" && prev.priority !== "urgent";
+      if (becameHumanAssigned || becameUrgent) {
+        return { kind: "action-required", text: `Task for you: ${truncate(task.title)}`, refTaskId: task.id };
+      }
+      if (task.assignee && task.assignee !== prev.assignee) {
         return { kind: "task-picked", text: `${task.assignee} took: ${truncate(task.title)}`, refTaskId: task.id };
       }
     }
