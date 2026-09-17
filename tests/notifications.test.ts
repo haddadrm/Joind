@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyMessage, TaskTracker, NotificationStore } from "../src/notifications.js";
+import { classifyMessage, isNotifiable, TaskTracker, NotificationStore } from "../src/notifications.js";
 import type { ChatMessage } from "../src/room.js";
 import type { Task } from "../src/tasks.js";
 
@@ -17,6 +17,15 @@ function task(overrides: Partial<Task>): Task {
 }
 
 describe("classifyMessage", () => {
+  it("targeted DMs are never notifiable, even when they mention a human", () => {
+    const dm = msg("Codex", "@Rami approve this privately", { to: ["Rami"] });
+    expect(isNotifiable(dm)).toBe(false);
+    const decisionDm = msg("Codex", "@Rami pick one?", { to: ["Rami"], choices: ["A", "B"] });
+    expect(isNotifiable(decisionDm)).toBe(false);
+    expect(isNotifiable(msg("Codex", "@Rami public approval"))).toBe(true);
+    expect(isNotifiable(msg("system", "Codex joined the chat"))).toBe(true);
+  });
+
   it("classifies joins, leaves, and session markers from system messages", () => {
     expect(classifyMessage(msg("system", "Curzon joined the chat"), HUMANS)?.kind).toBe("crew-joined");
     expect(classifyMessage(msg("system", "Codex left the chat"), HUMANS)?.kind).toBe("crew-left");

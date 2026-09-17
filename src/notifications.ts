@@ -20,6 +20,15 @@ export type NotificationKind =
   | "session-started"
   | "session-ended";
 
+/**
+ * Targeted DMs never enter the notification feed: notification text is
+ * broadcast to every client, which would leak the DM body. The DM unread
+ * badge already signals them.
+ */
+export function isNotifiable(m: ChatMessage): boolean {
+  return !(Array.isArray(m.to) && m.to.length > 0);
+}
+
 export interface Notification {
   id: number;
   kind: NotificationKind;

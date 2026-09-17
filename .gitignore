@@ -9,6 +9,8 @@ dist/
 .env
 .env.*
 !.env.example
+joind-web-token
+joind-web-name
 
 # Runtime / personalisation data — do NOT publish to cloud repo
 data/

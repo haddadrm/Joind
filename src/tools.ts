@@ -148,7 +148,8 @@ export function registerTools(
       const online = room.whoNames();
 
       // Include last 15 messages so the agent has immediate context
-      const recent = room.read(undefined, 15);
+      // (filtered to what this agent may see: public + DMs addressed to them)
+      const recent = room.read(undefined, 15, undefined, name);
       const recentText = recent.length > 0
         ? "\n\nRecent messages:\n" + recent.map((m) => `[#${m.id} ${m.sender}] ${m.text}`).join("\n")
         : "";
@@ -380,7 +381,7 @@ export function registerTools(
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
-      const results = target.room.search(query, limit ?? 20);
+      const results = target.room.search(query, limit ?? 20, sender);
       if (results.length === 0) {
         return { content: [{ type: "text" as const, text: `No messages found matching "${query}"` }] };
       }
@@ -540,7 +541,7 @@ export function registerTools(
           return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
         }
         const cursor = cursorStore.get(name);
-        const newMsgs = target.room.read(cursor, 100000);
+        const newMsgs = target.room.read(cursor, 100000, undefined, name);
         const unread = cursorStore.getUnreadCount(name, newMsgs);
         if (unread.count === 0) {
           return { content: [{ type: "text" as const, text: "No unread messages" }] };

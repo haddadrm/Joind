@@ -97,7 +97,10 @@ export function waitForMessage(
   const deliverable = (m: ChatMessage): boolean =>
     m.sender !== sender && visibleTo(m, sender) && (!mentionsOnly || mentionsAgent(m.text, sender));
 
-  const highWater = room.read(undefined, 1)[0]?.id ?? 0;
+  // High-water mark must be the room's true max id regardless of visibility:
+  // read() is fail-closed, so a newest-message-that-is-a-DM would clamp the
+  // cursor below a recipient's real cursor and redeliver the DM forever.
+  const highWater = room.readAll(1)[0]?.id ?? 0;
   const cursor = Math.min(sanitizeSince(since) ?? 0, highWater);
 
   // Ascending page: everything visible after the cursor, oldest first,

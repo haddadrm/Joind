@@ -105,13 +105,114 @@ function saveSoundSettings() {
 }
 
 // --- WebSocket ---
+// Name the socket opened with; tracked as the last server-accepted name.
+// connect() reuses it so a reconnect never claims an unregistered name.
+var wsName = null;
+// Set when a rename lands while no OPEN socket can carry it; onopen re-checks.
+var pendingRename = false;
+// Previous registered name, remembered while a web-rename request is in flight.
+var renameAttempt = null;
+// Consecutive 4401/4403 closes; after a few, a user-supplied token is re-asked.
+var wsAuthFailures = 0;
+
+// Server-issued token: injected into index.html when generated, otherwise the
+// browser supplies it once per tab session (sessionStorage) via a prompt.
+function webToken() {
+  return window.__JOIND_TOKEN || sessionStorage.getItem('joind-web-token') || '';
+}
+
+// Ask for the web token (user-set mode). Reuses the existing modal classes.
+// `after` runs once a token is stored.
+function promptWebToken(after) {
+  var overlay = document.createElement('div');
+  overlay.className = 'session-modal-overlay';
+  var modal = document.createElement('div');
+  modal.className = 'session-modal';
+  var title = document.createElement('h3');
+  title.textContent = 'Web token required';
+  var hint = document.createElement('p');
+  hint.textContent = 'This Joind uses a user-set web token. Enter it to view DMs (kept for this tab session only).';
+  hint.style.fontSize = '13px';
+  hint.style.opacity = '0.8';
+  var input = document.createElement('input');
+  input.type = 'password';
+  input.className = 'launch-input';
+  input.placeholder = 'web token';
+  var btnRow = document.createElement('div');
+  btnRow.style.marginTop = '10px';
+  btnRow.style.textAlign = 'right';
+  var okBtn = document.createElement('button');
+  okBtn.className = 'btn btn-primary';
+  okBtn.textContent = 'Connect';
+  function submit() {
+    var value = input.value.trim();
+    if (!value) return;
+    sessionStorage.setItem('joind-web-token', value);
+    overlay.remove();
+    if (after) after();
+  }
+  okBtn.addEventListener('click', submit);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submit(); });
+  btnRow.appendChild(okBtn);
+  modal.appendChild(title); modal.appendChild(hint); modal.appendChild(input); modal.appendChild(btnRow);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  input.focus();
+}
+
+// Ensure a token exists before connecting; prompt only when neither the
+// injected value nor sessionStorage has one.
+function ensureWebToken(after) {
+  if (webToken()) { if (after) after(); return; }
+  promptWebToken(after);
+}
+
+// Register the current human name against the token. The server only accepts
+// a WS ?name= equal to this registration. `after` runs either way: on failure
+// we still connect and let the server fail closed (4403/reconnect).
+function registerWebName(after) {
+  fetch('/api/web/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: webToken(), name: myName() }) })
+    .then(function(r) { if (after) after(r.ok); })
+    .catch(function() { if (after) after(false); });
+}
+
+// A rejected rename: go back to the last registered name everywhere, without
+// firing input events (no loops). Server-side registration is untouched.
+function revertRename() {
+  if (!renameAttempt) return;
+  var prev = renameAttempt;
+  renameAttempt = null;
+  wsName = prev;
+  localStorage.setItem('joind-sender-name', prev);
+  var senderInput = document.getElementById('sender-name');
+  if (senderInput) senderInput.value = prev;
+  var display = document.getElementById('you-name-display');
+  if (display) {
+    display.textContent = prev;
+    display.style.color = getSenderColor(prev);
+  }
+}
+
 function connect() {
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  // Always claim the last server-accepted name; renames flow through
+  // web-rename on the open socket, never through a fresh ?name=.
+  wsName = wsName || myName();
+  ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(webToken()) + '&name=' + encodeURIComponent(wsName));
   var dot = document.getElementById('connection-dot');
 
   ws.onopen = function() {
     dot.classList.remove('disconnected');
+    wsAuthFailures = 0;
+    // A rename that landed while the socket was down is applied in place:
+    // this socket is bound to the previously accepted name, which is allowed
+    // to rename. Exactly one web-rename goes out; wsName updates on -ok.
+    if (pendingRename || myName() !== wsName) {
+      pendingRename = false;
+      renameAttempt = wsName;
+      ws.send(JSON.stringify({ type: 'web-rename', name: myName() }));
+    }
     // Reconcile the bell after every (re)connection: alerts that arrived
     // while the socket was down exist only server-side until this fetch.
     if (typeof loadNotifications === 'function') loadNotifications();
@@ -139,6 +240,7 @@ function connect() {
           renderTaskBadgeFromCount(0, false);
         }
         renderConversationList();
+        renderDmList();
         break;
       case 'conversation-created':
       case 'conversation-renamed':
@@ -150,8 +252,23 @@ function connect() {
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) {
           break;
         }
-        hideWelcome();
         allMessages.push(event.data);
+        // A targeted message may introduce a new DM partner
+        if (event.data.to) renderDmList();
+        // Filter: only render messages that belong to the current view
+        // (channel view skips DMs; DM view skips channels and other DMs)
+        if (!messageInCurrentView(event.data)) {
+          // Arrival notification is separate from pane membership: a DM
+          // addressed to the user still sounds and flags its sidebar row
+          // even while another pane is open.
+          if (event.data.to && event.data.to.indexOf(myName()) >= 0 && event.data.sender !== 'system') {
+            playSound(event.data.sender);
+            dmUnread[event.data.sender] = (dmUnread[event.data.sender] || 0) + 1;
+            renderDmList();
+          }
+          break;
+        }
+        hideWelcome();
         appendMessage(event.data);
         if (event.data.sender !== 'system') playSound(event.data.sender);
         if (activeConversation) {
@@ -164,6 +281,7 @@ function connect() {
         staleNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
         agents.push(event.data); renderPills();
+        renderDmList();
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
       case 'leave':
@@ -173,6 +291,7 @@ function connect() {
         typingNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
         renderPills();
+        renderDmList();
         renderTypingBar();
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
@@ -182,6 +301,7 @@ function connect() {
         onlineNames.delete(d.oldName); onlineNames.add(d.newName);
         agents = agents.filter(function(a) { return a.name !== d.oldName; });
         agents.push(d.agent); renderPills();
+        renderDmList();
         // Update cached terminal data with new name
         lastScanResults.forEach(function(t) {
           if (t.tabTitle === d.oldName) t.tabTitle = d.newName;
@@ -252,6 +372,14 @@ function connect() {
       case 'roles-updated':
         availableRoles = event.data;
         break;
+      case 'web-rename-ok':
+        // Server re-registered the name and rebound this socket; nothing else needed.
+        renameAttempt = null;
+        if (event.data && event.data.name) wsName = event.data.name;
+        break;
+      case 'web-rename-error':
+        revertRename();
+        break;
       case 'agent-status':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         agents = agents.map(function(a) { return a.name === event.data.name ? event.data : a; });
@@ -279,7 +407,22 @@ function connect() {
         break;
     }
   };
-  ws.onclose = function() { dot.classList.add('disconnected'); setTimeout(connect, 2000); };
+  ws.onclose = function(e) {
+    dot.classList.add('disconnected');
+    // Repeated auth rejections with a user-supplied token: drop it and ask
+    // again (covers typos and stale sessionStorage tokens). Injected-token
+    // mode keeps the plain reconnect loop.
+    if (e && (e.code === 4401 || e.code === 4403)) {
+      wsAuthFailures++;
+      if (wsAuthFailures >= 3 && !window.__JOIND_TOKEN) {
+        wsAuthFailures = 0;
+        sessionStorage.removeItem('joind-web-token');
+        promptWebToken(function() { connect(); });
+        return;
+      }
+    }
+    setTimeout(connect, 2000);
+  };
 }
 
 // --- Agent pills with popover ---
@@ -547,6 +690,8 @@ function renderMessages(msgs) {
   var c = document.getElementById('messages');
   c.textContent = '';
   lastSender = null;
+  lastRenderedDayKey = null;
+  msgs = currentViewMessages(msgs);
   if (msgs.length > 0) {
     msgs.forEach(function(m) { appendMessage(m, false); });
     scrollToBottom();
@@ -560,6 +705,23 @@ function appendMessage(msg, scroll) {
   var c = document.getElementById('messages');
   var el = document.createElement('div');
   el.dataset.id = msg.id || '';
+
+  // Day divider: inserted before a message whose local calendar date differs
+  // from the last rendered one. The comparison uses a stable date key (not
+  // the relative label, so "Today" never masks a midnight crossing); the
+  // display label is computed separately at insert time. Carries no data-id
+  // and no .message class on purpose (deletion and scroll logic query those).
+  var dayKey = new Date(msg.timestamp).toDateString();
+  if (dayKey !== lastRenderedDayKey) {
+    var divider = document.createElement('div');
+    divider.className = 'day-divider';
+    var dividerLabel = document.createElement('span');
+    dividerLabel.textContent = formatDay(msg.timestamp);
+    divider.appendChild(dividerLabel);
+    c.appendChild(divider);
+    lastRenderedDayKey = dayKey;
+    lastSender = null; // divider breaks message grouping
+  }
 
   var isGrouped = msg.sender !== 'system' && msg.sender === lastSender;
 
@@ -584,10 +746,11 @@ function appendMessage(msg, scroll) {
     var body = document.createElement('div');
     body.className = 'msg-body';
 
-    // Reply quote (before header)
+    // Reply quote (before header): only when the quoted message is visible
+    // in the current view, so a quote never leaks across DM threads
     if (msg.replyTo) {
       var orig = allMessages.find(function(m) { return m.id === msg.replyTo; });
-      if (orig) {
+      if (orig && messageInCurrentView(orig)) {
         var quote = document.createElement('div');
         quote.className = 'reply-quote';
         quote.textContent = orig.sender + ': ' + (orig.text || '').slice(0, 80);
@@ -764,7 +927,7 @@ function renderChoices(container, msg) {
       fetch('/api/message/' + msg.id + '/choose', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value: opt, by: by })
+        body: JSON.stringify({ value: opt, by: by, token: webToken() })
       }).catch(function() { btn.disabled = false; });
     });
     container.appendChild(btn);
@@ -952,9 +1115,10 @@ function sendMessage() {
     return;
   }
 
-  var payload = { sender: sender.value || 'human', text: text || '[image]' };
+  var payload = { sender: sender.value || 'human', text: text || '[image]', token: webToken() };
   if (replyingTo) payload.replyTo = replyingTo.id;
   if (pendingImage) payload.image = pendingImage.url;
+  if (activeDm) payload.to = [activeDm];
   input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
   syncHighlight();
   clearReply();
@@ -979,7 +1143,9 @@ function postDecisionCard(question, choices) {
     sender: sender.value || 'human',
     text: question,
     choices: choices,
+    token: webToken(),
   };
+  if (activeDm) payload.to = [activeDm];
   fetch('/api/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1068,13 +1234,13 @@ function clearChat() { document.getElementById('messages').textContent = ''; }
 
 function exportChat() {
   // Markdown export of the active conversation (existing behaviour).
-  window.open('/api/export', '_blank');
+  window.open('/api/export?token=' + encodeURIComponent(webToken()), '_blank');
 }
 
 function exportConversationJson(convId, name) {
   // Round-trippable JSON bundle for moving a conversation between instances.
   var safe = (name || convId).replace(/[^a-z0-9-]/gi, '_');
-  window.open('/api/conversations/' + encodeURIComponent(convId) + '/export.json', '_blank');
+  window.open('/api/conversations/' + encodeURIComponent(convId) + '/export.json?token=' + encodeURIComponent(webToken()), '_blank');
   void safe;
 }
 
@@ -1102,7 +1268,7 @@ function openImportDialog() {
             fetch('/api/conversations/select', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: result.conversation.id }),
+              body: JSON.stringify({ id: result.conversation.id, viewer: myName(), token: webToken() }),
             });
           }
         }).catch(function(err) {
@@ -1761,6 +1927,15 @@ function formatTime(ts) {
 function formatTimeShort(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+function formatDay(ts) {
+  var d = new Date(ts);
+  var now = new Date();
+  var dayStart = function(x) { return new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime(); };
+  var diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+  if (diffDays <= 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  return d.toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
+}
 
 // --- "You" pill ---
 function setupYouPill() {
@@ -1779,6 +1954,16 @@ function setupYouPill() {
     display.textContent = name;
     display.style.color = getSenderColor(name);
     localStorage.setItem('joind-sender-name', name);
+    // Renames flow only through the authenticated socket (web-rename); HTTP
+    // register is first-boot only and would 409 here. If no OPEN socket can
+    // carry the rename now, onopen applies it once the socket is up.
+    if (!wsName || name === wsName || !ws) return;
+    if (ws.readyState === WebSocket.OPEN) {
+      renameAttempt = wsName;
+      ws.send(JSON.stringify({ type: 'web-rename', name: name }));
+    } else {
+      pendingRename = true; // CONNECTING/CLOSING/CLOSED: applied in onopen
+    }
   }
   senderInput.addEventListener('input', syncName);
   senderInput.addEventListener('change', syncName);
@@ -1915,9 +2100,12 @@ function setupYouPill() {
 var activeConversation = null;
 var conversationList = [];
 var convSearchQuery = '';
+var activeDm = null; // name of the agent in the direct-message view, null = channel view
+var lastRenderedDayKey = null; // calendar-date key of the last rendered message (for day dividers)
+var dmUnread = {}; // per-partner unread DM counts, keyed by agent name
 
 function loadConversations() {
-  fetch('/api/conversations').then(function(r) { return r.json(); }).then(function(data) {
+  fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).then(function(data) {
     activeConversation = data.active;
     conversationList = data.conversations || [];
     renderConversationList();
@@ -1927,11 +2115,17 @@ function loadConversations() {
 function selectConversation(id) {
   // Close mobile drawer if open
   if (isMobileView()) closeMobileDrawer();
+  activeDm = null;
+  lastRenderedDayKey = null;
+  // A reply target or draft image from another view must not leak into this channel
+  clearReply();
+  clearImagePreview();
   // Optimistic: immediately highlight the selected conversation + clear chat
   var meta = conversationList.find(function(c) { return c.id === id; });
   if (meta) {
     activeConversation = meta;
     renderConversationList();
+    renderDmList();
   }
   var c = document.getElementById('messages');
   c.textContent = '';
@@ -1944,20 +2138,14 @@ function selectConversation(id) {
   c.appendChild(loader);
 
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: id }) }).then(function(r) { return r.json(); }).then(function(data) {
+    body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.conversation) {
         activeConversation = data.conversation;
         allMessages = (data.messages || []).slice();
         agents = data.agents || [];
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
-        lastSender = null;
         renderPills();
-        c.textContent = '';
-        if (allMessages.length > 0) {
-          allMessages.forEach(function(m) { appendMessage(m, false); });
-          scrollToBottom();
-        }
-        renderConversationList();
+        renderChannelView();
         // Refresh tasks for the new conversation
         tasks = [];
         loadTaskCount(activeConversation.id);
@@ -2012,6 +2200,7 @@ function renderConversationList() {
     activeEl.className = 'active-session empty';
     activeEl.onclick = null;
   }
+  syncChannelHeader();
 
   // Filter
   var items = conversationList;
@@ -2068,6 +2257,159 @@ function renderConversationList() {
 
     list.appendChild(li);
   });
+}
+
+// --- Direct messages ---
+function myName() {
+  var el = document.getElementById('sender-name');
+  return (el && el.value) || 'human';
+}
+
+// Messages that belong to the current view: in DM view, targeted messages
+// between the user and activeDm; in channel view, public messages only.
+function currentViewMessages(msgs) {
+  if (activeDm) {
+    var me = myName();
+    return msgs.filter(function(m) {
+      return (m.sender === activeDm && m.to && m.to.indexOf(me) >= 0) ||
+             (m.sender === me && m.to && m.to.indexOf(activeDm) >= 0);
+    });
+  }
+  return msgs.filter(function(m) { return !m.to; });
+}
+
+function messageInCurrentView(m) {
+  if (activeDm) {
+    var me = myName();
+    return (m.sender === activeDm && m.to && m.to.indexOf(me) >= 0) ||
+           (m.sender === me && m.to && m.to.indexOf(activeDm) >= 0);
+  }
+  return !m.to;
+}
+
+function renderDmList() {
+  var list = document.getElementById('dm-list');
+  if (!list) return;
+  list.textContent = '';
+  var me = myName();
+  var names = [];
+  agents.forEach(function(a) {
+    if (names.indexOf(a.name) < 0) names.push(a.name);
+  });
+  // Surface anyone who targeted (or was targeted by) the user, even if offline
+  allMessages.forEach(function(m) {
+    if (!m.to) return;
+    var other = null;
+    if (m.sender === me) {
+      for (var i = 0; i < m.to.length; i++) {
+        if (m.to[i] !== me) { other = m.to[i]; break; }
+      }
+    } else if (m.to.indexOf(me) >= 0) {
+      other = m.sender;
+    }
+    if (other && names.indexOf(other) < 0) names.push(other);
+  });
+  if (names.length === 0) {
+    var empty = document.createElement('li');
+    empty.className = 'empty-state';
+    empty.textContent = 'No agents connected';
+    list.appendChild(empty);
+    return;
+  }
+  names.forEach(function(name) {
+    var unread = dmUnread[name] || 0;
+    var li = document.createElement('li');
+    li.className = 'dm-item' + (activeDm === name ? ' active' : '') + (unread > 0 ? ' dm-unread' : '');
+    li.tabIndex = 0;
+    li.setAttribute('role', 'button');
+    if (activeDm === name) li.setAttribute('aria-current', 'true');
+
+    var dot = document.createElement('span');
+    dot.className = 'dm-dot' + (onlineNames.has(name) ? ' online' : '');
+
+    var av = document.createElement('span');
+    av.className = 'dm-avatar';
+    av.style.background = getSenderColor(name);
+    av.textContent = name.charAt(0).toUpperCase();
+
+    var nm = document.createElement('span');
+    nm.className = 'dm-name';
+    nm.textContent = name;
+
+    li.appendChild(dot);
+    li.appendChild(av);
+    li.appendChild(nm);
+    if (unread > 0) {
+      var badge = document.createElement('span');
+      badge.className = 'dm-unread-count';
+      badge.textContent = unread;
+      li.appendChild(badge);
+    }
+    li.addEventListener('click', function() { selectDm(name); });
+    li.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectDm(name);
+      }
+    });
+    list.appendChild(li);
+  });
+}
+
+function selectDm(name) {
+  activeDm = name;
+  delete dmUnread[name];
+  lastSender = null;
+  lastRenderedDayKey = null;
+  // A reply target or draft image from another view must not leak into this DM
+  clearReply();
+  clearImagePreview();
+  // Close mobile drawer if open
+  if (isMobileView()) closeMobileDrawer();
+  renderConversationList();
+  renderDmList();
+  syncChannelHeader();
+  var c = document.getElementById('messages');
+  c.textContent = '';
+  currentViewMessages(allMessages).forEach(function(m) { appendMessage(m, false); });
+  scrollToBottom();
+  syncInputPlaceholder();
+  document.getElementById('message-input').focus();
+}
+
+// Render the channel view from the already-loaded allMessages/agents state.
+// Shared by the conversation-select fetch handler and view switches that
+// return from a DM (e.g. opening a channel message from search results).
+function renderChannelView() {
+  activeDm = null;
+  lastSender = null;
+  lastRenderedDayKey = null;
+  clearReply();
+  clearImagePreview();
+  var c = document.getElementById('messages');
+  c.textContent = '';
+  currentViewMessages(allMessages).forEach(function(m) { appendMessage(m, false); });
+  if (allMessages.length > 0) scrollToBottom();
+  renderConversationList();
+  renderDmList();
+  syncInputPlaceholder();
+}
+
+// Channel header spans, kept in sync with the active-session indicator
+function syncChannelHeader() {
+  var title = document.getElementById('channel-title');
+  var topic = document.getElementById('channel-topic');
+  if (!title || !topic) return;
+  if (activeDm) {
+    title.textContent = activeDm;
+    topic.textContent = 'Direct message';
+  } else if (activeConversation) {
+    title.textContent = '# ' + activeConversation.name;
+    topic.textContent = agents.length + ' member(s)';
+  } else {
+    title.textContent = '#';
+    topic.textContent = '';
+  }
 }
 
 function showConvMenu(evt, conv) {
@@ -2711,7 +3053,8 @@ function syncInputPlaceholder() {
   if (!input) return;
   var w = window.innerWidth;
   var ph;
-  if (w <= 400) ph = 'Type a message…';
+  if (activeDm) ph = 'Message ' + activeDm;
+  else if (w <= 400) ph = 'Type a message…';
   else if (w <= 560) ph = 'Type a message… @name · /decide';
   else ph = 'Type a message... @name to mention · /decide for a poll';
   if (input.placeholder !== ph) input.placeholder = ph;
@@ -2725,7 +3068,12 @@ document.addEventListener('DOMContentLoaded', function() {
   syncInputPlaceholder();
   updateSendBtn();
   updateMuteBtn();
-  connect();
+  // Prompt for the token first when the server uses a user-set (non-injected)
+  // one, then first-boot register -> connect (registerWebName runs either way;
+  // the server fails closed if the name was not accepted).
+  ensureWebToken(function() {
+    registerWebName(function() { connect(); });
+  });
   loadTemplates();
   // Decide popover wiring
   var decideAdd = document.getElementById('decide-add');
@@ -2891,7 +3239,7 @@ function openLaunchDialog(preselectCrewName) {
   Promise.all([
     fetch('/api/crew').then(function(r) { return r.json(); }).catch(function() { return []; }),
     fetch('/api/harnesses').then(function(r) { return r.json(); }).catch(function() { return []; }),
-    fetch('/api/conversations').then(function(r) { return r.json(); }).catch(function() { return { conversations: [] }; }),
+    fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).catch(function() { return { conversations: [] }; }),
     fetch('/api/launcher/terminals').then(function(r) { return r.json(); }).catch(function() { return { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } }; })
   ]).then(function(results) {
     var crewList = results[0];
@@ -4621,7 +4969,7 @@ function sendReaction(messageId, emoji) {
 
 function updateReactionPills(messageId) {
   // Refresh reaction pills from server
-  fetch('/api/message/' + messageId)
+  fetch('/api/message/' + messageId + '?viewer=' + encodeURIComponent(myName()) + '&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.json(); })
     .then(function() {
       // Fetch all reactions for the active conversation and rebuild for this message
@@ -4705,11 +5053,33 @@ function closeSearch() {
   document.getElementById('search-results').textContent = '';
   document.getElementById('search-input').value = '';
 }
+// Switch to the view that owns a message, then reveal it. Targeted
+// messages open their DM thread; channel messages return to channel view.
+function openMessageInView(msg) {
+  if (msg.to) {
+    var me = myName();
+    var partner = null;
+    if (msg.sender === me) {
+      for (var i = 0; i < msg.to.length; i++) {
+        if (msg.to[i] !== me) { partner = msg.to[i]; break; }
+      }
+    } else if (msg.to.indexOf(me) >= 0) {
+      partner = msg.sender;
+    }
+    // A targeted message not involving the user has no view to open here
+    if (!partner) return;
+    if (activeDm !== partner) selectDm(partner);
+  } else if (activeDm) {
+    renderChannelView();
+  }
+  scrollToMessage(msg.id);
+}
+
 function doSearch() {
   var q = document.getElementById('search-input').value.trim();
   var results = document.getElementById('search-results');
   if (!q) { results.textContent = ''; return; }
-  fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=20')
+  fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=20&viewer=' + encodeURIComponent(myName()) + '&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.json(); })
     .then(function(data) {
       results.textContent = '';
@@ -4734,12 +5104,7 @@ function doSearch() {
         item.appendChild(text);
         item.appendChild(id);
         item.addEventListener('click', function() {
-          var el = document.querySelector('.message[data-id="' + r.message.id + '"]');
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            el.classList.add('highlight');
-            setTimeout(function() { el.classList.remove('highlight'); }, 2000);
-          }
+          openMessageInView(r.message);
           closeSearch();
         });
         results.appendChild(item);

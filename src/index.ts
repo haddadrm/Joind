@@ -20,10 +20,11 @@ import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { ensureDir } from "./persist.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
-import { NotificationStore, TaskTracker, classifyMessage, type Classified } from "./notifications.js";
+import { NotificationStore, TaskTracker, classifyMessage, isNotifiable, type Classified } from "./notifications.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
+import { visibleToViewer, type ChatMessage } from "./room.js";
 import { registerTools } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
@@ -31,7 +32,7 @@ import { CursorStore } from "./cursors.js";
 import { EditStore } from "./edits.js";
 import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv } from "./terminals.js";
 import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from "./crew.js";
-import { loadConfig, acquireLock } from "./config.js";
+import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webNamePath, validWebName, canRegister } from "./config.js";
 import type { CrewFolder } from "./crew.js";
 import { scaffoldCrewMember } from "./scaffold.js";
 import { buildIdentityKit } from "./identity-kit.js";
@@ -234,6 +235,7 @@ function pushNotification(classified: Classified | null, conversationId: string)
 
 manager.on("room", (event) => {
   if (event.type === "message" && event.data) {
+    if (!isNotifiable(event.data as Parameters<typeof classifyMessage>[0])) return;
     pushNotification(
       classifyMessage(event.data as Parameters<typeof classifyMessage>[0], CONFIG.humanNames),
       event.conversationId as string
@@ -268,13 +270,32 @@ app.post("/api/notifications/read", express.json(), (req, res) => {
 });
 
 // Forward conversation room events to WebSocket clients (scoped by active conversation)
+// Human viewer name per WebSocket client (from the ?name= connect param); used to
+// skip targeted messages that client is not allowed to see.
+const clientNames = new Map<WebSocket, string>();
+
+// The human viewer name registered for this token (POST /api/web/register).
+// Loaded at startup; the WS handshake rejects any other ?name=.
+let registeredWebName: string | null = loadWebName(DATA_DIR);
+
 manager.on("room", (event) => {
   // Include conversationId so the web UI can filter
   const msg = JSON.stringify(event);
+  const data = event.data as { to?: unknown; id?: number } | undefined;
+  const targeted = event.type === "message" && Array.isArray(data?.to) && (data!.to as unknown[]).length > 0;
+  // Choice resolutions carry selected text; they follow the visibility of the
+  // original message. The event payload is { id, response } (room.ts
+  // chooseMessage). Missing original: fail closed, broadcast to no one.
+  const choiceOrig =
+    event.type === "message-choice"
+      ? manager.getRoom(event.conversationId)?.getMessageById(data?.id as number)
+      : undefined;
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(msg);
-    }
+    if (client.readyState !== WebSocket.OPEN) continue;
+    // Targeted messages reach only the sender and named recipients (fail closed)
+    if (targeted && !visibleToViewer(event.data as ChatMessage, clientNames.get(client))) continue;
+    if (event.type === "message-choice" && (!choiceOrig || !visibleToViewer(choiceOrig, clientNames.get(client)))) continue;
+    client.send(msg);
   }
 
   // Hook session engine into message stream
@@ -305,9 +326,17 @@ reactionStore.on("reaction", (event) => {
 
 // Forward edit events to WebSocket clients
 editStore.on("edit", (event) => {
+  // Edits carry the new message text, so a targeted message's edit may only
+  // reach clients allowed to see the original. Unknown message: fail closed.
+  const room = event.conversationId ? manager.getRoom(event.conversationId) : undefined;
+  const orig = room
+    ? room.getMessageById((event.data as { messageId: number }).messageId)
+    : undefined;
   const msg = JSON.stringify(event);
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(msg);
+    if (client.readyState !== WebSocket.OPEN) continue;
+    if (!orig || !visibleToViewer(orig, clientNames.get(client))) continue;
+    client.send(msg);
   }
 });
 
@@ -322,7 +351,31 @@ manager.on("global", (event) => {
 });
 
 // Send current state on new WebSocket connection
-wss.on("connection", (ws) => {
+// Thin wiring: token check, then name-vs-registration check (all decision
+// logic lives in the helpers below so the server boot path stays readable).
+wss.on("connection", (ws, req) => {
+  // Authenticate the browser before anything else: no valid web token, no
+  // socket (and therefore no DM content). 4401 = unauthorized.
+  let providedToken: string | undefined;
+  try {
+    providedToken = new URL(req.url ?? "", "http://localhost").searchParams.get("token") ?? undefined;
+  } catch {
+    providedToken = undefined;
+  }
+  if (!tokensEqual(providedToken, CONFIG.webToken)) {
+    ws.close(4401, "unauthorized");
+    return;
+  }
+  // The viewer name must match the name registered for this token; a token
+  // holder cannot claim to be someone else. 4403 = forbidden.
+  const viewerName = registeredViewerName(req);
+  if (viewerName === null) {
+    ws.close(4403, "forbidden");
+    return;
+  }
+  clientNames.set(ws, viewerName);
+  ws.on("close", () => clientNames.delete(ws));
+  ws.on("message", (raw) => handleWebControl(ws, raw));
   // Lazy loading: only send conversation index on connect.
   // Messages load when the user selects a conversation.
   const activeMeta = manager.getActiveMeta();
@@ -333,7 +386,7 @@ wss.on("connection", (ws) => {
       type: "init",
       data: {
         agents: activeRoom?.who() ?? [],
-        messages: activeRoom ? activeRoom.read(undefined, 100) : [],
+        messages: activeRoom ? activeRoom.read(undefined, 100, undefined, viewerName) : [],
         conversations: manager.listConversations(),
         activeConversation: activeMeta,
         openTaskCount: activeId ? taskStore.countOpen(activeId) : 0,
@@ -345,6 +398,53 @@ wss.on("connection", (ws) => {
     })
   );
 });
+
+/**
+ * Resolve the ?name= claim against the registered web name. Returns the
+ * viewer name when it matches exactly, null otherwise (fail closed: no
+ * registered name, or any mismatch).
+ */
+function registeredViewerName(req: { url?: string }): string | null {
+  let claimed: string | undefined;
+  try {
+    claimed = new URL(req.url ?? "", "http://localhost").searchParams.get("name") ?? undefined;
+  } catch {
+    claimed = undefined;
+  }
+  if (!claimed || registeredWebName === null) return null;
+  return claimed === registeredWebName ? registeredWebName : null;
+}
+
+/**
+ * Control messages from an authenticated browser socket. Currently only
+ * "web-rename": re-register the human viewer name without a reconnect.
+ * Only sockets that passed the token+name handshake may rename. Other tabs
+ * holding sockets under the old name keep working until they reconnect
+ * (single-human UI, acceptable).
+ */
+function handleWebControl(ws: WebSocket, raw: unknown): void {
+  let parsed: { type?: string; name?: unknown };
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch {
+    return;
+  }
+  if (!parsed || parsed.type !== "web-rename") return;
+  const reply = (obj: object): void => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  };
+  if (!clientNames.has(ws)) { reply({ type: "web-rename-error", error: "socket not bound" }); return; }
+  const valid = validWebName(parsed.name);
+  if (valid === null) { reply({ type: "web-rename-error", error: "invalid name" }); return; }
+  registeredWebName = valid;
+  clientNames.set(ws, valid);
+  try {
+    writeFileSync(webNamePath(DATA_DIR), valid + "\n", { mode: 0o600 });
+  } catch {
+    // In-memory registration still holds for this run.
+  }
+  reply({ type: "web-rename-ok", name: valid });
+}
 
 // --- MCP sessions ---
 const mcpSessions = new Map<
@@ -429,7 +529,9 @@ app.post("/api/upload", express.raw({ type: "*/*", limit: "25mb" }), (req, res) 
   res.json({ url: `/data/files/${filename}`, filename, contentType, size: (req.body as Buffer).length });
 });
 
-app.use("/data", express.static(DATA_DIR));
+// Only uploaded files are web-accessible under /data; never the whole
+// data dir (it holds conversation JSONL and other server-side state).
+app.use("/data/files", express.static(join(DATA_DIR, "files")));
 
 // --- REST API (scoped to active conversation) ---
 
@@ -443,28 +545,77 @@ function activeRoom(res: express.Response) {
   return room;
 }
 
+/** Gate for browser REST calls that can return DM content: no valid web token, no data. */
+function webAuthorized(provided: string | undefined): boolean {
+  return tokensEqual(provided, CONFIG.webToken);
+}
+
+/**
+ * The viewer for DM filtering on web routes. ALWAYS the server-side
+ * registered name; a caller-supplied viewer is ignored so a token holder
+ * cannot read another viewer's DMs. Null (nothing registered yet) fails
+ * closed: visibleToViewer hides targeted messages from an undefined viewer.
+ */
+function webViewer(): string | undefined {
+  return registeredWebName ?? undefined;
+}
+
+// Browser clients register the human viewer name for first boot. The WS
+// handshake only accepts ?name= equal to this registration, so a token
+// holder cannot impersonate another viewer. Once registered, HTTP allows
+// only idempotent re-registration of the SAME name; renames go over the
+// authenticated WebSocket channel (web-rename), so a token holder cannot
+// overwrite the name and lock the human out.
+app.post("/api/web/register", express.json(), (req, res) => {
+  const { token, name } = (req.body ?? {}) as { token?: string; name?: unknown };
+  if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
+  const valid = validWebName(name);
+  if (valid === null) { res.status(400).json({ error: "invalid name" }); return; }
+  const decision = canRegister(registeredWebName, valid);
+  if (decision === "reject-conflict") {
+    res.status(409).json({ error: "name already registered; renames use the websocket" });
+    return;
+  }
+  if (decision === "accept-first") {
+    registeredWebName = valid;
+    try {
+      writeFileSync(webNamePath(DATA_DIR), valid + "\n", { mode: 0o600 });
+    } catch {
+      // In-memory registration still holds for this run.
+    }
+  }
+  res.json({ ok: true, name: valid });
+});
+
 app.post("/api/send", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
-  const { sender, text, image, replyTo, choices } = req.body as {
-    sender?: string; text?: string; image?: string; replyTo?: number; choices?: string[];
+  const { sender, text, image, replyTo, choices, to, token } = req.body as {
+    sender?: string; text?: string; image?: string; replyTo?: number; choices?: string[]; to?: string[]; token?: string;
   };
+  if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text required" });
+    return;
+  }
+  if (to !== undefined && (!Array.isArray(to) || !to.every((t) => typeof t === "string"))) {
+    res.status(400).json({ error: "to must be an array of strings" });
     return;
   }
   // Auto-name conversation from first user message
   const activeId = manager.getActiveId();
   if (activeId && sender !== "system") manager.autoName(activeId, text);
 
-  const msg = room.send(sender, text, { image, replyTo, choices });
+  const msg = room.send(sender, text, { image, replyTo, choices, to });
   res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices });
 });
 
 app.get("/api/messages", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const room = manager.getActiveRoom();
   const from = req.query.from as string | undefined;
-  res.json(room?.read(undefined, 100, from) ?? []);
+  // Viewer is the registered web name, never the request (fails closed).
+  res.json(room?.read(undefined, 100, from, webViewer()) ?? []);
 });
 
 app.post("/api/messages/delete", express.json(), (req, res) => {
@@ -485,11 +636,13 @@ app.get("/api/instance", (_req, res) => {
   res.json({ name: INSTANCE_NAME, port: PORT, dataDir: DATA_DIR });
 });
 
-app.get("/api/export", (_req, res) => {
+app.get("/api/export", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const room = manager.getActiveRoom();
   if (!room) { res.status(400).send("No active conversation"); return; }
   const meta = manager.getActiveMeta();
-  const messages = room.read(undefined, 10000);
+  // Deliberate full-conversation dump by the human; intentionally includes DMs.
+  const messages = room.readAll(10000);
   const agents = room.who();
   const now = new Date();
 
@@ -522,11 +675,13 @@ app.get("/api/export", (_req, res) => {
 
 // Structured JSON export — round-trippable bundle for importing into another instance.
 app.get("/api/conversations/:id/export.json", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const convId = req.params.id;
   const meta = manager.getMeta(convId);
   const room = manager.getRoom(convId);
   if (!meta || !room) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const messages = room.read(undefined, 1000000);
+  // Deliberate full-conversation dump for import/backup; intentionally includes DMs.
+  const messages = room.readAll(1000000);
   const tasks = taskStore.list(convId, { status: "all" });
   const bundle = {
     version: 1,
@@ -694,9 +849,10 @@ app.post("/api/message/:id/react", express.json(), (req, res) => {
 app.post("/api/message/:id/edit", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
+  const { sender, newText, token } = req.body as { sender?: string; newText?: string; token?: string };
+  if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
   const messageId = Number(req.params.id);
   if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
-  const { sender, newText } = req.body as { sender?: string; newText?: string };
   if (!sender || !newText) { res.status(400).json({ error: "sender and newText required" }); return; }
   const msg = room.getMessageById(messageId);
   if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
@@ -717,7 +873,7 @@ app.get("/api/agent/unread", (req, res) => {
   const ctx = agentRoom(sender, res, pid, paneId);
   if (!ctx) return;
   const cursor = cursorStore.get(sender);
-  const newMsgs = ctx.room.read(cursor, 100000);
+  const newMsgs = ctx.room.read(cursor, 100000, undefined, sender);
   const unread = cursorStore.getUnreadCount(sender, newMsgs);
   res.json(unread);
 });
@@ -747,19 +903,22 @@ app.post("/api/message/:id/pin", express.json(), (req, res) => {
   res.json({ id: msg.id, pinned: msg.pinned });
 });
 
-app.get("/api/pins", (_req, res) => {
+app.get("/api/pins", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const room = manager.getActiveRoom();
   if (!room) { res.json([]); return; }
-  res.json(room.getPinnedMessages());
+  // Viewer is the registered web name, never the request (fails closed).
+  res.json(room.getPinnedMessages().filter((m) => visibleToViewer(m, webViewer())));
 });
 
 // --- Inline decision choices ---
 app.post("/api/message/:id/choose", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
+  const { value, by, token } = req.body as { value?: string; by?: string; token?: string };
+  if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
   const messageId = Number(req.params.id);
   if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
-  const { value, by } = req.body as { value?: string; by?: string };
   if (!value || !by) { res.status(400).json({ error: "value and by required" }); return; }
   const msg = room.chooseMessage(messageId, value, by);
   if (!msg) { res.status(400).json({ error: "Message not found, has no choices, or value not in choices" }); return; }
@@ -852,30 +1011,36 @@ app.post("/api/state", express.json(), (req, res) => {
 
 // --- Search ---
 app.get("/api/search", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const room = manager.getActiveRoom();
   if (!room) { res.json([]); return; }
   const q = (req.query.q as string) || "";
   const limit = Number(req.query.limit ?? 20);
   if (!q) { res.json([]); return; }
-  res.json(room.search(q, limit));
+  // Viewer is the registered web name, never the request (fails closed).
+  res.json(room.search(q, limit, webViewer()));
 });
 
 app.get("/api/message/:id", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const room = manager.getActiveRoom();
   if (!room) { res.status(400).json({ error: "No active conversation" }); return; }
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
   const msg = room.getMessageById(id);
-  if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
+  // Viewer is the registered web name, never the request (fails closed).
+  if (!msg || !visibleToViewer(msg, webViewer())) { res.status(404).json({ error: "Message not found" }); return; }
   res.json(msg);
 });
 
 // --- Export: decision log ---
-app.get("/api/export/decisions", (_req, res) => {
+app.get("/api/export/decisions", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const room = manager.getActiveRoom();
   if (!room) { res.status(400).send("No active conversation"); return; }
   const meta = manager.getActiveMeta();
-  const messages = room.read(undefined, 100000);
+  // Deliberate full-conversation dump; intentionally includes DMs.
+  const messages = room.readAll(100000);
   const decisions = messages.filter(m => m.tag === "decision" || m.tag === "handoff" || m.pinned);
   let md = `# Decision Log — ${meta?.name ?? "Joind"}\n\n`;
   for (const msg of decisions) {
@@ -888,11 +1053,13 @@ app.get("/api/export/decisions", (_req, res) => {
 });
 
 // --- Export: session summary ---
-app.get("/api/export/summary", (_req, res) => {
+app.get("/api/export/summary", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   const room = manager.getActiveRoom();
   if (!room) { res.status(400).send("No active conversation"); return; }
   const meta = manager.getActiveMeta();
-  const messages = room.read(undefined, 100000);
+  // Deliberate full-conversation dump; intentionally includes DMs.
+  const messages = room.readAll(100000);
   const agents = room.who();
   const pinned = room.getPinnedMessages();
   const tagged = messages.filter(m => m.tag);
@@ -915,7 +1082,9 @@ app.get("/api/export/summary", (_req, res) => {
 });
 
 // --- Conversation management ---
-app.get("/api/conversations", (_req, res) => {
+app.get("/api/conversations", (req, res) => {
+  // Metadata only, but gating it closes the unauthenticated id-enumeration path.
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
   res.json({
     conversations: manager.listConversations(),
     active: manager.getActiveMeta(),
@@ -929,14 +1098,16 @@ app.post("/api/conversations/new", express.json(), (req, res) => {
 });
 
 app.post("/api/conversations/select", express.json(), (req, res) => {
-  const { id } = req.body as { id?: string };
+  const { id, token } = (req.body ?? {}) as { id?: string; token?: string };
   if (!id) { res.status(400).json({ error: "id required" }); return; }
+  if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
   const ok = manager.setActive(id);
   if (!ok) { res.status(404).json({ error: "Conversation not found" }); return; }
   const room = manager.getActiveRoom();
   res.json({
     conversation: manager.getActiveMeta(),
-    messages: room?.read(undefined, 100) ?? [],
+    // Viewer is the registered web name, never the request (fails closed).
+    messages: room?.read(undefined, 100, undefined, webViewer()) ?? [],
     agents: room?.who() ?? [],
   });
 });
@@ -1062,6 +1233,10 @@ app.post("/api/turn-guard", express.json(), (req, res) => {
 
 /** Helper: get agent's room by name binding (with optional pid/paneId disambiguation) */
 function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number) {
+  // Security gate: an existing binding is the credential. getAgentBinding is a
+  // pure lookup and never creates one; bindings exist only after a join flow
+  // (MCP chat_join, /api/agent/join, or the UI invite /api/join). A local HTTP
+  // client claiming an unbound name gets nothing.
   const convId = manager.getAgentBinding(name, pid, paneId);
   if (convId) {
     const room = manager.getRoom(convId);
@@ -1077,8 +1252,9 @@ function agentRoom(name: string, res: express.Response, pid?: number, paneId?: n
       return { room, convId };
     }
   }
-  // No fallback — agent must join first to avoid cross-conversation pollution
-  res.status(400).json({ error: "Not in a conversation. Call /api/agent/join first." });
+  // No binding, no service: 403 (not 400) so scanners don't mistake this for
+  // a malformed request, and so the credential requirement is explicit.
+  res.status(403).json({ error: "No binding for this agent. Join first (chat_join), then retry." });
   return null;
 }
 
@@ -1160,7 +1336,8 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   }
 
   const meta = manager.getMeta(convId);
-  const recent = room.read(undefined, 15);
+  // Filtered to what this agent may see: public messages + DMs addressed to them
+  const recent = room.read(undefined, 15, undefined, name);
   const lastId = recent.length > 0 ? recent[recent.length - 1].id : 0;
 
   res.json({
@@ -1647,6 +1824,17 @@ app.get("/api/launch/:launchId", (req, res) => {
   res.json(result);
 });
 
+// Serve index.html with the web token injected, before static so the
+// injection cannot be bypassed. Cache disabled: the token must be fresh.
+// A USER-SET token is deliberately NOT injected: the browser prompts for it
+// once per tab session (sessionStorage) instead of every requester getting it.
+app.get("/", (_req, res) => {
+  const htmlPath = join(__dirname, "..", "public", "index.html");
+  res.setHeader("Cache-Control", "no-store");
+  const html = readFileSync(htmlPath, "utf8");
+  res.type("html").send(CONFIG.webTokenUserSet ? html : injectWebToken(html, CONFIG.webToken));
+});
+
 // --- Static files ---
 app.use(express.static(join(__dirname, "..", "public")));
 
@@ -1661,5 +1849,8 @@ httpServer.listen(PORT, HOST, () => {
   console.log(`  ╚═══════════════════════════════════════╝\n`);
   if (HOST !== "127.0.0.1") {
     console.log(`  [network] Bound to ${HOST} — reachable by remote agents. Ensure this is a private (e.g. Tailscale) interface, not the public internet.\n`);
+  }
+  if (!CONFIG.webTokenUserSet) {
+    console.log(`  [web] Generated web token is served to any requester of /; on a multi-user or non-loopback host, set JOIND_WEB_TOKEN or --web-token to keep it out of the page.`);
   }
 });

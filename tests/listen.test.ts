@@ -56,6 +56,20 @@ describe("mentionsAgent", () => {
   });
 });
 
+describe("waitForMessage DM high-water regression", () => {
+  it("does not redeliver a consumed DM when it is the room's latest message", async () => {
+    const room = new ChatRoom();
+    room.send("Codex", "public hello");
+    const dm = room.send("Codex", "for Claude eyes only", { to: ["Claude"] });
+    // Claude already consumed the DM; her cursor sits at the room's true max
+    // id. A fail-closed high-water read would clamp below it and resend the DM.
+    const result = await waitForMessage(room, "Claude", dm.id, 1_000);
+    expect(result.timedOut).toBe(true);
+    expect(result.messages).toEqual([]);
+    expect(result.lastId).toBe(dm.id);
+  });
+});
+
 describe("waitForMessage hardening", () => {
   it("aborts promptly on signal without advancing past undelivered messages", async () => {
     const room = new ChatRoom();

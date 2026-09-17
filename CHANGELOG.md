@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-09-17: DM Privacy Hardening (Codex-Gated)
+
+Nine adversarial review rounds (Codex), all findings fixed; final verdict PASS. 78 tests (29 new). Owner scope decision: the pre-existing agent name-based identity model (MCP/REST join/send by claimed name) is the documented trust model and out of scope; a web token separates browser-served clients from arbitrary local processes, scoped per registered viewer.
+
+### Added
+- Server-side DM visibility: new `visibleToViewer(msg, viewer)` predicate (src/room.ts), fail-closed (no viewer, no targeted messages), applied to every path that emits message bodies: WS fanout (messages, edits, decision resolutions), init payloads, conversation select, `/api/messages`, `/api/search`, `/api/message/:id` (404 for non-viewers), `/api/pins`. `readAll()` is the explicit unfiltered read, reserved for exports.
+- Web token: generated at first boot (or user-set via `JOIND_WEB_TOKEN` / `--web-token`) and injected into the served page; user-set mode skips injection and the UI prompts for it (sessionStorage). WebSocket rejects bad tokens (4401). Token and the registered viewer name persist beside the data dir (`joind-web-token`, `joind-web-name`, gitignored); `/data` now serves only uploaded files.
+- Viewer binding: `POST /api/web/register` accepts first-boot or identical-name registration only (409 otherwise); renames go over the authenticated socket (`web-rename` control message), so a token holder cannot impersonate or lock out the human viewer. `GET /` and REST routes use the registered name server-side; a caller-supplied `viewer` is ignored.
+- Token gates on DM-capable and mutating web routes: exports (4), conversation list, select, messages, search, message detail, pins, send, edit, choose. Agent REST content routes require an existing binding (agents must join first).
+- Tests: `tests/visibility.test.ts`, `tests/web-token.test.ts`, `tests/agent-bindings.test.ts`, plus regression cases in listen and notifications (no DM redelivery, targeted messages never notifiable).
+
+### Fixed
+- Targeted messages never enter the notification feed (body text leaked globally, up to 120 chars for decision cards and mentions).
+- `chat_listen` high-water mark uses unfiltered `readAll(1)` so a latest-message DM can no longer cause redelivery of consumed DMs.
+- Rename flow cannot strand the UI: the socket always reconnects under its last accepted name; renames propagate via `web-rename`.
+
+## 2026-09-16: Slack-Style UI Redesign
+
+### Added
+- Direct messages in the web UI: a new "Direct messages" section in the sidebar lists every connected agent (presence dot, colored initial avatar) plus anyone who has exchanged targeted messages with the human. Opening a DM filters the message pane to that thread, the header switches to the agent name, and the composer targets the agent. `POST /api/send` now accepts an optional `to: string[]` and passes it to `room.send` (the room already supported targeted sends via `chat_dm`). Day dividers (Today / Yesterday / date) separate messages by calendar day in both channel and DM views.
+- Channel header bar showing the conversation name and member count, fed from the same places that update the sidebar's active-conversation line.
+
+### Changed
+- Full look-and-feel pass to a Slack-inspired dark visual language (dark-only, no light theme): workspace-style sidebar with 28px channel/DM rows, unread badges, and active-row highlight; 49px channel header; Slack-style message rows with grouped consecutive messages, hover action bar, and floating day dividers; rounded composer. `style.css` rewritten against the new token block (Slack-dark neutrals, violet accent kept). `index.html` restructured into sidebar + main panes; every element id and inline handler preserved. Cache-bust to v=14.
+- Targeted (DM) messages no longer render in the channel view; they live in the DM thread view.
+
 ## 2026-09-15: Notification Bell + Mobile Composer
 
 ### Added

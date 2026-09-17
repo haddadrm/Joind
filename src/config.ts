@@ -11,6 +11,7 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { homedir } from "os";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { ensureDir } from "./persist.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +31,9 @@ export interface JoindConfig {
   instance: string;
   crewHome: string;
   humanNames: string[];
+  webToken: string;
+  /** True when the token came from --web-token / JOIND_WEB_TOKEN (not generated+served). */
+  webTokenUserSet: boolean;
 }
 
 function getFlag(argv: string[], name: string): string | undefined {
@@ -67,7 +71,94 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig 
     .map((n) => n.trim())
     .filter((n) => n.length > 0);
 
-  return { port, host, dataDir, instance, crewHome, humanNames };
+  // Web token: gates DM visibility for browser clients (WS + viewer REST).
+  // Flag/env wins; otherwise reuse the persisted token so all browser tabs
+  // share it across restarts; otherwise mint and persist one. The file lives
+  // NEXT TO the data dir, never inside it (/data used to expose the dir).
+  const webTokenOverride = getFlag(argv, "web-token") ?? process.env.JOIND_WEB_TOKEN;
+  const webTokenUserSet = !!webTokenOverride;
+  const webToken = webTokenOverride ?? loadOrCreateWebToken(dataDir);
+
+  return { port, host, dataDir, instance, crewHome, humanNames, webToken, webTokenUserSet };
+}
+
+/** Secrets live beside the data dir, not in it (the /data mount is scoped, but depth is safer). */
+export function webTokenPath(dataDir: string): string {
+  return join(resolve(dataDir), "..", "joind-web-token");
+}
+
+/** The registered human viewer name is stored next to the token. */
+export function webNamePath(dataDir: string): string {
+  return join(resolve(dataDir), "..", "joind-web-name");
+}
+
+function loadOrCreateWebToken(dataDir: string): string {
+  const tokenPath = webTokenPath(dataDir);
+  try {
+    const existing = readFileSync(tokenPath, "utf8").trim();
+    if (existing.length > 0) return existing;
+  } catch {
+    // No token file yet: create one below.
+  }
+  const token = randomBytes(32).toString("hex");
+  writeFileSync(tokenPath, token + "\n", { mode: 0o600 });
+  return token;
+}
+
+/** Read the persisted web name, or null if none is registered yet. */
+export function loadWebName(dataDir: string): string | null {
+  try {
+    const name = readFileSync(webNamePath(dataDir), "utf8").trim();
+    return name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validate a name the browser wants to register as the human viewer.
+ * Returns the trimmed name, or null when invalid.
+ */
+export function validWebName(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const name = raw.trim();
+  if (name.length === 0 || name.length > 64) return null;
+  // No control characters: the name rides in URLs and JSON payloads.
+  if (/[\x00-\x1f\x7f]/.test(name)) return null;
+  return name;
+}
+
+export type RegisterDecision = "accept-first" | "accept-same" | "reject-conflict";
+
+/**
+ * HTTP registration policy: the first name wins; re-registering the same
+ * name is idempotent; anything else is a conflict (renames go over the
+ * authenticated WebSocket channel instead).
+ */
+export function canRegister(current: string | null, submitted: string): RegisterDecision {
+  if (current === null) return "accept-first";
+  if (current === submitted) return "accept-same";
+  return "reject-conflict";
+}
+
+/**
+ * Constant-time token comparison (SHA-256 digests so lengths always match).
+ * A missing provided token never matches.
+ */
+export function tokensEqual(provided: string | undefined, expected: string): boolean {
+  if (!provided) return false;
+  const a = createHash("sha256").update(provided).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
+
+/** Inject the web token into index.html just before </head> (pure, testable). */
+export function injectWebToken(html: string, token: string): string {
+  const safe = token.replace(/[^a-f0-9]/gi, "");
+  const snippet = `<script>window.__JOIND_TOKEN="${safe}";</script>`;
+  const idx = html.indexOf("</head>");
+  if (idx < 0) return html + snippet;
+  return html.slice(0, idx) + snippet + html.slice(idx);
 }
 
 /**

@@ -11,6 +11,18 @@ import { cancelRoomListens } from "./listen.js";
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
+/**
+ * DM visibility: a targeted message is visible only to its sender and its
+ * named recipients; public messages are visible to everyone. Fail closed:
+ * when no viewer is known, targeted messages are hidden.
+ */
+export function visibleToViewer(msg: ChatMessage, viewer: string | undefined): boolean {
+  if (!msg.to) return true;
+  if (viewer === undefined) return false;
+  if (msg.sender === viewer) return true;
+  return msg.to.includes(viewer);
+}
+
 export interface ChatMessage {
   id: number;
   sender: string;
@@ -233,9 +245,17 @@ export class ChatRoom extends EventEmitter {
     if (from) {
       msgs = msgs.filter((m) => m.sender === from);
     }
-    // Filter DMs: only show messages addressed to the viewer or public messages
-    if (viewer) {
-      msgs = msgs.filter((m) => !m.to || m.to.includes(viewer) || m.sender === viewer);
+    // Filter DMs (fail closed): targeted messages are shown only to the
+    // sender and named recipients; with no viewer they are hidden.
+    msgs = msgs.filter((m) => visibleToViewer(m, viewer));
+    return msgs.slice(-limit);
+  }
+
+  /** Full unfiltered history. Reserved for exports; UI reads must use read(viewer). */
+  readAll(limit = 10000, from?: string): ChatMessage[] {
+    let msgs = this.messages;
+    if (from) {
+      msgs = msgs.filter((m) => m.sender === from);
     }
     return msgs.slice(-limit);
   }
@@ -364,14 +384,15 @@ export class ChatRoom extends EventEmitter {
     return agent;
   }
 
-  search(query: string, limit = 20): Array<{ message: ChatMessage; matchIndex: number }> {
+  search(query: string, limit = 20, viewer?: string): Array<{ message: ChatMessage; matchIndex: number }> {
     const q = query.toLowerCase();
     const results: Array<{ message: ChatMessage; matchIndex: number }> = [];
     // Reverse iteration — newest first
     for (let i = this.messages.length - 1; i >= 0 && results.length < limit; i--) {
       const m = this.messages[i];
       const idx = m.text.toLowerCase().indexOf(q);
-      if (idx >= 0) {
+      // Fail closed: targeted messages are hidden without a viewer
+      if (idx >= 0 && visibleToViewer(m, viewer)) {
         results.push({ message: m, matchIndex: idx });
       }
     }

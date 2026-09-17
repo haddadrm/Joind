@@ -312,6 +312,12 @@ export class ConversationManager extends EventEmitter {
     }
   }
 
+  /**
+   * Existing-binding lookup: pure read, NEVER creates a binding. Bindings are
+   * created only by bindAgent during join flows (MCP chat_join, /api/agent/join,
+   * UI invite /api/join). REST routes that return message content treat a
+   * resolved binding as the agent's credential.
+   */
   getAgentBinding(agentName: string, pid?: number, paneId?: number): string | undefined {
     const entries = this.agentBindings.get(agentName);
     if (!entries || entries.length === 0) return undefined;
