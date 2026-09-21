@@ -31,6 +31,10 @@ export interface JoindConfig {
   instance: string;
   crewHome: string;
   humanNames: string[];
+  /** Presence removal grace for unverifiable pids, in ms. */
+  presenceGraceMs: number;
+  /** Log file path, or "none" to disable file logging. */
+  logFile: string;
   webToken: string;
   /** True when the token came from --web-token / JOIND_WEB_TOKEN (not generated+served). */
   webTokenUserSet: boolean;
@@ -79,7 +83,16 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig 
   const webTokenUserSet = !!webTokenOverride;
   const webToken = webTokenOverride ?? loadOrCreateWebToken(dataDir);
 
-  return { port, host, dataDir, instance, crewHome, humanNames, webToken, webTokenUserSet };
+  // Presence grace (seconds on the flag, ms internally); minimum 120s.
+  const graceRaw = getFlag(argv, "presence-grace") ?? process.env.JOIND_PRESENCE_GRACE;
+  const graceSec = graceRaw != null ? Number(graceRaw) : 1800;
+  const presenceGraceMs = Math.max(120, Number.isFinite(graceSec) ? graceSec : 1800) * 1000;
+
+  // File log: default lives under the data dir; "none" disables.
+  const logFile =
+    getFlag(argv, "log-file") ?? process.env.JOIND_LOG_FILE ?? join(dataDir, "logs", "joind.log");
+
+  return { port, host, dataDir, instance, crewHome, humanNames, presenceGraceMs, logFile, webToken, webTokenUserSet };
 }
 
 /** Secrets live beside the data dir, not in it (the /data mount is scoped, but depth is safer). */

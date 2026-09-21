@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ConversationManager } from "./manager.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
+import { visibleToViewer } from "./room.js";
 import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
@@ -180,9 +181,10 @@ export function registerTools(
         text: z.string().describe("Message text. Use @name to mention agents."),
         replyTo: z.number().optional().describe("Message ID to reply to"),
         choices: z.array(z.string()).optional().describe("Inline decision options. Renders clickable buttons; first answer wins."),
+        askFor: z.string().optional().describe("Name this message needs a decision from (e.g. Admiral). Creates a first-class open ask, queryable via chat_decisions and the web Decisions pane, resolved with chat_resolve."),
       }),
     },
-    async ({ sender, text, replyTo, choices }, extra) => {
+    async ({ sender, text, replyTo, choices, askFor }, extra) => {
       const target = getRoom(manager, extra, sender);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
@@ -193,9 +195,63 @@ export function registerTools(
       // Auto-name conversation from first non-system message
       manager.autoName(target.convId, text);
 
-      const msg = target.room.send(sender, text, { replyTo, choices });
+      const msg = target.room.send(sender, text, { replyTo, choices, askFor });
       const suffix = choices && choices.length > 0 ? ` with ${choices.length} choices` : "";
-      return { content: [{ type: "text" as const, text: `Message #${msg.id} sent${suffix}` }] };
+      const askNote = msg.ask ? ` (open ask for ${msg.ask.for})` : "";
+      return { content: [{ type: "text" as const, text: `Message #${msg.id} sent${suffix}${askNote}` }] };
+    }
+  );
+
+  server.registerTool(
+    "chat_resolve",
+    {
+      title: "Resolve an open ask",
+      description: "Mark a message's open ask as resolved (the decision was made or is no longer needed).",
+      inputSchema: z.object({
+        sender: z.string().describe("Your name"),
+        messageId: z.number().describe("The message carrying the open ask"),
+      }),
+    },
+    async ({ sender, messageId }, extra) => {
+      const target = getRoom(manager, extra, sender);
+      if (!target) {
+        return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
+      }
+      const msg = target.room.resolveAsk(messageId, sender);
+      if (!msg) {
+        return { content: [{ type: "text" as const, text: `No open ask on message #${messageId}` }] };
+      }
+      return { content: [{ type: "text" as const, text: `Ask on #${messageId} resolved by ${sender}` }] };
+    }
+  );
+
+  server.registerTool(
+    "chat_decisions",
+    {
+      title: "List open decisions",
+      description: "List open asks across all conversations, optionally only those addressed to one name.",
+      inputSchema: z.object({
+        sender: z.string().describe("Your name (DM visibility applies)"),
+        forName: z.string().optional().describe("Only asks addressed to this name (omit for all open asks)"),
+      }),
+    },
+    async ({ sender, forName }) => {
+      const lines: string[] = [];
+      for (const meta of manager.listConversations()) {
+        const room = manager.getRoom(meta.id);
+        if (!room) continue;
+        for (const m of room.openAsks(forName)) {
+          if (!visibleToViewer(m, sender)) continue;
+          const preview = m.text.length > 100 ? m.text.slice(0, 97) + "..." : m.text;
+          lines.push(`[${meta.name} #${m.id}] ${m.sender} asks ${m.ask?.for}: ${preview}`);
+        }
+      }
+      return {
+        content: [{
+          type: "text" as const,
+          text: lines.length > 0 ? lines.join("\n") : "No open decisions.",
+        }],
+      };
     }
   );
 

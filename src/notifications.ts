@@ -49,7 +49,9 @@ export interface Classified {
 }
 
 const JOINED_RE = /^(.+) joined the chat$/;
+const REJOINED_RE = /^(.+) rejoined \(new session\)$/;
 const LEFT_RE = /^(.+) left the chat$/;
+const DROPPED_RE = /^(.+) lost presence \(timed out\)$/;
 const SESSION_START_RE = /^--- Session started(?::\s*(.*?))? ---$/;
 const SESSION_END_RE = /^--- Session ended(?::\s*(.*?))? ---$/;
 
@@ -61,13 +63,25 @@ export function classifyMessage(msg: ChatMessage, humanNames: string[]): Classif
   if (msg.sender === "system") {
     let m = msg.text.match(JOINED_RE);
     if (m) return { kind: "crew-joined", text: `${m[1]} joined`, refMessageId: msg.id };
+    m = msg.text.match(REJOINED_RE);
+    if (m) return { kind: "crew-joined", text: `${m[1]} rejoined (new session)`, refMessageId: msg.id };
     m = msg.text.match(LEFT_RE);
     if (m) return { kind: "crew-left", text: `${m[1]} left`, refMessageId: msg.id };
+    m = msg.text.match(DROPPED_RE);
+    if (m) return { kind: "crew-left", text: `${m[1]} dropped (presence timeout)`, refMessageId: msg.id };
     m = msg.text.match(SESSION_START_RE);
     if (m) return { kind: "session-started", text: `Session started${m[1] ? ": " + m[1] : ""}`, refMessageId: msg.id };
     m = msg.text.match(SESSION_END_RE);
     if (m) return { kind: "session-ended", text: `Session ended${m[1] ? ": " + m[1] : ""}`, refMessageId: msg.id };
     return null;
+  }
+  // A first-class ask addressed to the human always rings, mention or not.
+  if (msg.ask?.state === "open" && humanNames.some((n) => n.toLowerCase() === msg.ask?.for.toLowerCase())) {
+    return {
+      kind: "action-required",
+      text: `${msg.sender} asks you: ${truncate(msg.text)}`,
+      refMessageId: msg.id,
+    };
   }
   if (msg.choices && msg.choices.length > 0) {
     return {

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-09-21: Operational Awareness (field-report driven)
+
+Built from a resident agent's field report after ~800 messages of real crew traffic: presence that expired silently during long operations, a server that died without a trace, and human decisions structurally unfindable inside agent chatter.
+
+### Added
+- Presence grace window: a silent agent still dims at 2 minutes (stale pill), but an unverifiable-pid agent is only removed after a grace window (default 30 minutes, `--presence-grace <seconds>` / `JOIND_PRESENCE_GRACE`; minimum 120s). Long imports and F9 runs no longer read as "left the chat". Verifiable-alive local pids are never removed, as before.
+- `POST /api/agent/heartbeat` `{name, pid?, paneId?}`: a cheap presence keepalive an agent fires between long operations without holding a connection.
+- Distinct system lines: a presence timeout now says "lost presence (timed out)", a deliberate leave still says "left the chat", and a same-name rejoin under a new pid announces "rejoined (new session)". The notification bell classifies all three.
+- File logging (`src/log.ts`): console output tees to `<dataDir>/logs/joind.log` with timestamps (override `--log-file` / `JOIND_LOG_FILE`, "none" disables; >5MB rotates to `.old`). `uncaughtException` writes the stack and exits 1; `unhandledRejection` and process exit codes are recorded. A crash now leaves a cause behind.
+- First-class asks: `chat_send`/`POST /api/send`/`POST /api/agent/send` accept `askFor: <name>`, stamping the message with an open ask. Resolution via `chat_resolve` (agents) or `POST /api/message/:id/resolve` (web token, resolves as the registered viewer), persisted in a `.asks.jsonl` sidecar (latest wins, replayed on load). `GET /api/decisions?state=open` (web) and `chat_decisions` (MCP) list open asks across all conversations, DM visibility applied. An open ask addressed to a human rings the bell as action-required, mention or not.
+- UI: an amber `ASK -> name` chip on asked messages (click to resolve, turns green with the resolver's name), a scales button in the header with an open-decisions badge, and a "Decisions waiting on you" panel with per-row Resolve and jump-to-message. Cache-bust v=15.
+- Tests: `tests/ops-awareness.test.ts` (8: ask lifecycle, sidecar replay, target filtering, grace-window sweep with fake timers, touch-resets-clock, rejoin announcement, classifier additions).
+
 ## 2026-09-17: DM Privacy Hardening (Codex-Gated)
 
 Nine adversarial review rounds (Codex), all findings fixed; final verdict PASS. 78 tests (29 new). Owner scope decision: the pre-existing agent name-based identity model (MCP/REST join/send by claimed name) is the documented trust model and out of scope; a web token separates browser-served clients from arbitrary local processes, scoped per registered viewer.

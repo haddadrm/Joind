@@ -369,6 +369,14 @@ function connect() {
       case 'notification':
         onNotification(event.data, event.generation);
         break;
+      case 'ask-resolved':
+        if (event.data && event.data.id != null) {
+          applyAskResolution(event.data.id, { state: 'resolved', resolvedBy: event.data.by });
+          decisionsCache = decisionsCache.filter(function(x) { return x.messageId !== event.data.id; });
+          refreshDecisionsBadge();
+          if (decisionsPanelOpen) renderDecisionsPanel();
+        }
+        break;
       case 'roles-updated':
         availableRoles = event.data;
         break;
@@ -809,6 +817,24 @@ function appendMessage(msg, scroll) {
     }
 
     body.appendChild(hdr); body.appendChild(tw);
+
+    // First-class ask chip: shows who owes the decision, resolves on click
+    // (any participant can resolve; the server records who did).
+    if (msg.ask) {
+      var askChip = document.createElement('button');
+      askChip.className = 'ask-chip' + (msg.ask.state === 'open' ? ' open' : ' resolved');
+      askChip.dataset.messageId = msg.id;
+      askChip.textContent = msg.ask.state === 'open'
+        ? 'ASK → ' + msg.ask.for
+        : 'RESOLVED' + (msg.ask.resolvedBy ? ' by ' + msg.ask.resolvedBy : '');
+      if (msg.ask.state === 'open') {
+        askChip.title = 'Click to mark this decision as resolved';
+        askChip.addEventListener('click', function() { resolveAsk(msg.id); });
+      } else {
+        askChip.disabled = true;
+      }
+      body.appendChild(askChip);
+    }
 
     // Inline decision choices
     if (msg.choices && msg.choices.length > 0) {
@@ -5350,3 +5376,135 @@ loadNotifications();
   window.addEventListener('resize', syncViewportHeight);
   syncViewportHeight();
 })();
+
+// ============================================================
+// Decisions: first-class asks. The pane lists every open ask
+// addressed to the viewer across all conversations; the chip on
+// a message resolves it in place. Born from a field report:
+// "decisions for a human are unfindable inside agent chatter."
+// ============================================================
+
+var decisionsPanelOpen = false;
+var decisionsCache = [];
+
+function resolveAsk(messageId) {
+  fetch('/api/message/' + messageId + '/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: webToken() })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ask) applyAskResolution(messageId, d.ask);
+    refreshDecisionsBadge();
+    if (decisionsPanelOpen) renderDecisionsPanel();
+  }).catch(function() {});
+}
+
+function applyAskResolution(messageId, ask) {
+  var m = allMessages.find(function(x) { return x.id === messageId; });
+  if (m) m.ask = ask;
+  var chip = document.querySelector('.ask-chip[data-message-id="' + messageId + '"]');
+  if (chip) {
+    chip.className = 'ask-chip resolved';
+    chip.textContent = 'RESOLVED' + (ask && ask.resolvedBy ? ' by ' + ask.resolvedBy : '');
+    chip.disabled = true;
+  }
+}
+
+function refreshDecisionsBadge() {
+  fetch('/api/decisions?state=open&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      decisionsCache = (d && d.decisions) || [];
+      var badge = document.getElementById('decisions-badge');
+      if (!badge) return;
+      if (decisionsCache.length > 0) {
+        badge.textContent = decisionsCache.length > 99 ? '99+' : String(decisionsCache.length);
+        badge.hidden = false;
+      } else {
+        badge.hidden = true;
+      }
+    }).catch(function() {});
+}
+
+function toggleDecisionsPanel() {
+  if (decisionsPanelOpen) { closeDecisionsPanel(); return; }
+  decisionsPanelOpen = true;
+  var overlay = document.createElement('div');
+  overlay.className = 'notify-panel-overlay';
+  overlay.id = 'decisions-panel-overlay';
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) closeDecisionsPanel(); });
+  var box = document.createElement('div');
+  box.className = 'notify-panel';
+  var hdr = document.createElement('div');
+  hdr.className = 'notify-panel-header';
+  var title = document.createElement('span');
+  title.textContent = 'Decisions waiting on you';
+  hdr.appendChild(title);
+  box.appendChild(hdr);
+  var list = document.createElement('div');
+  list.className = 'notify-panel-list';
+  list.id = 'decisions-panel-list';
+  box.appendChild(list);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  renderDecisionsPanel();
+  refreshDecisionsBadge();
+}
+
+function closeDecisionsPanel() {
+  decisionsPanelOpen = false;
+  var overlay = document.getElementById('decisions-panel-overlay');
+  if (overlay) overlay.remove();
+}
+
+function renderDecisionsPanel() {
+  var list = document.getElementById('decisions-panel-list');
+  if (!list) return;
+  list.textContent = '';
+  if (decisionsCache.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'notify-empty';
+    empty.textContent = 'Nothing waiting on you. Enjoy it while it lasts.';
+    list.appendChild(empty);
+    return;
+  }
+  decisionsCache.forEach(function(d) {
+    var row = document.createElement('div');
+    row.className = 'notify-row action';
+    var icon = document.createElement('span');
+    icon.className = 'notify-icon';
+    icon.textContent = '⚖️';
+    row.appendChild(icon);
+    var body = document.createElement('div');
+    body.className = 'notify-body';
+    var text = document.createElement('div');
+    text.className = 'notify-text';
+    text.textContent = d.sender + ': ' + (d.text.length > 140 ? d.text.slice(0, 137) + '...' : d.text);
+    body.appendChild(text);
+    var meta = document.createElement('div');
+    meta.className = 'notify-meta';
+    meta.textContent = (d.conversationName || d.conversationId) + ' · #' + d.messageId;
+    body.appendChild(meta);
+    row.appendChild(body);
+    var resolveBtn = document.createElement('button');
+    resolveBtn.className = 'btn notify-mark-btn';
+    resolveBtn.textContent = 'Resolve';
+    resolveBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      resolveAsk(d.messageId);
+      decisionsCache = decisionsCache.filter(function(x) { return x.messageId !== d.messageId; });
+      renderDecisionsPanel();
+    });
+    row.appendChild(resolveBtn);
+    row.addEventListener('click', function() {
+      if (d.conversationId && (!activeConversation || activeConversation.id !== d.conversationId)) {
+        selectConversation(d.conversationId);
+      }
+      closeDecisionsPanel();
+      setTimeout(function() { scrollToMessage(d.messageId); }, 400);
+    });
+    list.appendChild(row);
+  });
+}
+
+refreshDecisionsBadge();

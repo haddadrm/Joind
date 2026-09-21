@@ -35,6 +35,9 @@ export interface ChatMessage {
   to?: string[];  // targeted recipients (DM-style visibility)
   choices?: string[];  // inline decision buttons
   choiceResponse?: { value: string; by: string; at: number };
+  /** First-class decision request: this message needs an answer from `for`.
+   *  Born with the message; resolution persists via the asks sidecar. */
+  ask?: { for: string; state: "open" | "resolved"; resolvedBy?: string; resolvedAt?: number };
 }
 
 export interface Agent {
@@ -59,6 +62,17 @@ export interface ChatRoomOptions {
   onChoice?: (messageId: number, value: string, by: string, at: number) => void;
   onPin?: (messageId: number, pinned: boolean, at: number) => void;
   onTag?: (messageId: number, tag: string, at: number) => void;
+  onAskResolve?: (messageId: number, by: string, at: number) => void;
+}
+
+// Presence removal grace: an unreachable-pid agent survives this long after
+// its last touch before the room declares it dropped. Long P6 operations run
+// 15 to 20 minutes with zero chat traffic; removal at the old 120s made the
+// room lie ("left the chat") about agents that were merely working. The 120s
+// mark now only dims the pill (stale event) for every silent agent.
+let DEFAULT_PRESENCE_GRACE_MS = 30 * 60_000;
+export function setDefaultPresenceGrace(ms: number): void {
+  if (Number.isFinite(ms) && ms >= 120_000) DEFAULT_PRESENCE_GRACE_MS = ms;
 }
 
 export class ChatRoom extends EventEmitter {
@@ -76,6 +90,7 @@ export class ChatRoom extends EventEmitter {
   private onChoice?: (messageId: number, value: string, by: string, at: number) => void;
   private onPin?: (messageId: number, pinned: boolean, at: number) => void;
   private onTag?: (messageId: number, tag: string, at: number) => void;
+  private onAskResolve?: (messageId: number, by: string, at: number) => void;
 
   constructor(chatFilePathOrOptions?: string | ChatRoomOptions) {
     super();
@@ -89,6 +104,7 @@ export class ChatRoom extends EventEmitter {
     this.onChoice = options.onChoice;
     this.onPin = options.onPin;
     this.onTag = options.onTag;
+    this.onAskResolve = options.onAskResolve;
 
     if (options.chatFilePath) {
       this.chatFile = options.chatFilePath;
@@ -113,6 +129,11 @@ export class ChatRoom extends EventEmitter {
   join(name: string, pid: number, weztermPaneId?: number, persistedRole?: string): Agent {
     const existing = this.agents.get(name);
     if (existing) {
+      // A different pid means a new session resumed the same identity;
+      // readers deserve to know it is a fresh worker, not the old one.
+      if (existing.pid !== pid) {
+        this.addSystem(`${name} rejoined (new session)`);
+      }
       existing.active = true;
       existing.pid = pid;
       if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
@@ -137,17 +158,59 @@ export class ChatRoom extends EventEmitter {
     return agent;
   }
 
-  leave(name: string): void {
+  leave(name: string, reason: "deliberate" | "timeout" = "deliberate"): void {
     const agent = this.agents.get(name);
     if (agent) {
       agent.active = false;
       this.agents.delete(name);
-      this.addSystem(`${name} left the chat`);
+      // A dropped agent and a departed agent are different facts; say which.
+      this.addSystem(
+        reason === "timeout"
+          ? `${name} lost presence (timed out)`
+          : `${name} left the chat`
+      );
       this.emit("room", { type: "leave", data: agent } as RoomEvent);
     }
   }
 
-  send(sender: string, text: string, opts?: { image?: string; replyTo?: number; to?: string[]; choices?: string[] }): ChatMessage {
+  /** Resolve an open ask on a message. Returns the message, or null when
+   *  there is no message or no open ask to resolve. */
+  resolveAsk(messageId: number, by: string): ChatMessage | null {
+    const msg = this.messages.find((m) => m.id === messageId);
+    if (!msg || !msg.ask || msg.ask.state !== "open") return null;
+    const at = Date.now();
+    msg.ask.state = "resolved";
+    msg.ask.resolvedBy = by;
+    msg.ask.resolvedAt = at;
+    if (this.onAskResolve) this.onAskResolve(messageId, by, at);
+    this.emit("room", { type: "ask-resolved", data: { id: messageId, by, at } } as unknown as RoomEvent);
+    return msg;
+  }
+
+  /** Replay persisted ask resolutions after JSONL load (latest wins). */
+  applyAskRecords(records: { messageId: number; resolvedBy: string; at: number }[]): void {
+    const latest = new Map<number, { resolvedBy: string; at: number }>();
+    for (const r of records) latest.set(r.messageId, { resolvedBy: r.resolvedBy, at: r.at });
+    for (const [id, r] of latest) {
+      const msg = this.messages.find((m) => m.id === id);
+      if (msg?.ask) {
+        msg.ask.state = "resolved";
+        msg.ask.resolvedBy = r.resolvedBy;
+        msg.ask.resolvedAt = r.at;
+      }
+    }
+  }
+
+  /** Open asks, optionally only those addressed to one name. */
+  openAsks(forName?: string): ChatMessage[] {
+    return this.messages.filter(
+      (m) =>
+        m.ask?.state === "open" &&
+        (!forName || m.ask.for.toLowerCase() === forName.toLowerCase())
+    );
+  }
+
+  send(sender: string, text: string, opts?: { image?: string; replyTo?: number; to?: string[]; choices?: string[]; askFor?: string }): ChatMessage {
     const msg: ChatMessage = {
       id: this.nextId++,
       sender,
@@ -158,6 +221,9 @@ export class ChatRoom extends EventEmitter {
     if (opts?.replyTo) msg.replyTo = opts.replyTo;
     if (opts?.to && opts.to.length > 0) msg.to = opts.to;
     if (opts?.choices && opts.choices.length > 0) msg.choices = opts.choices;
+    if (opts?.askFor && opts.askFor.trim().length > 0) {
+      msg.ask = { for: opts.askFor.trim(), state: "open" };
+    }
 
     this.messages.push(msg);
     this.persist(msg);
@@ -325,16 +391,21 @@ export class ChatRoom extends EventEmitter {
     const now = Date.now();
     for (const [name, agent] of this.agents) {
       const elapsed = now - agent.lastSeen;
-      if (elapsed > 120000) {
-        // Check if the process is still alive before marking stale
-        try {
-          process.kill(agent.pid, 0); // signal 0 = existence check, doesn't kill
-          // Process alive but idle — mark stale (pill dims)
-          this.emit("room", { type: "stale", data: agent } as RoomEvent);
-        } catch {
-          // Process is dead — remove the agent
-          this.leave(name);
-        }
+      if (elapsed <= 120000) continue;
+      // Silent past two minutes: dim the pill either way. A pid the server
+      // can verify alive (local process) is never removed; a pid it cannot
+      // verify (remote or GUI-resident agent) gets the grace window, not
+      // instant eviction, because "working on a long operation" and "gone"
+      // look identical from here.
+      let pidAlive = false;
+      try {
+        process.kill(agent.pid, 0); // signal 0 = existence check, doesn't kill
+        pidAlive = true;
+      } catch { /* unknown or dead pid */ }
+      if (pidAlive || elapsed <= DEFAULT_PRESENCE_GRACE_MS) {
+        this.emit("room", { type: "stale", data: agent } as RoomEvent);
+      } else {
+        this.leave(name, "timeout");
       }
     }
   }

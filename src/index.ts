@@ -21,6 +21,8 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ensureDir } from "./persist.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { NotificationStore, TaskTracker, classifyMessage, isNotifiable, type Classified } from "./notifications.js";
+import { initFileLog } from "./log.js";
+import { setDefaultPresenceGrace } from "./room.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
@@ -51,6 +53,8 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
+initFileLog(CONFIG.logFile);
+setDefaultPresenceGrace(CONFIG.presenceGraceMs);
 const PORT = CONFIG.port;
 const HOST = CONFIG.host;
 const DATA_DIR = CONFIG.dataDir;
@@ -590,8 +594,8 @@ app.post("/api/web/register", express.json(), (req, res) => {
 app.post("/api/send", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
-  const { sender, text, image, replyTo, choices, to, token } = req.body as {
-    sender?: string; text?: string; image?: string; replyTo?: number; choices?: string[]; to?: string[]; token?: string;
+  const { sender, text, image, replyTo, choices, to, token, askFor } = req.body as {
+    sender?: string; text?: string; image?: string; replyTo?: number; choices?: string[]; to?: string[]; token?: string; askFor?: string;
   };
   if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
   if (!sender || !text) {
@@ -606,8 +610,11 @@ app.post("/api/send", express.json(), (req, res) => {
   const activeId = manager.getActiveId();
   if (activeId && sender !== "system") manager.autoName(activeId, text);
 
-  const msg = room.send(sender, text, { image, replyTo, choices, to });
-  res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices });
+  const msg = room.send(sender, text, {
+    image, replyTo, choices, to,
+    askFor: typeof askFor === "string" ? askFor : undefined,
+  });
+  res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices, ask: msg.ask });
 });
 
 app.get("/api/messages", (req, res) => {
@@ -846,6 +853,63 @@ app.post("/api/message/:id/react", express.json(), (req, res) => {
 });
 
 // --- Message editing ---
+// Resolve an open ask. Agents resolve via their bound name; the browser
+// includes the web token and resolves as the registered viewer.
+app.post("/api/message/:id/resolve", express.json(), (req, res) => {
+  const messageId = Number(req.params.id);
+  if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const { sender, token, pid, paneId } = (req.body ?? {}) as {
+    sender?: string; token?: string; pid?: number; paneId?: number;
+  };
+  let room; let by: string;
+  if (token !== undefined) {
+    if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
+    room = manager.getActiveRoom();
+    const viewer = webViewer();
+    if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
+    by = viewer;
+  } else {
+    if (!sender) { res.status(400).json({ error: "sender required" }); return; }
+    const ctx = agentRoom(sender, res, pid, paneId);
+    if (!ctx) return;
+    room = ctx.room;
+    by = sender;
+  }
+  if (!room) { res.status(400).json({ error: "No active conversation" }); return; }
+  const msg = room.resolveAsk(messageId, by);
+  if (!msg) { res.status(404).json({ error: "No open ask on that message" }); return; }
+  res.json({ id: msg.id, ask: msg.ask });
+});
+
+// Open decisions across every conversation, newest first. Web-token gated;
+// the viewer is always the registered name (agents use the chat_decisions
+// MCP tool instead). DM visibility applies to the message bodies.
+app.get("/api/decisions", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+  const state = (req.query.state as string | undefined) ?? "open";
+  const viewer = webViewer();
+  const forName = (req.query.for as string | undefined) ?? viewer;
+  const out: unknown[] = [];
+  for (const meta of manager.listConversations()) {
+    const room = manager.getRoom(meta.id);
+    if (!room) continue;
+    for (const m of state === "open" ? room.openAsks(forName) : []) {
+      if (!visibleToViewer(m, viewer)) continue;
+      out.push({
+        conversationId: meta.id,
+        conversationName: meta.name,
+        messageId: m.id,
+        sender: m.sender,
+        text: m.text,
+        ask: m.ask,
+        timestamp: m.timestamp,
+      });
+    }
+  }
+  out.sort((a, b) => (b as { timestamp: number }).timestamp - (a as { timestamp: number }).timestamp);
+  res.json({ decisions: out, for: forName ?? null, state });
+});
+
 app.post("/api/message/:id/edit", express.json(), (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
@@ -1350,6 +1414,17 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   });
 });
 
+// Cheap presence keepalive an agent can fire between long operations
+// without holding a connection. Pairs with the presence grace window.
+app.post("/api/agent/heartbeat", express.json(), (req, res) => {
+  const { name, pid, paneId } = (req.body ?? {}) as { name?: string; pid?: number; paneId?: number };
+  if (!name) { res.status(400).json({ error: "name required" }); return; }
+  const ctx = agentRoom(name, res, pid, paneId);
+  if (!ctx) return;
+  ctx.room.touch(name);
+  res.json({ ok: true, at: Date.now() });
+});
+
 app.get("/api/agent/listen", async (req, res) => {
   const sender = req.query.sender as string;
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
@@ -1396,8 +1471,8 @@ app.get("/api/agent/read", (req, res) => {
 });
 
 app.post("/api/agent/send", express.json(), (req, res) => {
-  const { sender, text, replyTo, choices, pid, paneId } = req.body as {
-    sender?: string; text?: string; replyTo?: number; choices?: string[]; pid?: number; paneId?: number;
+  const { sender, text, replyTo, choices, pid, paneId, askFor } = req.body as {
+    sender?: string; text?: string; replyTo?: number; choices?: string[]; pid?: number; paneId?: number; askFor?: string;
   };
   if (!sender || !text) { res.status(400).json({ error: "sender and text required" }); return; }
   const ctx = agentRoom(sender, res, pid, paneId);
@@ -1405,7 +1480,10 @@ app.post("/api/agent/send", express.json(), (req, res) => {
   ctx.room.touch(sender);
   ctx.room.setTyping(sender, false);
   manager.autoName(ctx.convId, text);
-  const msg = ctx.room.send(sender, text, { replyTo, choices });
+  const msg = ctx.room.send(sender, text, {
+    replyTo, choices,
+    askFor: typeof askFor === "string" ? askFor : undefined,
+  });
   res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices });
 });
 
