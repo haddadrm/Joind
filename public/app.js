@@ -5409,6 +5409,7 @@ var decisionsCache = [];
 // merely another fetch.
 var decisionsSeq = 0;
 var decisionsFetchId = 0;
+var decisionsJumpToken = 0;
 
 function resolveAsk(messageId, conversationId) {
   fetch('/api/message/' + messageId + '/resolve', {
@@ -5537,14 +5538,21 @@ function renderDecisionsPanel() {
     row.addEventListener('click', function() {
       var needsSwitch = d.conversationId && (!activeConversation || activeConversation.id !== d.conversationId);
       var stampBefore = channelRenderStamp;
+      var myJump = ++decisionsJumpToken; // a newer jump supersedes this one
       if (needsSwitch) selectConversation(d.conversationId);
       closeDecisionsPanel();
       // Conversation loading is async and FINISHES by rendering the channel
-      // view (which clears any DM state). Wait for that render to land
-      // before entering the DM thread and scrolling, or the load completion
-      // would immediately undo the DM selection.
+      // view (which clears any DM state). Wait until a render landed AND the
+      // active conversation is the one this jump targets: a render alone is
+      // not enough, because an unrelated pending load can complete first and
+      // later clobber a premature DM selection.
       var settle = function(tries) {
-        if (needsSwitch && channelRenderStamp === stampBefore) {
+        if (myJump !== decisionsJumpToken) return; // superseded by a newer jump
+        var landed =
+          !needsSwitch ||
+          (channelRenderStamp !== stampBefore &&
+            activeConversation && activeConversation.id === d.conversationId);
+        if (!landed) {
           if (tries > 0) setTimeout(function() { settle(tries - 1); }, 200);
           return;
         }
