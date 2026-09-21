@@ -2418,7 +2418,11 @@ function selectDm(name) {
 // Render the channel view from the already-loaded allMessages/agents state.
 // Shared by the conversation-select fetch handler and view switches that
 // return from a DM (e.g. opening a channel message from search results).
+// Bumped on every channel render so late navigation (the decisions panel's
+// jump) can tell when a conversation switch has fully landed.
+var channelRenderStamp = 0;
 function renderChannelView() {
+  channelRenderStamp++;
   activeDm = null;
   lastSender = null;
   lastRenderedDayKey = null;
@@ -5398,19 +5402,24 @@ loadNotifications();
 
 var decisionsPanelOpen = false;
 var decisionsCache = [];
-// Fetch-race guard: any authoritative change (an ask event over WS, a local
-// resolve) bumps the sequence, and an in-flight GET from before the bump
-// discards itself so a stale snapshot can never resurrect a resolved ask.
+// Fetch-race guards: any authoritative change (an ask event over WS, a
+// completed local resolve) bumps decisionsSeq, and every GET also carries a
+// fetch id so only the LATEST-STARTED request may land. Together: a stale
+// snapshot can never overwrite newer state, whether it raced an event or
+// merely another fetch.
 var decisionsSeq = 0;
+var decisionsFetchId = 0;
 
 function resolveAsk(messageId, conversationId) {
-  decisionsSeq++;
   fetch('/api/message/' + messageId + '/resolve', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token: webToken(), conversation: conversationId || (activeConversation && activeConversation.id) })
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d && d.ask) applyAskResolution(messageId, d.ask, conversationId);
+    // The resolution is the new truth: invalidate anything in flight, then
+    // start a fresh (and by construction latest) refresh.
+    decisionsSeq++;
     refreshDecisionsBadge();
   }).catch(function() {});
 }
@@ -5432,10 +5441,13 @@ function applyAskResolution(messageId, ask, conversationId) {
 
 function refreshDecisionsBadge() {
   var seqAtStart = decisionsSeq;
+  var fetchId = ++decisionsFetchId;
   fetch('/api/decisions?state=open&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (decisionsSeq !== seqAtStart) return; // superseded while in flight
+      // Only the latest-started fetch may land, and only if no ask event
+      // superseded it while in flight.
+      if (fetchId !== decisionsFetchId || decisionsSeq !== seqAtStart) return;
       decisionsCache = (d && d.decisions) || [];
       var badge = document.getElementById('decisions-badge');
       if (badge) {
@@ -5523,16 +5535,26 @@ function renderDecisionsPanel() {
     });
     row.appendChild(resolveBtn);
     row.addEventListener('click', function() {
-      if (d.conversationId && (!activeConversation || activeConversation.id !== d.conversationId)) {
-        selectConversation(d.conversationId);
-      }
-      // A DM ask lives in its thread view, not the channel view.
-      if (d.to && d.to.length > 0) {
-        var counterpart = d.sender === myName() ? d.to[0] : d.sender;
-        selectDm(counterpart);
-      }
+      var needsSwitch = d.conversationId && (!activeConversation || activeConversation.id !== d.conversationId);
+      var stampBefore = channelRenderStamp;
+      if (needsSwitch) selectConversation(d.conversationId);
       closeDecisionsPanel();
-      scrollToMessageWhenReady(d.messageId, 10);
+      // Conversation loading is async and FINISHES by rendering the channel
+      // view (which clears any DM state). Wait for that render to land
+      // before entering the DM thread and scrolling, or the load completion
+      // would immediately undo the DM selection.
+      var settle = function(tries) {
+        if (needsSwitch && channelRenderStamp === stampBefore) {
+          if (tries > 0) setTimeout(function() { settle(tries - 1); }, 200);
+          return;
+        }
+        if (d.to && d.to.length > 0) {
+          var counterpart = d.sender === myName() ? d.to[0] : d.sender;
+          selectDm(counterpart);
+        }
+        scrollToMessageWhenReady(d.messageId, 10);
+      };
+      settle(needsSwitch ? 15 : 0);
     });
     list.appendChild(row);
   });
