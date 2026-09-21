@@ -205,6 +205,8 @@ function connect() {
   ws.onopen = function() {
     dot.classList.remove('disconnected');
     wsAuthFailures = 0;
+    // Reconcile the decisions badge after every (re)connection.
+    if (typeof refreshDecisionsBadge === 'function') refreshDecisionsBadge();
     // A rename that landed while the socket was down is applied in place:
     // this socket is bound to the previously accepted name, which is allowed
     // to rename. Exactly one web-rename goes out; wsName updates on -ok.
@@ -248,6 +250,11 @@ function connect() {
         loadConversations();
         break;
       case 'message':
+        // A fresh ask anywhere refreshes the decisions badge, even for
+        // conversations that are not on screen.
+        if (event.data && event.data.ask && event.data.ask.state === 'open') {
+          refreshDecisionsBadge();
+        }
         // Filter: only render messages for the active conversation
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) {
           break;
@@ -371,8 +378,11 @@ function connect() {
         break;
       case 'ask-resolved':
         if (event.data && event.data.id != null) {
-          applyAskResolution(event.data.id, { state: 'resolved', resolvedBy: event.data.by });
-          decisionsCache = decisionsCache.filter(function(x) { return x.messageId !== event.data.id; });
+          decisionsSeq++;
+          applyAskResolution(event.data.id, { state: 'resolved', resolvedBy: event.data.by }, event.conversationId);
+          decisionsCache = decisionsCache.filter(function(x) {
+            return !(x.messageId === event.data.id && x.conversationId === event.conversationId);
+          });
           refreshDecisionsBadge();
           if (decisionsPanelOpen) renderDecisionsPanel();
         }
@@ -829,7 +839,9 @@ function appendMessage(msg, scroll) {
         : 'RESOLVED' + (msg.ask.resolvedBy ? ' by ' + msg.ask.resolvedBy : '');
       if (msg.ask.state === 'open') {
         askChip.title = 'Click to mark this decision as resolved';
-        askChip.addEventListener('click', function() { resolveAsk(msg.id); });
+        askChip.addEventListener('click', function() {
+          resolveAsk(msg.id, activeConversation && activeConversation.id);
+        });
       } else {
         askChip.disabled = true;
       }
@@ -5386,20 +5398,28 @@ loadNotifications();
 
 var decisionsPanelOpen = false;
 var decisionsCache = [];
+// Fetch-race guard: any authoritative change (an ask event over WS, a local
+// resolve) bumps the sequence, and an in-flight GET from before the bump
+// discards itself so a stale snapshot can never resurrect a resolved ask.
+var decisionsSeq = 0;
 
-function resolveAsk(messageId) {
+function resolveAsk(messageId, conversationId) {
+  decisionsSeq++;
   fetch('/api/message/' + messageId + '/resolve', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: webToken() })
+    body: JSON.stringify({ token: webToken(), conversation: conversationId || (activeConversation && activeConversation.id) })
   }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d && d.ask) applyAskResolution(messageId, d.ask);
+    if (d && d.ask) applyAskResolution(messageId, d.ask, conversationId);
     refreshDecisionsBadge();
-    if (decisionsPanelOpen) renderDecisionsPanel();
   }).catch(function() {});
 }
 
-function applyAskResolution(messageId, ask) {
+// Message ids are per conversation: only touch the rendered chip when the
+// resolution belongs to the conversation currently on screen.
+function applyAskResolution(messageId, ask, conversationId) {
+  var isActive = !conversationId || (activeConversation && activeConversation.id === conversationId);
+  if (!isActive) return;
   var m = allMessages.find(function(x) { return x.id === messageId; });
   if (m) m.ask = ask;
   var chip = document.querySelector('.ask-chip[data-message-id="' + messageId + '"]');
@@ -5411,18 +5431,22 @@ function applyAskResolution(messageId, ask) {
 }
 
 function refreshDecisionsBadge() {
+  var seqAtStart = decisionsSeq;
   fetch('/api/decisions?state=open&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.json(); })
     .then(function(d) {
+      if (decisionsSeq !== seqAtStart) return; // superseded while in flight
       decisionsCache = (d && d.decisions) || [];
       var badge = document.getElementById('decisions-badge');
-      if (!badge) return;
-      if (decisionsCache.length > 0) {
-        badge.textContent = decisionsCache.length > 99 ? '99+' : String(decisionsCache.length);
-        badge.hidden = false;
-      } else {
-        badge.hidden = true;
+      if (badge) {
+        if (decisionsCache.length > 0) {
+          badge.textContent = decisionsCache.length > 99 ? '99+' : String(decisionsCache.length);
+          badge.hidden = false;
+        } else {
+          badge.hidden = true;
+        }
       }
+      if (decisionsPanelOpen) renderDecisionsPanel();
     }).catch(function() {});
 }
 
@@ -5491,8 +5515,10 @@ function renderDecisionsPanel() {
     resolveBtn.textContent = 'Resolve';
     resolveBtn.addEventListener('click', function(e) {
       e.stopPropagation();
-      resolveAsk(d.messageId);
-      decisionsCache = decisionsCache.filter(function(x) { return x.messageId !== d.messageId; });
+      resolveAsk(d.messageId, d.conversationId);
+      decisionsCache = decisionsCache.filter(function(x) {
+        return !(x.messageId === d.messageId && x.conversationId === d.conversationId);
+      });
       renderDecisionsPanel();
     });
     row.appendChild(resolveBtn);
@@ -5500,11 +5526,24 @@ function renderDecisionsPanel() {
       if (d.conversationId && (!activeConversation || activeConversation.id !== d.conversationId)) {
         selectConversation(d.conversationId);
       }
+      // A DM ask lives in its thread view, not the channel view.
+      if (d.to && d.to.length > 0) {
+        var counterpart = d.sender === myName() ? d.to[0] : d.sender;
+        selectDm(counterpart);
+      }
       closeDecisionsPanel();
-      setTimeout(function() { scrollToMessage(d.messageId); }, 400);
+      scrollToMessageWhenReady(d.messageId, 10);
     });
     list.appendChild(row);
   });
+}
+
+// Retry until the message element exists (conversation loads are async),
+// then scroll; gives up quietly after `tries` beats of 200ms.
+function scrollToMessageWhenReady(id, tries) {
+  var el = document.querySelector('.message[data-id="' + id + '"]');
+  if (el) { scrollToMessage(id); return; }
+  if (tries > 0) setTimeout(function() { scrollToMessageWhenReady(id, tries - 1); }, 200);
 }
 
 refreshDecisionsBadge();

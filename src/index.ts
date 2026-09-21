@@ -294,11 +294,18 @@ manager.on("room", (event) => {
     event.type === "message-choice"
       ? manager.getRoom(event.conversationId)?.getMessageById(data?.id as number)
       : undefined;
+  // Ask resolutions follow the visibility of the asked message, exactly like
+  // choice resolutions: a private ask's lifecycle is private too.
+  const askOrig =
+    event.type === "ask-resolved"
+      ? manager.getRoom(event.conversationId)?.getMessageById(data?.id as number)
+      : undefined;
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
     // Targeted messages reach only the sender and named recipients (fail closed)
     if (targeted && !visibleToViewer(event.data as ChatMessage, clientNames.get(client))) continue;
     if (event.type === "message-choice" && (!choiceOrig || !visibleToViewer(choiceOrig, clientNames.get(client)))) continue;
+    if (event.type === "ask-resolved" && (!askOrig || !visibleToViewer(askOrig, clientNames.get(client)))) continue;
     client.send(msg);
   }
 
@@ -858,16 +865,24 @@ app.post("/api/message/:id/react", express.json(), (req, res) => {
 app.post("/api/message/:id/resolve", express.json(), (req, res) => {
   const messageId = Number(req.params.id);
   if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
-  const { sender, token, pid, paneId } = (req.body ?? {}) as {
-    sender?: string; token?: string; pid?: number; paneId?: number;
+  const { sender, token, pid, paneId, conversation } = (req.body ?? {}) as {
+    sender?: string; token?: string; pid?: number; paneId?: number; conversation?: string;
   };
   let room; let by: string;
   if (token !== undefined) {
     if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
-    room = manager.getActiveRoom();
+    // Message ids are per conversation; the panel resolves across rooms, so
+    // an explicit conversation id wins over whatever room happens to be active.
+    room = conversation ? manager.getRoom(conversation) : manager.getActiveRoom();
     const viewer = webViewer();
     if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
     by = viewer;
+    // The viewer may only resolve asks on messages they can see.
+    const orig = room?.getMessageById(messageId);
+    if (!orig || !visibleToViewer(orig, viewer)) {
+      res.status(404).json({ error: "Message not found" });
+      return;
+    }
   } else {
     if (!sender) { res.status(400).json({ error: "sender required" }); return; }
     const ctx = agentRoom(sender, res, pid, paneId);
@@ -902,6 +917,7 @@ app.get("/api/decisions", (req, res) => {
         sender: m.sender,
         text: m.text,
         ask: m.ask,
+        to: m.to,
         timestamp: m.timestamp,
       });
     }
