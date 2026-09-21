@@ -921,6 +921,7 @@ app.get("/api/agent/decisions", (req, res) => {
         sender: m.sender,
         text: m.text,
         ask: m.ask,
+        to: m.to,
         timestamp: m.timestamp,
       });
     }
