@@ -2150,7 +2150,13 @@ function loadConversations() {
   });
 }
 
+// Last-CALL-wins guard for conversation selection: without it, a slow
+// response from an earlier select can land after a newer one and clobber
+// the view (including any DM selection made in between).
+var convSelectSeq = 0;
+
 function selectConversation(id) {
+  var mySelect = ++convSelectSeq;
   // Close mobile drawer if open
   if (isMobileView()) closeMobileDrawer();
   activeDm = null;
@@ -2177,6 +2183,7 @@ function selectConversation(id) {
 
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.json(); }).then(function(data) {
+      if (mySelect !== convSelectSeq) return; // superseded by a newer selection
       if (data.conversation) {
         activeConversation = data.conversation;
         allMessages = (data.messages || []).slice();
@@ -2435,6 +2442,9 @@ function renderChannelView() {
     } else if (activeConversation && activeConversation.id === j.conv) {
       pendingDmJump = null;
       setTimeout(function() {
+        // Revalidate at execution time: a newer user navigation between the
+        // render and this tick wins over the jump.
+        if (!activeConversation || activeConversation.id !== j.conv) return;
         if (j.to) selectDm(j.to);
         scrollToMessageWhenReady(j.msgId, 10);
       }, 0);
