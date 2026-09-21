@@ -2421,8 +2421,25 @@ function selectDm(name) {
 // Bumped on every channel render so late navigation (the decisions panel's
 // jump) can tell when a conversation switch has fully landed.
 var channelRenderStamp = 0;
+// A decisions-panel jump hands its DM intent to the render itself: the
+// render that lands FOR THE JUMP'S CONVERSATION consumes it, so no timer
+// ever guesses whether a load is still pending. Newer jumps replace older
+// ones; a deadline expires strays.
+var pendingDmJump = null;
 function renderChannelView() {
   channelRenderStamp++;
+  if (pendingDmJump) {
+    var j = pendingDmJump;
+    if (Date.now() > j.deadline) {
+      pendingDmJump = null;
+    } else if (activeConversation && activeConversation.id === j.conv) {
+      pendingDmJump = null;
+      setTimeout(function() {
+        if (j.to) selectDm(j.to);
+        scrollToMessageWhenReady(j.msgId, 10);
+      }, 0);
+    }
+  }
   activeDm = null;
   lastSender = null;
   lastRenderedDayKey = null;
@@ -5409,7 +5426,6 @@ var decisionsCache = [];
 // merely another fetch.
 var decisionsSeq = 0;
 var decisionsFetchId = 0;
-var decisionsJumpToken = 0;
 
 function resolveAsk(messageId, conversationId) {
   fetch('/api/message/' + messageId + '/resolve', {
@@ -5536,33 +5552,17 @@ function renderDecisionsPanel() {
     });
     row.appendChild(resolveBtn);
     row.addEventListener('click', function() {
-      var needsSwitch = d.conversationId && (!activeConversation || activeConversation.id !== d.conversationId);
-      var stampBefore = channelRenderStamp;
-      var myJump = ++decisionsJumpToken; // a newer jump supersedes this one
-      if (needsSwitch) selectConversation(d.conversationId);
-      closeDecisionsPanel();
-      // Conversation loading is async and FINISHES by rendering the channel
-      // view (which clears any DM state). Wait until a render landed AND the
-      // active conversation is the one this jump targets: a render alone is
-      // not enough, because an unrelated pending load can complete first and
-      // later clobber a premature DM selection.
-      var settle = function(tries) {
-        if (myJump !== decisionsJumpToken) return; // superseded by a newer jump
-        var landed =
-          !needsSwitch ||
-          (channelRenderStamp !== stampBefore &&
-            activeConversation && activeConversation.id === d.conversationId);
-        if (!landed) {
-          if (tries > 0) setTimeout(function() { settle(tries - 1); }, 200);
-          return;
-        }
-        if (d.to && d.to.length > 0) {
-          var counterpart = d.sender === myName() ? d.to[0] : d.sender;
-          selectDm(counterpart);
-        }
-        scrollToMessageWhenReady(d.messageId, 10);
+      // Hand the intent to the render: re-selecting is idempotent and always
+      // produces exactly one render for this conversation, which consumes the
+      // jump. No pending-load guessing, no timers racing completions.
+      pendingDmJump = {
+        conv: d.conversationId,
+        to: (d.to && d.to.length > 0) ? (d.sender === myName() ? d.to[0] : d.sender) : null,
+        msgId: d.messageId,
+        deadline: Date.now() + 8000,
       };
-      settle(needsSwitch ? 15 : 0);
+      selectConversation(d.conversationId);
+      closeDecisionsPanel();
     });
     list.appendChild(row);
   });
