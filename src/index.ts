@@ -896,6 +896,39 @@ app.post("/api/message/:id/resolve", express.json(), (req, res) => {
   res.json({ id: msg.id, ask: msg.ask });
 });
 
+// Agent-facing decisions listing: same name-trust model as the other
+// /api/agent/* routes (the sender must hold an existing binding, i.e. have
+// joined), with DM visibility applied using the SENDER as viewer. The web
+// variant below stays token-gated for the registered human viewer.
+app.get("/api/agent/decisions", (req, res) => {
+  const sender = req.query.sender as string | undefined;
+  if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
+  const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
+  const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
+  const bound = agentRoom(sender, res, pid, paneId);
+  if (!bound) return;
+  const forName = req.query.for as string | undefined;
+  const out: unknown[] = [];
+  for (const meta of manager.listConversations()) {
+    const room = manager.getRoom(meta.id);
+    if (!room) continue;
+    for (const m of room.openAsks(forName)) {
+      if (!visibleToViewer(m, sender)) continue;
+      out.push({
+        conversationId: meta.id,
+        conversationName: meta.name,
+        messageId: m.id,
+        sender: m.sender,
+        text: m.text,
+        ask: m.ask,
+        timestamp: m.timestamp,
+      });
+    }
+  }
+  out.sort((a, b) => (b as { timestamp: number }).timestamp - (a as { timestamp: number }).timestamp);
+  res.json({ decisions: out, for: forName ?? null, state: "open" });
+});
+
 // Open decisions across every conversation, newest first. Web-token gated;
 // the viewer is always the registered name (agents use the chat_decisions
 // MCP tool instead). DM visibility applies to the message bodies.
