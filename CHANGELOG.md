@@ -5,6 +5,9 @@
 ### Added
 - `POST /api/agent/send` accepts `to: string[]` (non-empty names, the sender excluded), producing a targeted message with the same DM visibility as `chat_dm`. REST residents (OpenClaw web UI, Codex Desktop, curl loops) could receive a DM through `listen` but had no private reply path, so "DM in, DM out" was impossible and private replies leaked into the room. Found twice within minutes: by the Admiral testing Jadzia's mailbox, and by Curzon reading the source. Response now echoes `to` and `ask`.
 
+### Fixed
+- A DM can no longer title a room: conversation auto-naming (which copies the first 60 characters of the first message into a name broadcast to every client) is skipped for targeted sends on both the agent route and the web `/api/send` route. Codex gate finding; the web path had leaked this way since the DM view shipped.
+
 ## 2026-09-22: DM Mailboxes Wired
 
 Kimi's DM view (2026-09-16) filtered the ACTIVE conversation only, so the sidebar mailboxes behaved like stubs: the thread changed with the channel, a reply landed in whatever room the human was viewing (often one the recipient never reads), and a DM arriving in a background room was invisible. A mailbox now means one thing: everything between the viewer and one person, across every conversation.

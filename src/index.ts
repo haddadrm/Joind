@@ -614,9 +614,11 @@ app.post("/api/send", express.json(), (req, res) => {
     res.status(400).json({ error: "to must be an array of strings" });
     return;
   }
-  // Auto-name conversation from first user message
+  // Auto-name conversation from first user message. Never from a DM: the
+  // name is broadcast to every client, party or not.
   const activeId = manager.getActiveId();
-  if (activeId && sender !== "system") manager.autoName(activeId, text);
+  const targeted = Array.isArray(to) && to.length > 0;
+  if (activeId && sender !== "system" && !targeted) manager.autoName(activeId, text);
 
   const msg = room.send(sender, text, {
     image, replyTo, choices, to,
@@ -1589,7 +1591,9 @@ app.post("/api/agent/send", express.json(), (req, res) => {
   if (!ctx) return;
   ctx.room.touch(sender);
   ctx.room.setTyping(sender, false);
-  manager.autoName(ctx.convId, text);
+  // A DM must never title the room: auto-naming copies the first 60 chars
+  // into a name that is broadcast to every client, party or not.
+  if (!recipients) manager.autoName(ctx.convId, text);
   const msg = ctx.room.send(sender, text, {
     replyTo, choices,
     askFor: typeof askFor === "string" ? askFor : undefined,
