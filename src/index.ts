@@ -1569,10 +1569,22 @@ app.get("/api/agent/read", (req, res) => {
 });
 
 app.post("/api/agent/send", express.json(), (req, res) => {
-  const { sender, text, replyTo, choices, pid, paneId, askFor } = req.body as {
-    sender?: string; text?: string; replyTo?: number; choices?: string[]; pid?: number; paneId?: number; askFor?: string;
+  const { sender, text, replyTo, choices, pid, paneId, askFor, to } = req.body as {
+    sender?: string; text?: string; replyTo?: number; choices?: string[]; pid?: number; paneId?: number; askFor?: string; to?: unknown;
   };
   if (!sender || !text) { res.status(400).json({ error: "sender and text required" }); return; }
+  // Targeted send over REST: the same DM semantics as chat_dm, for agents
+  // that live on the REST loop (a DM read through listen can be answered
+  // in kind instead of leaking into the room).
+  let recipients: string[] | undefined;
+  if (to !== undefined) {
+    if (!Array.isArray(to) || to.length === 0 || !to.every((t) => typeof t === "string" && t.trim().length > 0)) {
+      res.status(400).json({ error: "to must be a non-empty array of names" });
+      return;
+    }
+    recipients = [...new Set((to as string[]).map((t) => t.trim()).filter((t) => t !== sender))];
+    if (recipients.length === 0) { res.status(400).json({ error: "to must name someone other than the sender" }); return; }
+  }
   const ctx = agentRoom(sender, res, pid, paneId);
   if (!ctx) return;
   ctx.room.touch(sender);
@@ -1581,8 +1593,9 @@ app.post("/api/agent/send", express.json(), (req, res) => {
   const msg = ctx.room.send(sender, text, {
     replyTo, choices,
     askFor: typeof askFor === "string" ? askFor : undefined,
+    to: recipients,
   });
-  res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices });
+  res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices, to: msg.to, ask: msg.ask });
 });
 
 app.post("/api/agent/leave", express.json(), (req, res) => {
