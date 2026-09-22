@@ -79,6 +79,20 @@ describe("DM mailboxes", () => {
     expect(msg.ask?.resolvedBy).toBe("Admiral");
   });
 
+  it("a replayed choice record resolves the ask even if the ask sidecar was lost", () => {
+    const room = manager.getRoom(convA)!;
+    const msg = room.send("Jadzia", "GO or HOLD?", { askFor: "Admiral", choices: ["GO", "HOLD"] });
+    // Simulate the crash window: choice persisted, ask resolution not.
+    room.applyChoiceRecords([{ messageId: msg.id, value: "HOLD", by: "Admiral", at: Date.now() }]);
+    expect(msg.choiceResponse?.value).toBe("HOLD");
+    expect(msg.ask?.state).toBe("resolved");
+    // A retried click on an already-chosen message still settles an open ask.
+    const again = room.send("Jadzia", "ship?", { askFor: "Admiral", choices: ["yes", "no"] });
+    again.choiceResponse = { value: "yes", by: "Admiral", at: Date.now() };
+    room.chooseMessage(again.id, "yes", "Admiral");
+    expect(again.ask?.state).toBe("resolved");
+  });
+
   it("falls back to the last DM's conversation, then the active one", () => {
     // Jadzia has no binding in this fixture, so the pair's most recent DM
     // conversation (B) wins; a stranger falls through to the active room.

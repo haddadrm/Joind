@@ -239,8 +239,9 @@ function connect() {
           if (activeDm) {
             // A mailbox was open across the (re)connect: refetch its
             // cross-conversation thread instead of painting the active
-            // room's messages into the pane.
-            selectDm(activeDm);
+            // room's messages into the pane. refreshDmThread leaves the
+            // composer (draft image, reply target) untouched.
+            refreshDmThread(activeDm);
           } else {
             renderMessages(event.data.messages || []);
           }
@@ -2522,6 +2523,14 @@ function selectDm(name) {
   renderConversationList();
   renderDmList();
   syncChannelHeader();
+  refreshDmThread(name);
+  syncInputPlaceholder();
+  document.getElementById('message-input').focus();
+}
+
+// Fetch (or refetch) the open mailbox's thread and repaint the pane. Does
+// not touch composer state, so a reconnect mid-draft loses nothing.
+function refreshDmThread(name) {
   var c = document.getElementById('messages');
   c.textContent = '';
   var loader = document.createElement('div');
@@ -2554,8 +2563,6 @@ function selectDm(name) {
       }
       scrollToBottom();
     }).catch(function() {});
-  syncInputPlaceholder();
-  document.getElementById('message-input').focus();
 }
 
 // Render the channel view from the already-loaded allMessages/agents state.
@@ -5591,11 +5598,18 @@ function resolveAsk(messageId, conversationId) {
 // Message ids are per conversation: only touch the rendered chip when the
 // resolution belongs to the conversation currently on screen.
 function applyAskResolution(messageId, ask, conversationId) {
-  var isActive = !conversationId || (activeConversation && activeConversation.id === conversationId);
-  if (!isActive) return;
-  var m = allMessages.find(function(x) { return x.id === messageId; });
-  if (m) m.ask = ask;
-  var chip = document.querySelector('.ask-chip[data-message-id="' + messageId + '"]');
+  var conv = conversationId || (activeConversation && activeConversation.id) || '';
+  // Update whichever caches hold this exact (conversation, id): the active
+  // room's list, and an open mailbox thread that may span rooms.
+  if (activeConversation && activeConversation.id === conv) {
+    var m = allMessages.find(function(x) { return x.id === messageId; });
+    if (m) m.ask = ask;
+  }
+  dmThread.forEach(function(x) {
+    if (x.id === messageId && (x.conversationId || '') === conv) x.ask = ask;
+  });
+  // Conv-qualified: a mailbox pane can show A:7 and B:7 side by side.
+  var chip = document.querySelector('.message[data-id="' + messageId + '"][data-conv="' + conv + '"] .ask-chip');
   if (chip) {
     chip.className = 'ask-chip resolved';
     chip.textContent = 'RESOLVED' + (ask && ask.resolvedBy ? ' by ' + ask.resolvedBy : '');

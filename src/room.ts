@@ -518,7 +518,12 @@ export class ChatRoom extends EventEmitter {
     const msg = this.messages.find(m => m.id === messageId);
     if (!msg) return null;
     if (!msg.choices || !msg.choices.includes(value)) return null;
-    if (msg.choiceResponse) return msg;  // already resolved — first answer wins
+    if (msg.choiceResponse) {
+      // First answer wins, but a retry after an interrupted persist may
+      // still owe the ask its resolution.
+      if (msg.ask?.state === "open") this.resolveAsk(messageId, by);
+      return msg;
+    }
     const at = Date.now();
     msg.choiceResponse = { value, by, at };
     this.onChoice?.(messageId, value, by, at);
@@ -538,6 +543,14 @@ export class ChatRoom extends EventEmitter {
       const msg = this.messages.find(m => m.id === r.messageId);
       if (!msg || !msg.choices || !msg.choices.includes(r.value)) continue;
       msg.choiceResponse = { value: r.value, by: r.by, at: r.at };
+      // A recorded choice answers any ask on the same message. The choice
+      // sidecar is written before the ask sidecar, so a crash between the
+      // two must not replay as "chosen but still open".
+      if (msg.ask?.state === "open") {
+        msg.ask.state = "resolved";
+        msg.ask.resolvedBy = r.by;
+        msg.ask.resolvedAt = r.at;
+      }
       seen.add(r.messageId);
     }
   }
