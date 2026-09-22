@@ -81,21 +81,24 @@ export function collectDmPartners(manager: ManagerLike, viewer: string): DmPartn
     for (const m of room.read(undefined, Number.MAX_SAFE_INTEGER, undefined, viewer)) {
       if (!m.to || m.to.length === 0) continue;
       if (!visibleToViewer(m, viewer)) continue;
-      let partner: string | null = null;
+      // An outgoing group DM belongs to every recipient's mailbox; an
+      // incoming one belongs to the sender's.
+      const partners: string[] = [];
       if (m.sender === viewer) {
-        partner = m.to.find((t) => t !== viewer) ?? null;
+        for (const t of m.to) if (t !== viewer && !partners.includes(t)) partners.push(t);
       } else if (m.to.includes(viewer)) {
-        partner = m.sender;
+        partners.push(m.sender);
       }
-      if (!partner) continue;
-      const prev = latest.get(partner);
-      if (!prev || m.timestamp > prev.lastTimestamp) {
-        latest.set(partner, {
-          partner,
-          lastTimestamp: m.timestamp,
-          lastText: m.text.length > 80 ? m.text.slice(0, 77) + "..." : m.text,
-          lastSender: m.sender,
-        });
+      for (const partner of partners) {
+        const prev = latest.get(partner);
+        if (!prev || m.timestamp > prev.lastTimestamp) {
+          latest.set(partner, {
+            partner,
+            lastTimestamp: m.timestamp,
+            lastText: m.text.length > 80 ? m.text.slice(0, 77) + "..." : m.text,
+            lastSender: m.sender,
+          });
+        }
       }
     }
   }

@@ -523,6 +523,10 @@ export class ChatRoom extends EventEmitter {
     msg.choiceResponse = { value, by, at };
     this.onChoice?.(messageId, value, by, at);
     this.emit("room", { type: "message-choice", data: { id: messageId, response: msg.choiceResponse } } as unknown as RoomEvent);
+    // Picking an option IS the decision: a message that carries both choices
+    // and an open ask resolves the ask in the same click, so a human never
+    // has to answer twice (field report, cpm-engine, 2026-09-22).
+    if (msg.ask?.state === "open") this.resolveAsk(messageId, by);
     return msg;
   }
 

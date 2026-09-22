@@ -236,7 +236,14 @@ function connect() {
         if (event.data.reactions) allReactions = event.data.reactions;
         if (activeConversation) {
           renderPills();
-          renderMessages(event.data.messages || []);
+          if (activeDm) {
+            // A mailbox was open across the (re)connect: refetch its
+            // cross-conversation thread instead of painting the active
+            // room's messages into the pane.
+            selectDm(activeDm);
+          } else {
+            renderMessages(event.data.messages || []);
+          }
           renderTaskBadgeFromCount(initTaskCount, initHasUrgent);
         } else {
           showNoConversation();
@@ -263,28 +270,38 @@ function connect() {
         // messages the viewer may see, so any DM event here involves us.)
         if (event.data && event.data.to && event.data.sender !== 'system') {
           var meNow = myName();
-          var dmPartner = null;
+          // Every mailbox this message belongs to: all non-viewer recipients
+          // of an outgoing group DM, or the sender of an incoming one.
+          var dmPartners = [];
           if (event.data.sender === meNow) {
             for (var di = 0; di < event.data.to.length; di++) {
-              if (event.data.to[di] !== meNow) { dmPartner = event.data.to[di]; break; }
+              if (event.data.to[di] !== meNow && dmPartners.indexOf(event.data.to[di]) < 0) dmPartners.push(event.data.to[di]);
             }
           } else if (event.data.to.indexOf(meNow) >= 0) {
-            dmPartner = event.data.sender;
+            dmPartners.push(event.data.sender);
           }
-          if (dmPartner) {
+          if (dmPartners.length > 0) {
+            var dmMsg = event.data;
+            if (!dmMsg.conversationId && event.conversationId) dmMsg.conversationId = event.conversationId;
             if (activeConversation && event.conversationId === activeConversation.id) {
-              allMessages.push(event.data);
+              allMessages.push(dmMsg);
             }
-            if (activeDm === dmPartner) {
-              dmThread.push(event.data);
-              hideWelcome();
-              appendMessage(event.data);
-              if (event.data.sender !== meNow) playSound(event.data.sender);
-            } else if (event.data.sender !== meNow) {
-              playSound(event.data.sender);
-              dmUnread[dmPartner] = (dmUnread[dmPartner] || 0) + 1;
+            if (activeDm && dmPartners.indexOf(activeDm) >= 0) {
+              // Dedupe against a snapshot that may already carry this message
+              var already = dmThread.some(function(m) { return dmKey(m) === dmKey(dmMsg); });
+              if (!already) {
+                dmThread.push(dmMsg);
+                hideWelcome();
+                appendMessage(dmMsg);
+              }
+              if (dmMsg.sender !== meNow) playSound(dmMsg.sender);
+            } else if (dmMsg.sender !== meNow) {
+              playSound(dmMsg.sender);
+              dmPartners.forEach(function(p) { dmUnread[p] = (dmUnread[p] || 0) + 1; });
             }
-            if (dmPartnersCache.indexOf(dmPartner) < 0) dmPartnersCache.push(dmPartner);
+            dmPartners.forEach(function(p) {
+              if (dmPartnersCache.indexOf(p) < 0) dmPartnersCache.push(p);
+            });
             renderDmList();
             break;
           }
@@ -365,14 +382,14 @@ function connect() {
         var chId = event.data.id;
         var chMsg = allMessages.find(function(m) { return m.id === chId; });
         if (chMsg) chMsg.choiceResponse = event.data.response;
-        var chEl = document.querySelector('.msg-choices[data-message-id="' + chId + '"]');
-        if (chEl) renderChoices(chEl, chMsg);
+        var chEl = document.querySelector('.message[data-id="' + chId + '"][data-conv="' + event.conversationId + '"] .msg-choices');
+        if (chEl && chMsg) renderChoices(chEl, chMsg);
         break;
       case 'message-deleted':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         var delId = event.data.id;
         allMessages = allMessages.filter(function(m) { return m.id !== delId; });
-        var delEl = document.querySelector('.message[data-id="' + delId + '"]');
+        var delEl = document.querySelector('.message[data-id="' + delId + '"][data-conv="' + event.conversationId + '"]');
         if (delEl) {
           delEl.style.transition = 'opacity 0.2s, max-height 0.3s';
           delEl.style.opacity = '0';
@@ -437,7 +454,7 @@ function connect() {
             return !(r.messageId === event.data.messageId && r.emoji === event.data.emoji && r.sender === event.data.sender);
           });
         }
-        var rRow = document.querySelector('.msg-reactions[data-message-id="' + event.data.messageId + '"]');
+        var rRow = document.querySelector('.message[data-id="' + event.data.messageId + '"][data-conv="' + event.conversationId + '"] .msg-reactions');
         if (rRow) {
           var msgR = allReactions.filter(function(r) { return r.messageId === event.data.messageId; });
           renderReactionRow(rRow, event.data.messageId, msgR);
@@ -747,6 +764,9 @@ function appendMessage(msg, scroll) {
   var c = document.getElementById('messages');
   var el = document.createElement('div');
   el.dataset.id = msg.id || '';
+  // Message ids are per conversation; a mailbox pane mixes rooms, so every
+  // rendered message carries its conversation for conv-qualified lookups.
+  el.dataset.conv = msg.conversationId || (activeConversation && activeConversation.id) || '';
 
   // Day divider: inserted before a message whose local calendar date differs
   // from the last rendered one. The comparison uses a stable date key (not
@@ -864,7 +884,7 @@ function appendMessage(msg, scroll) {
       if (msg.ask.state === 'open') {
         askChip.title = 'Click to mark this decision as resolved';
         askChip.addEventListener('click', function() {
-          resolveAsk(msg.id, activeConversation && activeConversation.id);
+          resolveAsk(msg.id, msg.conversationId || (activeConversation && activeConversation.id));
         });
       } else {
         askChip.disabled = true;
@@ -872,8 +892,9 @@ function appendMessage(msg, scroll) {
       body.appendChild(askChip);
     }
 
-    // Inline decision choices
-    if (msg.choices && msg.choices.length > 0) {
+    // Inline decision choices (channel view only: the choose endpoint is
+    // active-room scoped and a mailbox pane mixes rooms)
+    if (msg.choices && msg.choices.length > 0 && !activeDm) {
       var choicesRow = document.createElement('div');
       choicesRow.className = 'msg-choices';
       choicesRow.dataset.messageId = msg.id;
@@ -947,7 +968,11 @@ function appendMessage(msg, scroll) {
     actions.appendChild(delBtn);
 
     el.dataset.id = msg.id;
-    el.appendChild(av); el.appendChild(body); el.appendChild(actions);
+    el.appendChild(av); el.appendChild(body);
+    // Hover actions (react, reply, edit, delete) are active-room scoped;
+    // a mailbox pane mixes rooms, so they stay hidden there. The composer
+    // is the reply path in a DM thread.
+    if (!activeDm) el.appendChild(actions);
 
     // Grouped: add hover timestamp + id
     if (isGrouped) {
@@ -1181,13 +1206,20 @@ function sendMessage() {
   // conversation the recipient actually reads (their bound room), not
   // whatever channel happens to be behind this thread.
   if (activeDm) {
-    var dmText = text || '[image]';
+    var dmPayload = { to: activeDm, text: text || '[image]', token: webToken() };
+    if (pendingImage) dmPayload.image = pendingImage.url;
+    if (replyingTo) {
+      // The server keeps the reply only if the quoted message lives in the
+      // room the DM is routed to (ids are per room).
+      dmPayload.replyTo = replyingTo.id;
+      dmPayload.replyConversationId = replyingTo.conversationId || (activeConversation && activeConversation.id);
+    }
     input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
     syncHighlight();
     clearReply();
     clearImagePreview();
     fetch('/api/dm/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: activeDm, text: dmText, token: webToken() }) });
+      body: JSON.stringify(dmPayload) });
     // The rendered echo arrives over the WebSocket like every other send.
     return;
   }
@@ -2377,7 +2409,10 @@ function fetchDmPartners() {
   fetch('/api/dms?token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      dmPartnersCache = (d && d.partners) ? d.partners.map(function(p) { return p.partner; }) : [];
+      // Union with partners discovered over the socket while this was in flight
+      var fetched = (d && d.partners) ? d.partners.map(function(p) { return p.partner; }) : [];
+      dmPartnersCache.forEach(function(p) { if (fetched.indexOf(p) < 0) fetched.push(p); });
+      dmPartnersCache = fetched;
       renderDmList();
     }).catch(function() {});
 }
@@ -2462,6 +2497,17 @@ function renderDmList() {
 var dmThread = [];
 var dmFetchSeq = 0;
 
+function dmKey(m) { return (m.conversationId || '') + ':' + m.id; }
+
+// Union two thread slices by (conversationId, id), ordered by time then id.
+function mergeDmThread(existing, incoming) {
+  var byKey = {};
+  existing.forEach(function(m) { byKey[dmKey(m)] = m; });
+  incoming.forEach(function(m) { byKey[dmKey(m)] = m; });
+  return Object.keys(byKey).map(function(k) { return byKey[k]; })
+    .sort(function(a, b) { return (a.timestamp - b.timestamp) || (a.id - b.id); });
+}
+
 function selectDm(name) {
   activeDm = name;
   delete dmUnread[name];
@@ -2489,7 +2535,9 @@ function selectDm(name) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (mySeq !== dmFetchSeq || activeDm !== name) return; // superseded
-      dmThread = data.messages || [];
+      // Merge the snapshot with anything that arrived over the socket while
+      // the fetch was in flight: union by (conversation, id), then order.
+      dmThread = mergeDmThread(dmThread, data.messages || []);
       var cc = document.getElementById('messages');
       cc.textContent = '';
       lastSender = null;

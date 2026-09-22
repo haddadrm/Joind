@@ -916,7 +916,9 @@ app.get("/api/dms", (req, res) => {
 // actually reads (their bound conversation, else the pair's last DM room,
 // else the active room). Returns where it landed.
 app.post("/api/dm/send", express.json(), (req, res) => {
-  const { to, text, token } = (req.body ?? {}) as { to?: string; text?: string; token?: string };
+  const { to, text, token, image, replyTo, replyConversationId } = (req.body ?? {}) as {
+    to?: string; text?: string; token?: string; image?: string; replyTo?: number; replyConversationId?: string;
+  };
   if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
   const viewer = webViewer();
   if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
@@ -927,8 +929,19 @@ app.post("/api/dm/send", express.json(), (req, res) => {
   const convId = resolveDmTargetConversation(manager, viewer, to);
   const room = convId ? manager.getRoom(convId) : undefined;
   if (!convId || !room) { res.status(400).json({ error: "No conversation available for this DM" }); return; }
-  const msg = room.send(viewer, text, { to: [to] });
-  res.json({ id: msg.id, conversationId: convId, sender: msg.sender, to: msg.to, text: msg.text, timestamp: msg.timestamp });
+  // A reply target only survives when the quoted message lives in the room
+  // the DM is routed to; message ids are per room, so anything else would
+  // quote a stranger.
+  const safeReplyTo =
+    typeof replyTo === "number" && replyConversationId === convId && room.getMessageById(replyTo)
+      ? replyTo
+      : undefined;
+  const msg = room.send(viewer, text, {
+    to: [to],
+    image: typeof image === "string" ? image : undefined,
+    replyTo: safeReplyTo,
+  });
+  res.json({ id: msg.id, conversationId: convId, sender: msg.sender, to: msg.to, text: msg.text, timestamp: msg.timestamp, replyTo: msg.replyTo });
 });
 
 // Agent-facing decisions listing: same name-trust model as the other

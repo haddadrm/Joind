@@ -61,6 +61,24 @@ describe("DM mailboxes", () => {
     expect(target).toBe(bound ?? convB);
   });
 
+  it("an outgoing group DM lands in every recipient's mailbox", () => {
+    manager.getRoom(convA)!.send("Admiral", "all hands, privately", { to: ["Jadzia", "Codex", "Curzon"] });
+    const partners = collectDmPartners(manager, "Admiral").map((p) => p.partner);
+    expect(partners).toContain("Codex");
+    expect(partners).toContain("Curzon");
+    expect(collectDmThread(manager, "Admiral", "Codex").map((m) => m.text)).toEqual(["all hands, privately"]);
+  });
+
+  it("choosing an option on an asked message resolves the ask in the same click", () => {
+    const room = manager.getRoom(convA)!;
+    const msg = room.send("Jadzia", "GO or HOLD on W090?", { askFor: "Admiral", choices: ["GO", "HOLD"] });
+    expect(msg.ask?.state).toBe("open");
+    room.chooseMessage(msg.id, "GO", "Admiral");
+    expect(msg.choiceResponse?.value).toBe("GO");
+    expect(msg.ask?.state).toBe("resolved");
+    expect(msg.ask?.resolvedBy).toBe("Admiral");
+  });
+
   it("falls back to the last DM's conversation, then the active one", () => {
     // Jadzia has no binding in this fixture, so the pair's most recent DM
     // conversation (B) wins; a stranger falls through to the active room.
