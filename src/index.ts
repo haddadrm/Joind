@@ -22,6 +22,7 @@ import { ensureDir } from "./persist.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { NotificationStore, TaskTracker, classifyMessage, isNotifiable, type Classified } from "./notifications.js";
 import { initFileLog } from "./log.js";
+import { collectDmThread, collectDmPartners, resolveDmTargetConversation } from "./dms.js";
 import { setDefaultPresenceGrace } from "./room.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -894,6 +895,40 @@ app.post("/api/message/:id/resolve", express.json(), (req, res) => {
   const msg = room.resolveAsk(messageId, by);
   if (!msg) { res.status(404).json({ error: "No open ask on that message" }); return; }
   res.json({ id: msg.id, ask: msg.ask });
+});
+
+// --- DM mailboxes (web viewer) ---
+// GET /api/dms            -> partner summaries (sidebar), newest first
+// GET /api/dms?with=Name  -> the full cross-conversation thread with Name
+app.get("/api/dms", (req, res) => {
+  if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+  const viewer = webViewer();
+  if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
+  const partner = req.query.with as string | undefined;
+  if (partner) {
+    res.json({ partner, messages: collectDmThread(manager, viewer, partner) });
+    return;
+  }
+  res.json({ partners: collectDmPartners(manager, viewer) });
+});
+
+// Send a DM as the registered viewer, routed into a room the recipient
+// actually reads (their bound conversation, else the pair's last DM room,
+// else the active room). Returns where it landed.
+app.post("/api/dm/send", express.json(), (req, res) => {
+  const { to, text, token } = (req.body ?? {}) as { to?: string; text?: string; token?: string };
+  if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
+  const viewer = webViewer();
+  if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
+  if (!to || typeof to !== "string" || !text || typeof text !== "string") {
+    res.status(400).json({ error: "to and text required" });
+    return;
+  }
+  const convId = resolveDmTargetConversation(manager, viewer, to);
+  const room = convId ? manager.getRoom(convId) : undefined;
+  if (!convId || !room) { res.status(400).json({ error: "No conversation available for this DM" }); return; }
+  const msg = room.send(viewer, text, { to: [to] });
+  res.json({ id: msg.id, conversationId: convId, sender: msg.sender, to: msg.to, text: msg.text, timestamp: msg.timestamp });
 });
 
 // Agent-facing decisions listing: same name-trust model as the other

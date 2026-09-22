@@ -205,8 +205,9 @@ function connect() {
   ws.onopen = function() {
     dot.classList.remove('disconnected');
     wsAuthFailures = 0;
-    // Reconcile the decisions badge after every (re)connection.
+    // Reconcile the decisions badge and mailbox partners after every (re)connection.
     if (typeof refreshDecisionsBadge === 'function') refreshDecisionsBadge();
+    if (typeof fetchDmPartners === 'function') fetchDmPartners();
     // A rename that landed while the socket was down is applied in place:
     // this socket is bound to the previously accepted name, which is allowed
     // to rename. Exactly one web-rename goes out; wsName updates on -ok.
@@ -255,24 +256,47 @@ function connect() {
         if (event.data && event.data.ask && event.data.ask.state === 'open') {
           refreshDecisionsBadge();
         }
+        // DMs involving the viewer are mailbox traffic and conversation-
+        // independent: handle them BEFORE the active-conversation filter so
+        // a DM arriving from a background room still lands in its thread
+        // and bumps its unread badge. (The server only fans out targeted
+        // messages the viewer may see, so any DM event here involves us.)
+        if (event.data && event.data.to && event.data.sender !== 'system') {
+          var meNow = myName();
+          var dmPartner = null;
+          if (event.data.sender === meNow) {
+            for (var di = 0; di < event.data.to.length; di++) {
+              if (event.data.to[di] !== meNow) { dmPartner = event.data.to[di]; break; }
+            }
+          } else if (event.data.to.indexOf(meNow) >= 0) {
+            dmPartner = event.data.sender;
+          }
+          if (dmPartner) {
+            if (activeConversation && event.conversationId === activeConversation.id) {
+              allMessages.push(event.data);
+            }
+            if (activeDm === dmPartner) {
+              dmThread.push(event.data);
+              hideWelcome();
+              appendMessage(event.data);
+              if (event.data.sender !== meNow) playSound(event.data.sender);
+            } else if (event.data.sender !== meNow) {
+              playSound(event.data.sender);
+              dmUnread[dmPartner] = (dmUnread[dmPartner] || 0) + 1;
+            }
+            if (dmPartnersCache.indexOf(dmPartner) < 0) dmPartnersCache.push(dmPartner);
+            renderDmList();
+            break;
+          }
+        }
         // Filter: only render messages for the active conversation
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) {
           break;
         }
         allMessages.push(event.data);
-        // A targeted message may introduce a new DM partner
-        if (event.data.to) renderDmList();
         // Filter: only render messages that belong to the current view
-        // (channel view skips DMs; DM view skips channels and other DMs)
+        // (channel view skips DMs; DM view skips channel traffic)
         if (!messageInCurrentView(event.data)) {
-          // Arrival notification is separate from pane membership: a DM
-          // addressed to the user still sounds and flags its sidebar row
-          // even while another pane is open.
-          if (event.data.to && event.data.to.indexOf(myName()) >= 0 && event.data.sender !== 'system') {
-            playSound(event.data.sender);
-            dmUnread[event.data.sender] = (dmUnread[event.data.sender] || 0) + 1;
-            renderDmList();
-          }
           break;
         }
         hideWelcome();
@@ -1153,10 +1177,24 @@ function sendMessage() {
     return;
   }
 
+  // DM view: route through the mailbox endpoint so the message lands in a
+  // conversation the recipient actually reads (their bound room), not
+  // whatever channel happens to be behind this thread.
+  if (activeDm) {
+    var dmText = text || '[image]';
+    input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
+    syncHighlight();
+    clearReply();
+    clearImagePreview();
+    fetch('/api/dm/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: activeDm, text: dmText, token: webToken() }) });
+    // The rendered echo arrives over the WebSocket like every other send.
+    return;
+  }
+
   var payload = { sender: sender.value || 'human', text: text || '[image]', token: webToken() };
   if (replyingTo) payload.replyTo = replyingTo.id;
   if (pendingImage) payload.image = pendingImage.url;
-  if (activeDm) payload.to = [activeDm];
   input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
   syncHighlight();
   clearReply();
@@ -2332,6 +2370,18 @@ function messageInCurrentView(m) {
   return !m.to;
 }
 
+// Partners with DM history anywhere, fetched once and kept fresh on DM
+// arrivals: the mailbox list must not depend on which channel is open.
+var dmPartnersCache = [];
+function fetchDmPartners() {
+  fetch('/api/dms?token=' + encodeURIComponent(webToken()))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      dmPartnersCache = (d && d.partners) ? d.partners.map(function(p) { return p.partner; }) : [];
+      renderDmList();
+    }).catch(function() {});
+}
+
 function renderDmList() {
   var list = document.getElementById('dm-list');
   if (!list) return;
@@ -2340,6 +2390,10 @@ function renderDmList() {
   var names = [];
   agents.forEach(function(a) {
     if (names.indexOf(a.name) < 0) names.push(a.name);
+  });
+  // Anyone with DM history in ANY conversation, even if offline
+  dmPartnersCache.forEach(function(p) {
+    if (p !== me && names.indexOf(p) < 0) names.push(p);
   });
   // Surface anyone who targeted (or was targeted by) the user, even if offline
   allMessages.forEach(function(m) {
@@ -2401,9 +2455,17 @@ function renderDmList() {
   });
 }
 
+// The open mailbox thread: fetched from the server, spans EVERY
+// conversation (a mailbox means everything with that person, not just
+// what the active channel happens to hold). Guarded latest-wins like the
+// other fetch surfaces.
+var dmThread = [];
+var dmFetchSeq = 0;
+
 function selectDm(name) {
   activeDm = name;
   delete dmUnread[name];
+  dmThread = [];
   lastSender = null;
   lastRenderedDayKey = null;
   // A reply target or draft image from another view must not leak into this DM
@@ -2416,8 +2478,34 @@ function selectDm(name) {
   syncChannelHeader();
   var c = document.getElementById('messages');
   c.textContent = '';
-  currentViewMessages(allMessages).forEach(function(m) { appendMessage(m, false); });
-  scrollToBottom();
+  var loader = document.createElement('div');
+  loader.className = 'empty-state';
+  loader.style.textAlign = 'center';
+  loader.style.padding = '24px';
+  loader.textContent = 'Loading...';
+  c.appendChild(loader);
+  var mySeq = ++dmFetchSeq;
+  fetch('/api/dms?with=' + encodeURIComponent(name) + '&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (mySeq !== dmFetchSeq || activeDm !== name) return; // superseded
+      dmThread = data.messages || [];
+      var cc = document.getElementById('messages');
+      cc.textContent = '';
+      lastSender = null;
+      lastRenderedDayKey = null;
+      if (dmThread.length === 0) {
+        var empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.style.textAlign = 'center';
+        empty.style.padding = '24px';
+        empty.textContent = 'No messages with ' + name + ' yet. Say something.';
+        cc.appendChild(empty);
+      } else {
+        dmThread.forEach(function(m) { appendMessage(m, false); });
+      }
+      scrollToBottom();
+    }).catch(function() {});
   syncInputPlaceholder();
   document.getElementById('message-input').focus();
 }
@@ -2451,6 +2539,7 @@ function renderChannelView() {
     }
   }
   activeDm = null;
+  dmThread = [];
   lastSender = null;
   lastRenderedDayKey = null;
   clearReply();
@@ -5587,3 +5676,4 @@ function scrollToMessageWhenReady(id, tries) {
 }
 
 refreshDecisionsBadge();
+// dm partners load on ws.onopen, after viewer registration settles

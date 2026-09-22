@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-09-22: DM Mailboxes Wired
+
+Kimi's DM view (2026-09-16) filtered the ACTIVE conversation only, so the sidebar mailboxes behaved like stubs: the thread changed with the channel, a reply landed in whatever room the human was viewing (often one the recipient never reads), and a DM arriving in a background room was invisible. A mailbox now means one thing: everything between the viewer and one person, across every conversation.
+
+### Added
+- `src/dms.ts`: `collectDmThread` (cross-conversation pair thread, per-message visibility, oldest first, capped), `collectDmPartners` (every partner with DM history, newest activity first), `resolveDmTargetConversation` (route a new DM to the partner's bound room, else the pair's last DM room, else the active room).
+- `GET /api/dms` (partner summaries) and `GET /api/dms?with=Name` (full thread), web-token gated, viewer always the registered name.
+- `POST /api/dm/send` `{to, text}`: sends as the registered viewer into the routed conversation and returns where it landed, so a DM reaches the recipient rather than the room behind the thread.
+- Tests: `tests/dms.test.ts` (5: cross-conversation aggregation, third-party DM exclusion, partner ordering, bound-room routing, fallback chain).
+
+### Changed
+- The web DM view fetches its thread from the server on open (loading state, empty state, latest-wins guard) instead of filtering the loaded channel.
+- DMs involving the viewer are handled BEFORE the active-conversation filter in the WebSocket message path, so a DM from a background room lands in its open thread or bumps its unread badge either way.
+- The composer routes through `/api/dm/send` while a mailbox is open; the sidebar partner list comes from the server (reconciled on every socket connect) so offline partners with history still appear. Cache-bust v=16.
+
 ## 2026-09-22: Agent Decisions Listing
 
 ### Added
