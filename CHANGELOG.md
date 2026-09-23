@@ -15,6 +15,9 @@ Diagnosed from the Y530 server log: a local Claude Code session missed about one
 - Session and teardown discipline (Codex gate round 2): a rejoin from a new pid resets the agent's `joinedAt` and `lastPostAt` (the old worker's proof of life does not carry over) and any change of terminal identity (pid or pane) resets the warn record; a warn record reset while an attempt is still running marks that attempt's failure stale (never announced, never suppressing the new session's first warning); a process seen with a WezTerm pane in any room shares that pane's lock even where it registered pid-only; `destroy()` drops every agent and clears the coalescing state, so nothing queued or in flight can inject, warn or re-queue after a room is deleted.
 - Tests: 21 in `tests/wake.test.ts` (classification, base URL, serialization by terminal, skip and moved results, retry and attempt accounting, warn-once per room until forget, transient rate limit, presence event and lastPostAt on the room, stale outcomes, proof-of-life reset, shared-key serialization, execution-time generations, release and reclaim, composite identity, live-registration equivalence, per-attempt generations, pane replacement, destroy) plus 2 room-level injector tests. Suite 117.
 
+### Backlog
+- Join-time reachability stamp (docs/BACKLOG.md): probe the pid on the bound host at join and tell the room then, not at the first missed mention. From the first live wake on the Y530 after deploy: the honest line fired correctly, and the target was a stale pid.
+
 ### Fixed
 - The injected mention prompt now uses the address the server actually binds (`injectBaseUrlFor(host, port)`: wildcard `0.0.0.0` and `::` map to loopback, IPv6 literals are bracketed) instead of a hardcoded `127.0.0.1:4200`.
 - Codex gate round 5 (1 finding, closed): queued wakes did not revalidate terminal equivalence before injecting.
