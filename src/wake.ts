@@ -32,6 +32,9 @@ export interface WakeOutcome {
   attempts: number;
   /** True when the caller should tell the room about this failure now. */
   warn: boolean;
+  /** The warn key was reset (new session) while this attempt was running:
+   *  the failure belongs to a session that no longer exists. Never warned. */
+  stale?: boolean;
   reason?: string;
 }
 
@@ -65,6 +68,9 @@ export class WakeCoordinator {
   private chains = new Map<string, Promise<void>>();
   private lastWarnAt = new Map<string, number>();
   private permanentWarned = new Set<string>();
+  /** Bumped by forget(): an attempt started under an older generation
+   *  reports stale and never touches the warn record. */
+  private generation = new Map<string, number>();
 
   constructor(
     private opts: { retryDelayMs?: number; warnCooldownMs?: number; sleep?: (ms: number) => Promise<void> } = {}
@@ -79,6 +85,7 @@ export class WakeCoordinator {
   forget(warnKey: string): void {
     this.permanentWarned.delete(warnKey);
     this.lastWarnAt.delete(warnKey);
+    this.generation.set(warnKey, (this.generation.get(warnKey) ?? 0) + 1);
   }
 
   /**
@@ -88,7 +95,8 @@ export class WakeCoordinator {
    */
   run(serialKey: string, warnKey: string, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
     const previous = this.chains.get(serialKey) ?? Promise.resolve();
-    const task = previous.catch(() => undefined).then(() => this.execute(warnKey, attempt));
+    const gen = this.generation.get(warnKey) ?? 0;
+    const task = previous.catch(() => undefined).then(() => this.execute(warnKey, gen, attempt));
     // Keep the chain alive whatever happened, and drop it when it is the tail.
     const tail = task.then(() => undefined, () => undefined);
     this.chains.set(serialKey, tail);
@@ -96,7 +104,7 @@ export class WakeCoordinator {
     return task;
   }
 
-  private async execute(warnKey: string, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
+  private async execute(warnKey: string, gen: number, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
     const retryDelay = this.opts.retryDelayMs ?? 400;
     let lastErr: unknown;
     let attempts = 0;
@@ -113,6 +121,11 @@ export class WakeCoordinator {
     }
     const kind = classifyWakeFailure(lastErr);
     const reason = lastErr instanceof Error ? lastErr.message.split("\n")[0] : String(lastErr);
+    if ((this.generation.get(warnKey) ?? 0) !== gen) {
+      // The session this attempt was aimed at is gone; its failure must not
+      // be announced, nor suppress the new session's first warning.
+      return { ok: false, kind, attempts, warn: false, stale: true, reason };
+    }
     return { ok: false, kind, attempts, warn: this.shouldWarn(warnKey, kind), reason };
   }
 

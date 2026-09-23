@@ -20,9 +20,17 @@ export function setInjectBaseUrl(url: string): void {
 }
 const wakes = new WakeCoordinator();
 let roomSeq = 0;
-/** Serialization key for a terminal: injections into one console never overlap. */
-function terminalKey(agent: { pid: number; weztermPaneId?: number }): string {
-  return agent.weztermPaneId != null ? `pane:${agent.weztermPaneId}` : `pid:${agent.pid}`;
+/** A process seen with a WezTerm pane in any room: pid-only registrations of
+ *  the same process elsewhere must share that pane's lock. */
+const paneByPid = new Map<number, number>();
+/** Serialization key for a terminal: injections into one console never
+ *  overlap, whichever room asks and however the agent registered. */
+export function terminalKey(agent: { pid: number; weztermPaneId?: number }): string {
+  const pane = agent.weztermPaneId ?? (agent.pid > 0 ? paneByPid.get(agent.pid) : undefined);
+  return pane != null ? `pane:${pane}` : `pid:${agent.pid}`;
+}
+function rememberPane(pid: number, pane: number | undefined): void {
+  if (pane != null && pid > 0) paneByPid.set(pid, pane);
 }
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
@@ -118,6 +126,7 @@ export class ChatRoom extends EventEmitter {
   private rewakeAfter = new Set<string>();    // mentioned again while in flight: wake once more
   /** Warning state for wake failures is per room and agent, not per name. */
   private readonly wakeScope = `r${++roomSeq}`;
+  private destroyed = false;
   private chatFile: string | null = null;
   private staleInterval: ReturnType<typeof setInterval> | null = null;
   private agentTurnCount = 0; // consecutive agent turns since last human message
@@ -163,19 +172,28 @@ export class ChatRoom extends EventEmitter {
   }
 
   join(name: string, pid: number, weztermPaneId?: number, persistedRole?: string): Agent {
+    rememberPane(pid, weztermPaneId);
     const existing = this.agents.get(name);
     if (existing) {
+      const now = Date.now();
+      const previousKey = terminalKey(existing);
+      const pidChanged = existing.pid !== pid;
       // A different pid means a new session resumed the same identity;
-      // readers deserve to know it is a fresh worker, not the old one.
-      if (existing.pid !== pid) {
+      // readers deserve to know it is a fresh worker, not the old one, and
+      // the old worker's proof of life does not carry over.
+      if (pidChanged) {
         this.addSystem(`${name} rejoined (new session)`);
-        wakes.forget(this.warnKey(name));
+        existing.joinedAt = now;
+        existing.lastPostAt = undefined;
       }
       existing.active = true;
       existing.pid = pid;
       if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
       if (!existing.role && persistedRole) existing.role = persistedRole;
-      existing.lastSeen = Date.now();
+      existing.lastSeen = now;
+      // Any change of terminal identity (pid or pane) is a fresh wake path:
+      // it earns its own warning if it fails too.
+      if (pidChanged || terminalKey(existing) !== previousKey) wakes.forget(this.warnKey(name));
       this.emit("room", { type: "join", data: existing } as RoomEvent);
       return existing;
     }
@@ -315,7 +333,7 @@ export class ChatRoom extends EventEmitter {
    * that arrived meanwhile.
    */
   private queueWake(sender: string, target: string): void {
-    if (this.pendingMentions.has(target)) return;
+    if (this.destroyed || this.pendingMentions.has(target)) return;
     if (this.wakesInFlight.has(target)) { this.rewakeAfter.add(target); return; }
     const timeout = setTimeout(() => {
       this.pendingMentions.delete(target);
@@ -347,6 +365,7 @@ export class ChatRoom extends EventEmitter {
    * that terminal's key, and the prompt always names the pid it goes to.
    */
   private async wakeAgent(sender: string, name: string): Promise<void> {
+    if (this.destroyed) return;
     const queued = this.agents.get(name);
     if (!queued?.active || name === sender) return;
     const key = terminalKey(queued);
@@ -355,7 +374,7 @@ export class ChatRoom extends EventEmitter {
     try {
       const outcome = await wakes.run(key, this.warnKey(name), async () => {
         const agent = this.agents.get(name);
-        if (!agent?.active) return "skip";
+        if (this.destroyed || !agent?.active) return "skip";
         if (terminalKey(agent) !== key) return "moved";
         const prompt = this.buildWakePrompt(sender, agent);
         console.log(`  → Injecting into ${name} (${key})...`);
@@ -371,7 +390,8 @@ export class ChatRoom extends EventEmitter {
       } else {
         console.error(`  ✗ Injection failed for ${name} (${outcome.kind}, ${outcome.attempts} attempt(s)): ${outcome.reason}`);
         // Tell the room: a mention that did not land must not look landed.
-        if (outcome.warn) {
+        // (Not after teardown: a late line would recreate the deleted log.)
+        if (outcome.warn && !this.destroyed && this.agents.has(name)) {
           this.addSystem(
             outcome.kind === "no-console"
               ? `Could not wake ${name}: no console reachable from this server (remote session, or joined without its real terminal pid). They will see mentions only when they read on their own schedule.`
@@ -382,6 +402,7 @@ export class ChatRoom extends EventEmitter {
     } finally {
       this.wakesInFlight.delete(name);
     }
+    if (this.destroyed) return;
     if (moved) return this.wakeAgent(sender, name);
     if (this.rewakeAfter.delete(name)) this.queueWake(sender, name);
   }
@@ -687,10 +708,17 @@ export class ChatRoom extends EventEmitter {
   }
 
   destroy(): void {
+    this.destroyed = true;
     if (this.staleInterval) clearInterval(this.staleInterval);
     for (const t of this.typingState.values()) clearTimeout(t);
     for (const t of this.statusTimeouts.values()) clearTimeout(t);
     for (const t of this.pendingMentions.values()) clearTimeout(t);
+    this.pendingMentions.clear();
+    this.rewakeAfter.clear();
+    this.wakesInFlight.clear();
+    // No queued or in-flight wake may inject, warn or re-queue after this.
+    for (const agent of this.agents.values()) agent.active = false;
+    this.agents.clear();
     cancelRoomListens(this);
   }
 }

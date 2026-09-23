@@ -1,9 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { WakeCoordinator, classifyWakeFailure, injectBaseUrlFor } from "../src/wake.js";
-import { ChatRoom } from "../src/room.js";
+import { ChatRoom, terminalKey } from "../src/room.js";
 
 const noSleep = () => Promise.resolve();
-const done = async () => "done" as const;
 
 describe("classifyWakeFailure", () => {
   it("recognises a missing console as permanent and everything else as transient", () => {
@@ -91,6 +90,20 @@ describe("WakeCoordinator", () => {
     expect((await wc.run("pid:7", "r2:Claude", fail)).warn).toBe(true);
   });
 
+  it("treats a failure that outlives its session as stale: no warning, no suppression of the next session", async () => {
+    const wc = new WakeCoordinator({ sleep: noSleep });
+    let reject!: (err: Error) => void;
+    const held = new Promise<"done">((_, r) => { reject = r; });
+    const inFlight = wc.run("pid:401", "r1:Claude", () => held);
+    // The agent leaves and rejoins from a new pid while the old injection hangs.
+    wc.forget("r1:Claude");
+    reject(new Error("AttachConsole(401) failed: error 87"));
+    const old = await inFlight;
+    expect(old).toMatchObject({ ok: false, warn: false, stale: true });
+    const fresh = await wc.run("pid:402", "r1:Claude", async () => { throw new Error("error 87"); });
+    expect(fresh.warn).toBe(true);
+  });
+
   it("rate-limits transient warnings per warn key", async () => {
     const wc = new WakeCoordinator({ sleep: noSleep, warnCooldownMs: 60_000 });
     const fail = async (): Promise<"done"> => { throw new Error("error 5"); };
@@ -131,5 +144,51 @@ describe("ChatRoom presence timestamps", () => {
     } finally {
       room.destroy();
     }
+  });
+
+  it("resets proof of life when the same name rejoins from a new pid", () => {
+    const room = new ChatRoom();
+    try {
+      room.join("Claude", 401);
+      room.send("Claude", "posted once");
+      const before = room.getAgent("Claude")!;
+      expect(before.lastPostAt).toBeGreaterThan(0);
+      const joinedBefore = before.joinedAt;
+      room.join("Claude", 402);
+      const after = room.getAgent("Claude")!;
+      expect(after.pid).toBe(402);
+      expect(after.lastPostAt).toBeUndefined();
+      expect(after.joinedAt).toBeGreaterThanOrEqual(joinedBefore);
+      // Same pid again: an ordinary rejoin keeps what it had.
+      room.send("Claude", "posted again");
+      const posted = room.getAgent("Claude")!.lastPostAt;
+      room.join("Claude", 402);
+      expect(room.getAgent("Claude")!.lastPostAt).toBe(posted);
+    } finally {
+      room.destroy();
+    }
+  });
+
+  it("canonicalizes a process registered with a pane in one room and pid-only in another", () => {
+    const a = new ChatRoom();
+    const b = new ChatRoom();
+    try {
+      a.join("Codex", 501, 7);
+      b.join("Codex", 501);
+      expect(terminalKey(a.getAgent("Codex")!)).toBe("pane:7");
+      expect(terminalKey(b.getAgent("Codex")!)).toBe("pane:7");
+      expect(terminalKey({ pid: 777 })).toBe("pid:777");
+    } finally {
+      a.destroy(); b.destroy();
+    }
+  });
+
+  it("destroy() drops every agent so nothing queued can wake or warn afterwards", () => {
+    const room = new ChatRoom();
+    room.join("Jadzia", 9);
+    room.send("Rami", "@Jadzia are you there");
+    room.destroy();
+    expect(room.who()).toEqual([]);
+    expect(room.getAgent("Jadzia")).toBeUndefined();
   });
 });

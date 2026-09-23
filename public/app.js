@@ -276,6 +276,12 @@ function connect() {
         loadConversations();
         break;
       case 'message':
+        // Proof of life first, before any view-specific early return: a post
+        // in the active room refreshes the sender's pill ages (server time).
+        if (activeConversation && (!event.conversationId || event.conversationId === activeConversation.id) &&
+            event.data && event.data.sender && event.data.sender !== 'system' && typeof event.data.timestamp === 'number') {
+          if (touchAgent(event.data.sender, { lastSeen: event.data.timestamp, lastPostAt: event.data.timestamp })) renderPills();
+        }
         // A fresh ask anywhere refreshes the decisions badge, even for
         // conversations that are not on screen.
         if (event.data && event.data.ask && event.data.ask.state === 'open') {
@@ -343,9 +349,6 @@ function connect() {
         break;
       case 'join':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
-        if (event.data && event.data.sender && event.data.sender !== 'system' && typeof event.data.timestamp === 'number') {
-          if (touchAgent(event.data.sender, { lastSeen: event.data.timestamp, lastPostAt: event.data.timestamp })) renderPills();
-        }
         onlineNames.add(event.data.name);
         staleNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
