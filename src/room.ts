@@ -8,6 +8,17 @@ import { writeFileSync } from "fs";
 import { dirname } from "path";
 import { inject } from "./inject.js";
 import { cancelRoomListens } from "./listen.js";
+import { WakeCoordinator } from "./wake.js";
+
+// The base URL an injected prompt tells the woken agent to call back on.
+// Must be the address the server actually binds (single-interface): a
+// tailnet-bound server that says 127.0.0.1 hands the agent commands that
+// are refused.
+let INJECT_BASE_URL = "http://127.0.0.1:4200";
+export function setInjectBaseUrl(url: string): void {
+  if (url && url.startsWith("http")) INJECT_BASE_URL = url.replace(/\/+$/, "");
+}
+const wakes = new WakeCoordinator();
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
@@ -48,6 +59,9 @@ export interface Agent {
   role?: string;
   status?: string;
   lastSeen: number;
+  /** When the agent last posted a message; presence alone can be a lie
+   *  (a hung resident heartbeats forever), a post is proof of life. */
+  lastPostAt?: number;
   weztermPaneId?: number;
 }
 
@@ -133,6 +147,7 @@ export class ChatRoom extends EventEmitter {
       // readers deserve to know it is a fresh worker, not the old one.
       if (existing.pid !== pid) {
         this.addSystem(`${name} rejoined (new session)`);
+        wakes.forget(name);
       }
       existing.active = true;
       existing.pid = pid;
@@ -229,9 +244,9 @@ export class ChatRoom extends EventEmitter {
     this.persist(msg);
     this.emit("room", { type: "message", data: msg } as RoomEvent);
 
-    // Update lastSeen + clear typing
+    // Update lastSeen + lastPostAt + clear typing
     const senderAgent = this.agents.get(sender);
-    if (senderAgent) senderAgent.lastSeen = Date.now();
+    if (senderAgent) { senderAgent.lastSeen = Date.now(); senderAgent.lastPostAt = Date.now(); }
     this.setTyping(sender, false);
 
     // Turn guard: track consecutive agent turns
@@ -285,19 +300,28 @@ export class ChatRoom extends EventEmitter {
         const since = this.getCursor(name);
         const prompt =
           `[joind] @${name} mentioned by ${sender}.${roleHint} ` +
-          `Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=${name}&since=${since}${pidParam}${paneParam}" — ` +
-          `Reply: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" ` +
+          `Read: curl -s "${INJECT_BASE_URL}/api/agent/read?sender=${name}&since=${since}${pidParam}${paneParam}" — ` +
+          `Reply: curl -s -X POST ${INJECT_BASE_URL}/api/agent/send -H "Content-Type: application/json" ` +
           `-d '{"sender":"${name}","text":"YOUR_REPLY"${pidBody}}'`;
         const target = agent.weztermPaneId != null ? `pane:${agent.weztermPaneId}` : `PID:${agent.pid}`;
         console.log(`  → Injecting into ${name} (${target})...`);
-        try {
+        const outcome = await wakes.run(name, async () => {
           await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv());
-          // Brief delay between injections to let Windows console state settle
+          // Brief delay to let Windows console state settle before the next one
           if (process.platform === "win32") {
             await new Promise((r) => setTimeout(r, 300));
           }
-        } catch (err) {
-          console.error(`  ✗ Injection failed for ${name}: ${err}`);
+        });
+        if (!outcome.ok) {
+          console.error(`  ✗ Injection failed for ${name} (${outcome.kind}, ${outcome.attempts} attempt(s)): ${outcome.reason}`);
+          // Tell the room: a mention that did not land must not look landed.
+          if (outcome.warn) {
+            this.addSystem(
+              outcome.kind === "no-console"
+                ? `Could not wake ${name}: no console reachable from this server (remote session, or joined without its real terminal pid). They will see mentions only when they read on their own schedule.`
+                : `Could not wake ${name} just now (terminal injection failed after a retry). They will see this on their next read.`
+            );
+          }
         }
       }
     }

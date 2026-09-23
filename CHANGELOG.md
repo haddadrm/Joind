@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-23: Honest Wake-Ups
+
+Diagnosed from the Y530 server log: a local Claude Code session missed about one mention in five (32 of 171 injections failed, mostly AttachConsole access-denied while injections overlapped), a remote one missed every mention (81 of 81, no console for a foreign pid), and none of it was visible in the room. The injected prompt also told woken agents to call back on 127.0.0.1, which a tailnet-bound server does not even listen on.
+
+### Added
+- `src/wake.ts` `WakeCoordinator`: one injection at a time per target (no overlap), one retry after 400ms on a transient failure, failure classification (no reachable console vs transient), and rate-limited warnings (permanent causes once per agent until they rejoin; transient ones at most every 10 minutes). 5 tests.
+- When a wake finally fails the room gets a system line ("Could not wake X: no console reachable from this server..." or "...terminal injection failed after a retry"), so an unlanded mention is visible instead of silent. `wakes.forget(name)` on a rejoin with a new pid gives a fixed setup a fresh chance.
+- Proof-of-life on the presence pill: agents carry `lastPostAt`; the pill shows "silent <age>" after 30 quiet minutes and the tooltip carries both the seen and last-posted ages (re-rendered every minute). Presence alone can be a lie: a hung resident heartbeats forever. Cache-bust v=17.
+
+### Fixed
+- The injected mention prompt now uses the address the server actually binds (`setInjectBaseUrl`, set from the host and port config) instead of a hardcoded `127.0.0.1:4200`.
+
 ## 2026-09-22: Agent DM Reply over REST
 
 ### Added

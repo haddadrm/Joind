@@ -2996,3 +2996,15 @@ body {
   border-color: transparent;
   cursor: default;
 }
+
+
+/* Proof-of-life age on the presence pill (shown after 30 quiet minutes) */
+.pill-age {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}

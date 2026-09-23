@@ -486,6 +486,17 @@ function connect() {
 }
 
 // --- Agent pills with popover ---
+function formatAge(ms) {
+  var m = Math.round(ms / 60000);
+  if (m < 60) return m + 'm';
+  var h = Math.floor(m / 60);
+  if (h < 48) return h + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+  return Math.floor(h / 24) + 'd';
+}
+
+// Ages drift while nothing else re-renders; keep them honest once a minute.
+setInterval(function() { if (typeof agents !== 'undefined' && agents.length > 0) renderPills(); }, 60000);
+
 function renderPills() {
   var c = document.getElementById('agent-pills');
   c.textContent = '';
@@ -513,6 +524,21 @@ function renderPills() {
       role.className = 'pill-role';
       role.textContent = a.role;
       pill.appendChild(role);
+    }
+    // Proof-of-life age: presence can look fine while nothing runs (a hung
+    // resident keeps heartbeating). Show how long since the agent last
+    // posted, once it passes 30 minutes; the tooltip carries both ages.
+    var nowMs = Date.now();
+    var postAge = a.lastPostAt ? nowMs - a.lastPostAt : null;
+    var seenAge = a.lastSeen ? nowMs - a.lastSeen : null;
+    pill.title = (a.name || '') +
+      (seenAge != null ? ' · seen ' + formatAge(seenAge) + ' ago' : '') +
+      (postAge != null ? ' · last posted ' + formatAge(postAge) + ' ago' : ' · no posts this session');
+    if (postAge != null && postAge > 30 * 60000) {
+      var ageEl = document.createElement('span');
+      ageEl.className = 'pill-age';
+      ageEl.textContent = 'silent ' + formatAge(postAge);
+      pill.appendChild(ageEl);
     }
     if (a.status) {
       var statusEl = document.createElement('span');
