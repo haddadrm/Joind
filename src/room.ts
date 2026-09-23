@@ -398,13 +398,19 @@ export class ChatRoom extends EventEmitter {
     const queued = this.agents.get(name);
     if (!queued?.active || name === sender) return;
     const identity = terminalIdentity(queued);
+    const held = new Set(lockKeysFor(queued));
     this.wakesInFlight.add(name);
     let moved = false;
     try {
-      const outcome = await wakes.run(lockKeysFor(queued), this.warnKey(name), async () => {
+      const outcome = await wakes.run([...held], this.warnKey(name), async () => {
         const agent = this.agents.get(name);
         if (this.destroyed || !agent?.active) return "skip";
         if (terminalIdentity(agent) !== identity) return "moved";
+        // Terminal equivalence can grow while a wake waits its turn (a
+        // registration pairing this pid with a pane came back). Never inject
+        // holding fewer keys than the terminal now needs: queue again under
+        // the full set instead.
+        if (lockKeysFor(agent).some((k) => !held.has(k))) return "moved";
         const prompt = this.buildWakePrompt(sender, agent);
         console.log(`  → Injecting into ${name} (${identity})...`);
         await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv());
