@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { WakeCoordinator, classifyWakeFailure, injectBaseUrlFor } from "../src/wake.js";
-import { ChatRoom, terminalKeys, terminalIdentity } from "../src/room.js";
+import { ChatRoom, terminalKeys, terminalIdentity, lockKeysFor } from "../src/room.js";
 
 const noSleep = () => Promise.resolve();
 
@@ -92,6 +92,22 @@ describe("WakeCoordinator", () => {
     expect(fresh.warn).toBe(true);
     const again = await wc.run(["pid:402"], "r1:Claude", async () => { throw new Error("error 87"); });
     expect(again.warn).toBe(false);
+  });
+
+  it("judges a retry by the session current when the retry starts", async () => {
+    const wc = new WakeCoordinator({ sleep: noSleep });
+    let calls = 0;
+    const out = await wc.run(["pid:1"], "r1:Claude", async () => {
+      calls++;
+      if (calls === 1) {
+        // The agent leaves and rejoins with the same terminal between attempts.
+        wc.forget("r1:Claude");
+        throw new Error("error 5");
+      }
+      throw new Error("error 87");
+    });
+    expect(out).toMatchObject({ ok: false, kind: "no-console", attempts: 2, warn: true });
+    expect(out.stale).toBeUndefined();
   });
 
   it("passes skip and moved results through as successful outcomes", async () => {
@@ -237,6 +253,46 @@ describe("ChatRoom presence timestamps", () => {
       const after = terminalIdentity(room.getAgent("Codex")!);
       expect(before).toBe("pid:902");
       expect(after).toBe("pid:902|pane:72");
+    } finally {
+      room.destroy();
+    }
+  });
+
+  it("locks pid-only and pane-only registrations together when a live registration pairs them", () => {
+    const a = new ChatRoom();
+    const b = new ChatRoom();
+    const c = new ChatRoom();
+    try {
+      a.join("Codex", 960, 60);
+      b.join("Codex", 960);
+      c.join("Codex", 0, 60);
+      expect(lockKeysFor(b.getAgent("Codex")!).sort()).toEqual(["pane:60", "pid:960"]);
+      expect(lockKeysFor(c.getAgent("Codex")!).sort()).toEqual(["pane:60", "pid:960"]);
+      // The pairing leaves with the registration that carried it.
+      a.leave("Codex");
+      expect(lockKeysFor(b.getAgent("Codex")!)).toEqual(["pid:960"]);
+      expect(lockKeysFor(c.getAgent("Codex")!)).toEqual(["pane:60"]);
+      // Transitive: pid 1 pairs with pane 5 through two registrations.
+      expect(lockKeysFor({ pid: 1 }, [{ pid: 1, weztermPaneId: 5 }, { pid: 2, weztermPaneId: 5 }]).sort())
+        .toEqual(["pane:5", "pid:1", "pid:2"]);
+    } finally {
+      a.destroy(); b.destroy(); c.destroy();
+    }
+  });
+
+  it("resets proof of life when a pane-only agent moves to another pane, not when a pane is first learned", () => {
+    const room = new ChatRoom();
+    try {
+      room.join("Jadzia", 0, 1);
+      room.send("Jadzia", "posted");
+      expect(room.getAgent("Jadzia")!.lastPostAt).toBeGreaterThan(0);
+      room.join("Jadzia", 0, 2);
+      expect(room.getAgent("Jadzia")!.lastPostAt).toBeUndefined();
+      room.join("Codex", 77);
+      room.send("Codex", "posted");
+      const posted = room.getAgent("Codex")!.lastPostAt;
+      room.join("Codex", 77, 9); // first pane discovery: same session
+      expect(room.getAgent("Codex")!.lastPostAt).toBe(posted);
     } finally {
       room.destroy();
     }

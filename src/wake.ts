@@ -115,7 +115,7 @@ export class WakeCoordinator {
    * Run `attempt` serialized after any in-flight attempt sharing any of the
    * `serialKeys` (every identity known for the target terminal), with one
    * retry on a transient failure. Warning decisions are made per `warnKey`
-   * (room and agent) against the generation current when the attempt
+   * (room and agent) against the generation current when each attempt
    * starts, so a target resolved at execution time is judged by its own
    * session.
    */
@@ -131,14 +131,17 @@ export class WakeCoordinator {
   }
 
   private async execute(warnKey: string, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
-    const gen = this.generation.get(warnKey) ?? 0;
     this.executing.set(warnKey, (this.executing.get(warnKey) ?? 0) + 1);
     try {
       const retryDelay = this.opts.retryDelayMs ?? 400;
       let lastErr: unknown;
       let attempts = 0;
+      let gen = 0;
       for (let i = 1; i <= 2; i++) {
         attempts = i;
+        // Each attempt is judged by the session current when IT starts: a
+        // retry that lands after a rejoin belongs to the new session.
+        gen = this.generation.get(warnKey) ?? 0;
         try {
           const result = await attempt();
           return { ok: true, result, attempts: i, warn: false };

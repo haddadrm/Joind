@@ -33,6 +33,29 @@ export function terminalKeys(agent: { pid: number; weztermPaneId?: number }): st
 export function terminalIdentity(agent: { pid: number; weztermPaneId?: number }): string {
   return terminalKeys(agent).join("|");
 }
+/** Every live registration across every room, keyed by room scope and name.
+ *  It is the only source of terminal equivalence: a pid-only registration in
+ *  one room and a pane-only one in another are the same terminal when some
+ *  live registration carries both, and the knowledge leaves with them. */
+const liveTerminals = new Map<string, { pid: number; weztermPaneId?: number }>();
+/** The keys a wake must hold for `agent`: its own, plus those of every live
+ *  registration reachable through a shared key (transitively). */
+export function lockKeysFor(
+  agent: { pid: number; weztermPaneId?: number },
+  registry: Iterable<{ pid: number; weztermPaneId?: number }> = liveTerminals.values()
+): string[] {
+  const keys = new Set(terminalKeys(agent));
+  const others = [...registry].map(terminalKeys);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const ok of others) {
+      if (!ok.some((k) => keys.has(k))) continue;
+      for (const k of ok) if (!keys.has(k)) { keys.add(k); grew = true; }
+    }
+  }
+  return [...keys];
+}
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
@@ -177,11 +200,14 @@ export class ChatRoom extends EventEmitter {
     if (existing) {
       const now = Date.now();
       const previousIdentity = terminalIdentity(existing);
-      const pidChanged = existing.pid !== pid;
-      // A different pid means a new session resumed the same identity;
-      // readers deserve to know it is a fresh worker, not the old one, and
-      // the old worker's proof of life does not carry over.
-      if (pidChanged) {
+      // A different pid, or a pane replaced by another pane, means a new
+      // session resumed the same identity; readers deserve to know it is a
+      // fresh worker, not the old one, and the old worker's proof of life
+      // does not carry over. Learning a pane for the first time is not a
+      // new session.
+      const paneReplaced =
+        existing.weztermPaneId != null && weztermPaneId != null && existing.weztermPaneId !== weztermPaneId;
+      if (existing.pid !== pid || paneReplaced) {
         this.addSystem(`${name} rejoined (new session)`);
         existing.joinedAt = now;
         existing.lastPostAt = undefined;
@@ -191,6 +217,7 @@ export class ChatRoom extends EventEmitter {
       if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
       if (!existing.role && persistedRole) existing.role = persistedRole;
       existing.lastSeen = now;
+      liveTerminals.set(this.warnKey(name), { pid: existing.pid, weztermPaneId: existing.weztermPaneId });
       // Any change of terminal identity (pid or pane) is a fresh wake path:
       // it earns its own warning if it fails too.
       if (terminalIdentity(existing) !== previousIdentity) wakes.forget(this.warnKey(name));
@@ -208,6 +235,7 @@ export class ChatRoom extends EventEmitter {
       weztermPaneId,
     };
     this.agents.set(name, agent);
+    liveTerminals.set(this.warnKey(name), { pid, weztermPaneId });
     wakes.forget(this.warnKey(name)); // a new session starts with a clean wake record
     this.addSystem(`${name} joined the chat`);
     this.emit("room", { type: "join", data: agent } as RoomEvent);
@@ -219,6 +247,7 @@ export class ChatRoom extends EventEmitter {
     if (agent) {
       agent.active = false;
       this.agents.delete(name);
+      liveTerminals.delete(this.warnKey(name));
       wakes.release(this.warnKey(name));
       // A dropped agent and a departed agent are different facts; say which.
       this.addSystem(
@@ -372,7 +401,7 @@ export class ChatRoom extends EventEmitter {
     this.wakesInFlight.add(name);
     let moved = false;
     try {
-      const outcome = await wakes.run(terminalKeys(queued), this.warnKey(name), async () => {
+      const outcome = await wakes.run(lockKeysFor(queued), this.warnKey(name), async () => {
         const agent = this.agents.get(name);
         if (this.destroyed || !agent?.active) return "skip";
         if (terminalIdentity(agent) !== identity) return "moved";
@@ -525,6 +554,12 @@ export class ChatRoom extends EventEmitter {
     this.agents.delete(oldName);
     agent.name = newName;
     this.agents.set(newName, agent);
+    // The wake record follows the agent: the old key is reclaimed, the new
+    // one starts clean under the same terminal.
+    liveTerminals.delete(this.warnKey(oldName));
+    wakes.release(this.warnKey(oldName));
+    liveTerminals.set(this.warnKey(newName), { pid: agent.pid, weztermPaneId: agent.weztermPaneId });
+    wakes.forget(this.warnKey(newName));
     this.addSystem(`${oldName} is now ${newName}`);
     this.emit("room", { type: "rename", data: { oldName, newName, agent } });
     return agent;
@@ -719,6 +754,7 @@ export class ChatRoom extends EventEmitter {
     // No queued or in-flight wake may inject, warn or re-queue after this.
     for (const agent of this.agents.values()) {
       agent.active = false;
+      liveTerminals.delete(this.warnKey(agent.name));
       wakes.release(this.warnKey(agent.name));
     }
     this.agents.clear();
