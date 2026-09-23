@@ -24,6 +24,7 @@ import { NotificationStore, TaskTracker, classifyMessage, isNotifiable, type Cla
 import { initFileLog } from "./log.js";
 import { collectDmThread, collectDmPartners, resolveDmTargetConversation } from "./dms.js";
 import { setDefaultPresenceGrace, setInjectBaseUrl } from "./room.js";
+import { injectBaseUrlFor } from "./wake.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
@@ -56,7 +57,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 initFileLog(CONFIG.logFile);
 setDefaultPresenceGrace(CONFIG.presenceGraceMs);
-setInjectBaseUrl(`http://${CONFIG.host === "0.0.0.0" ? "127.0.0.1" : CONFIG.host}:${CONFIG.port}`);
+setInjectBaseUrl(injectBaseUrlFor(CONFIG.host, CONFIG.port));
 const PORT = CONFIG.port;
 const HOST = CONFIG.host;
 const DATA_DIR = CONFIG.dataDir;
@@ -398,6 +399,7 @@ wss.on("connection", (ws, req) => {
     JSON.stringify({
       type: "init",
       data: {
+        serverNow: Date.now(),
         agents: activeRoom?.who() ?? [],
         messages: activeRoom ? activeRoom.read(undefined, 100, undefined, viewerName) : [],
         conversations: manager.listConversations(),

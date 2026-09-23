@@ -19,6 +19,11 @@ export function setInjectBaseUrl(url: string): void {
   if (url && url.startsWith("http")) INJECT_BASE_URL = url.replace(/\/+$/, "");
 }
 const wakes = new WakeCoordinator();
+let roomSeq = 0;
+/** Serialization key for a terminal: injections into one console never overlap. */
+function terminalKey(agent: { pid: number; weztermPaneId?: number }): string {
+  return agent.weztermPaneId != null ? `pane:${agent.weztermPaneId}` : `pid:${agent.pid}`;
+}
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
@@ -66,8 +71,21 @@ export interface Agent {
 }
 
 export interface RoomEvent {
-  type: "message" | "join" | "leave" | "rename" | "role" | "typing" | "stale";
-  data: ChatMessage | Agent | { oldName: string; newName: string; agent: Agent } | { name: string; typing: boolean };
+  type: "message" | "join" | "leave" | "rename" | "role" | "typing" | "stale" | "presence";
+  data:
+    | ChatMessage
+    | Agent
+    | { oldName: string; newName: string; agent: Agent }
+    | { name: string; typing: boolean }
+    | PresenceUpdate;
+}
+
+/** Heartbeat-driven timestamp refresh so pill ages stay live in the UI. */
+export interface PresenceUpdate {
+  name: string;
+  lastSeen: number;
+  lastPostAt?: number;
+  at: number;
 }
 
 export interface ChatRoomOptions {
@@ -96,6 +114,10 @@ export class ChatRoom extends EventEmitter {
   private typingState = new Map<string, NodeJS.Timeout>();
   private statusTimeouts = new Map<string, NodeJS.Timeout>();
   private pendingMentions = new Map<string, NodeJS.Timeout>(); // batched mention injection
+  private wakesInFlight = new Set<string>();  // targets whose wake is executing right now
+  private rewakeAfter = new Set<string>();    // mentioned again while in flight: wake once more
+  /** Warning state for wake failures is per room and agent, not per name. */
+  private readonly wakeScope = `r${++roomSeq}`;
   private chatFile: string | null = null;
   private staleInterval: ReturnType<typeof setInterval> | null = null;
   private agentTurnCount = 0; // consecutive agent turns since last human message
@@ -147,7 +169,7 @@ export class ChatRoom extends EventEmitter {
       // readers deserve to know it is a fresh worker, not the old one.
       if (existing.pid !== pid) {
         this.addSystem(`${name} rejoined (new session)`);
-        wakes.forget(name);
+        wakes.forget(this.warnKey(name));
       }
       existing.active = true;
       existing.pid = pid;
@@ -168,6 +190,7 @@ export class ChatRoom extends EventEmitter {
       weztermPaneId,
     };
     this.agents.set(name, agent);
+    wakes.forget(this.warnKey(name)); // a new session starts with a clean wake record
     this.addSystem(`${name} joined the chat`);
     this.emit("room", { type: "join", data: agent } as RoomEvent);
     return agent;
@@ -178,6 +201,7 @@ export class ChatRoom extends EventEmitter {
     if (agent) {
       agent.active = false;
       this.agents.delete(name);
+      wakes.forget(this.warnKey(name));
       // A dropped agent and a departed agent are different facts; say which.
       this.addSystem(
         reason === "timeout"
@@ -272,59 +296,94 @@ export class ChatRoom extends EventEmitter {
         this.emit("room", { type: "turn-guard", data: { count: this.agentTurnCount, limit: this.turnGuard.limit } } as unknown as RoomEvent);
       }
     } else {
-      // Batch mentions: collect for 2s before injecting to reduce noise
-      for (const target of targets) {
-        if (this.pendingMentions.has(target)) continue; // already queued
-        const timeout = setTimeout(() => {
-          this.pendingMentions.delete(target);
-          this.injectMentions(sender, [target]).catch((err) => {
-            console.error(`  ✗ Mention injection error: ${err}`);
-          });
-        }, 2000);
-        this.pendingMentions.set(target, timeout);
-      }
+      for (const target of targets) this.queueWake(sender, target);
     }
 
     console.log(`  [#${msg.id} ${sender}] ${text}`);
     return msg;
   }
 
-  private async injectMentions(sender: string, targets: string[]): Promise<void> {
-    for (const name of targets) {
-      const agent = this.agents.get(name);
-      if (agent?.active && agent.name !== sender) {
-        const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
-        const pidParam = agent.pid ? `&pid=${agent.pid}` : "";
-        const paneParam = agent.weztermPaneId != null ? `&paneId=${agent.weztermPaneId}` : "";
-        const pidBody = agent.pid ? `,"pid":${agent.pid}` : "";
-        const since = this.getCursor(name);
-        const prompt =
-          `[joind] @${name} mentioned by ${sender}.${roleHint} ` +
-          `Read: curl -s "${INJECT_BASE_URL}/api/agent/read?sender=${name}&since=${since}${pidParam}${paneParam}" — ` +
-          `Reply: curl -s -X POST ${INJECT_BASE_URL}/api/agent/send -H "Content-Type: application/json" ` +
-          `-d '{"sender":"${name}","text":"YOUR_REPLY"${pidBody}}'`;
-        const target = agent.weztermPaneId != null ? `pane:${agent.weztermPaneId}` : `PID:${agent.pid}`;
-        console.log(`  → Injecting into ${name} (${target})...`);
-        const outcome = await wakes.run(name, async () => {
-          await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv());
-          // Brief delay to let Windows console state settle before the next one
-          if (process.platform === "win32") {
-            await new Promise((r) => setTimeout(r, 300));
-          }
-        });
-        if (!outcome.ok) {
-          console.error(`  ✗ Injection failed for ${name} (${outcome.kind}, ${outcome.attempts} attempt(s)): ${outcome.reason}`);
-          // Tell the room: a mention that did not land must not look landed.
-          if (outcome.warn) {
-            this.addSystem(
-              outcome.kind === "no-console"
-                ? `Could not wake ${name}: no console reachable from this server (remote session, or joined without its real terminal pid). They will see mentions only when they read on their own schedule.`
-                : `Could not wake ${name} just now (terminal injection failed after a retry). They will see this on their next read.`
-            );
-          }
+  private warnKey(name: string): string {
+    return `${this.wakeScope}:${name}`;
+  }
+
+  /**
+   * Batch mentions: collect for 2s before injecting to reduce noise. A
+   * target whose wake is already queued or executing is not queued again;
+   * a mention that lands mid-flight earns exactly one follow-up wake, since
+   * the injected prompt reads from the agent's cursor and covers everything
+   * that arrived meanwhile.
+   */
+  private queueWake(sender: string, target: string): void {
+    if (this.pendingMentions.has(target)) return;
+    if (this.wakesInFlight.has(target)) { this.rewakeAfter.add(target); return; }
+    const timeout = setTimeout(() => {
+      this.pendingMentions.delete(target);
+      this.wakeAgent(sender, target).catch((err) => {
+        console.error(`  ✗ Mention injection error: ${err}`);
+      });
+    }, 2000);
+    this.pendingMentions.set(target, timeout);
+  }
+
+  private buildWakePrompt(sender: string, agent: Agent): string {
+    const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
+    const pidParam = agent.pid ? `&pid=${agent.pid}` : "";
+    const paneParam = agent.weztermPaneId != null ? `&paneId=${agent.weztermPaneId}` : "";
+    const pidBody = agent.pid ? `,"pid":${agent.pid}` : "";
+    const since = this.getCursor(agent.name);
+    return (
+      `[joind] @${agent.name} mentioned by ${sender}.${roleHint} ` +
+      `Read: curl -s "${INJECT_BASE_URL}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}" then ` +
+      `Reply: curl -s -X POST ${INJECT_BASE_URL}/api/agent/send -H "Content-Type: application/json" ` +
+      `-d '{"sender":"${agent.name}","text":"YOUR_REPLY"${pidBody}}'`
+    );
+  }
+
+  /**
+   * Wake one agent. The terminal and the prompt are resolved when the wake
+   * actually executes, not when it was queued: an agent that left meanwhile
+   * is skipped, one that rejoined from a new terminal is queued again under
+   * that terminal's key, and the prompt always names the pid it goes to.
+   */
+  private async wakeAgent(sender: string, name: string): Promise<void> {
+    const queued = this.agents.get(name);
+    if (!queued?.active || name === sender) return;
+    const key = terminalKey(queued);
+    this.wakesInFlight.add(name);
+    let moved = false;
+    try {
+      const outcome = await wakes.run(key, this.warnKey(name), async () => {
+        const agent = this.agents.get(name);
+        if (!agent?.active) return "skip";
+        if (terminalKey(agent) !== key) return "moved";
+        const prompt = this.buildWakePrompt(sender, agent);
+        console.log(`  → Injecting into ${name} (${key})...`);
+        await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv());
+        // Brief delay to let Windows console state settle before the next one
+        if (process.platform === "win32") {
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        return "done";
+      });
+      if (outcome.ok) {
+        moved = outcome.result === "moved";
+      } else {
+        console.error(`  ✗ Injection failed for ${name} (${outcome.kind}, ${outcome.attempts} attempt(s)): ${outcome.reason}`);
+        // Tell the room: a mention that did not land must not look landed.
+        if (outcome.warn) {
+          this.addSystem(
+            outcome.kind === "no-console"
+              ? `Could not wake ${name}: no console reachable from this server (remote session, or joined without its real terminal pid). They will see mentions only when they read on their own schedule.`
+              : `Could not wake ${name} just now (terminal injection failed after a retry). They will see this on their next read.`
+          );
         }
       }
+    } finally {
+      this.wakesInFlight.delete(name);
     }
+    if (moved) return this.wakeAgent(sender, name);
+    if (this.rewakeAfter.delete(name)) this.queueWake(sender, name);
   }
 
   read(since?: number, limit = 50, from?: string, viewer?: string): ChatMessage[] {
@@ -384,11 +443,16 @@ export class ChatRoom extends EventEmitter {
   touch(name: string): void {
     const agent = this.agents.get(name);
     if (agent) {
-      const wasStale = (Date.now() - agent.lastSeen) > 120000;
-      agent.lastSeen = Date.now();
+      const now = Date.now();
+      const wasStale = (now - agent.lastSeen) > 120000;
+      agent.lastSeen = now;
       if (wasStale) {
-        // Agent came back from stale — emit join event to refresh pill state
+        // Agent came back from stale: emit join event to refresh pill state
         this.emit("room", { type: "join", data: agent } as RoomEvent);
+      } else {
+        // Keep the UI's cached timestamps live (pill ages are computed client-side).
+        const update: PresenceUpdate = { name, lastSeen: now, lastPostAt: agent.lastPostAt, at: now };
+        this.emit("room", { type: "presence", data: update } as RoomEvent);
       }
     }
   }

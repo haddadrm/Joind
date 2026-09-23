@@ -24,6 +24,22 @@ if (!soundSettings._global) soundSettings._global = 'soft-chime';
 
 var ws = null;
 var agents = [];
+var clockOffset = 0; // server clock minus browser clock; ages are computed against server time
+function serverNow() { return Date.now() + clockOffset; }
+function touchAgent(name, fields) {
+  // Merge fresh timestamps into the cached agent list so pill ages stay live
+  // between join events (messages, typing and heartbeats all count).
+  var hit = false;
+  agents = agents.map(function(a) {
+    if (a.name !== name) return a;
+    hit = true;
+    var next = Object.assign({}, a);
+    if (fields.lastSeen != null) next.lastSeen = Math.max(a.lastSeen || 0, fields.lastSeen);
+    if (fields.lastPostAt != null) next.lastPostAt = Math.max(a.lastPostAt || 0, fields.lastPostAt);
+    return next;
+  });
+  return hit;
+}
 var onlineNames = new Set();
 var mentionMenuIndex = -1;
 var openPopover = null;
@@ -224,6 +240,7 @@ function connect() {
     var event = JSON.parse(e.data);
     switch (event.type) {
       case 'init':
+        if (typeof event.data.serverNow === 'number') clockOffset = event.data.serverNow - Date.now();
         agents = event.data.agents;
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         allMessages = (event.data.messages || []).slice();
@@ -326,6 +343,9 @@ function connect() {
         break;
       case 'join':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        if (event.data && event.data.sender && event.data.sender !== 'system' && typeof event.data.timestamp === 'number') {
+          if (touchAgent(event.data.sender, { lastSeen: event.data.timestamp, lastPostAt: event.data.timestamp })) renderPills();
+        }
         onlineNames.add(event.data.name);
         staleNames.delete(event.data.name);
         agents = agents.filter(function(a) { return a.name !== event.data.name; });
@@ -364,8 +384,13 @@ function connect() {
         agents = agents.map(function(a) { return a.name === event.data.name ? event.data : a; });
         renderPills();
         break;
+      case 'presence':
+        if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        if (touchAgent(event.data.name, { lastSeen: event.data.lastSeen, lastPostAt: event.data.lastPostAt })) renderPills();
+        break;
       case 'typing':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
+        touchAgent(event.data.name, { lastSeen: serverNow() });
         if (event.data.typing) {
           typingNames.add(event.data.name);
         } else {
@@ -528,16 +553,20 @@ function renderPills() {
     // Proof-of-life age: presence can look fine while nothing runs (a hung
     // resident keeps heartbeating). Show how long since the agent last
     // posted, once it passes 30 minutes; the tooltip carries both ages.
-    var nowMs = Date.now();
-    var postAge = a.lastPostAt ? nowMs - a.lastPostAt : null;
-    var seenAge = a.lastSeen ? nowMs - a.lastSeen : null;
+    // Ages are measured against the server clock (init carries serverNow) and
+    // never go negative. An agent that has not posted yet is measured from
+    // its join, and the chip says so.
+    var nowMs = serverNow();
+    var postAge = a.lastPostAt ? Math.max(0, nowMs - a.lastPostAt) : null;
+    var seenAge = a.lastSeen ? Math.max(0, nowMs - a.lastSeen) : null;
+    var quietAge = postAge != null ? postAge : (a.joinedAt ? Math.max(0, nowMs - a.joinedAt) : null);
     pill.title = (a.name || '') +
       (seenAge != null ? ' · seen ' + formatAge(seenAge) + ' ago' : '') +
       (postAge != null ? ' · last posted ' + formatAge(postAge) + ' ago' : ' · no posts this session');
-    if (postAge != null && postAge > 30 * 60000) {
+    if (quietAge != null && quietAge > 30 * 60000) {
       var ageEl = document.createElement('span');
       ageEl.className = 'pill-age';
-      ageEl.textContent = 'silent ' + formatAge(postAge);
+      ageEl.textContent = (postAge != null ? 'silent ' : 'no posts ') + formatAge(quietAge);
       pill.appendChild(ageEl);
     }
     if (a.status) {
