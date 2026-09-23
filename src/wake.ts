@@ -12,10 +12,12 @@
  *      room and agent, and permanent causes (no reachable console) are
  *      reported once until that agent starts a new session there.
  *
- * Two keys, on purpose. Serialization follows the terminal (`pid:1234`,
- * `pane:7`): two rooms mentioning the same session must not overlap. Warning
- * state follows the room and name (`<room>:<name>`): a second room with the
- * same agent name has its own right to one warning.
+ * Two kinds of key, on purpose. Serialization follows the terminal: a wake
+ * holds every identity it knows for the target (`pid:1234` and, when known,
+ * `pane:7`), so two rooms mentioning the same session never overlap even when
+ * one of them registered the session pid-only. Warning state follows the
+ * room and name (`<room>:<name>`): a second room with the same agent name has
+ * its own right to one warning.
  */
 
 export type WakeFailureKind = "no-console" | "transient";
@@ -71,6 +73,10 @@ export class WakeCoordinator {
   /** Bumped by forget(): an attempt started under an older generation
    *  reports stale and never touches the warn record. */
   private generation = new Map<string, number>();
+  /** Attempts executing per warn key; a released key is reclaimed once
+   *  they drain. */
+  private executing = new Map<string, number>();
+  private released = new Set<string>();
 
   constructor(
     private opts: { retryDelayMs?: number; warnCooldownMs?: number; sleep?: (ms: number) => Promise<void> } = {}
@@ -83,50 +89,78 @@ export class WakeCoordinator {
   /** A new session for this warn key (fresh join, rejoin with a new pid,
    *  departure): give its wake path a fresh chance to be warned about. */
   forget(warnKey: string): void {
+    this.released.delete(warnKey);
     this.permanentWarned.delete(warnKey);
     this.lastWarnAt.delete(warnKey);
     this.generation.set(warnKey, (this.generation.get(warnKey) ?? 0) + 1);
   }
 
+  /** The warn key's agent left or its room was destroyed: behave as forget()
+   *  for anything still executing, then reclaim the records once it drains. */
+  release(warnKey: string): void {
+    this.forget(warnKey);
+    this.released.add(warnKey);
+    this.reclaim(warnKey);
+  }
+
+  private reclaim(warnKey: string): void {
+    if (!this.released.has(warnKey) || (this.executing.get(warnKey) ?? 0) > 0) return;
+    this.released.delete(warnKey);
+    this.generation.delete(warnKey);
+    this.permanentWarned.delete(warnKey);
+    this.lastWarnAt.delete(warnKey);
+  }
+
   /**
-   * Run `attempt` serialized after any in-flight attempt for the same
-   * `serialKey` (terminal identity), with one retry on a transient failure.
-   * Warning decisions are made per `warnKey` (room and agent).
+   * Run `attempt` serialized after any in-flight attempt sharing any of the
+   * `serialKeys` (every identity known for the target terminal), with one
+   * retry on a transient failure. Warning decisions are made per `warnKey`
+   * (room and agent) against the generation current when the attempt
+   * starts, so a target resolved at execution time is judged by its own
+   * session.
    */
-  run(serialKey: string, warnKey: string, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
-    const previous = this.chains.get(serialKey) ?? Promise.resolve();
-    const gen = this.generation.get(warnKey) ?? 0;
-    const task = previous.catch(() => undefined).then(() => this.execute(warnKey, gen, attempt));
-    // Keep the chain alive whatever happened, and drop it when it is the tail.
+  run(serialKeys: string[], warnKey: string, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
+    const keys = [...new Set(serialKeys)];
+    const previous = Promise.all(keys.map((k) => (this.chains.get(k) ?? Promise.resolve()).catch(() => undefined)));
+    const task = previous.then(() => this.execute(warnKey, attempt));
+    // Keep every chain alive whatever happened, and drop each when it is the tail.
     const tail = task.then(() => undefined, () => undefined);
-    this.chains.set(serialKey, tail);
-    tail.then(() => { if (this.chains.get(serialKey) === tail) this.chains.delete(serialKey); });
+    for (const k of keys) this.chains.set(k, tail);
+    tail.then(() => { for (const k of keys) if (this.chains.get(k) === tail) this.chains.delete(k); });
     return task;
   }
 
-  private async execute(warnKey: string, gen: number, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
-    const retryDelay = this.opts.retryDelayMs ?? 400;
-    let lastErr: unknown;
-    let attempts = 0;
-    for (let i = 1; i <= 2; i++) {
-      attempts = i;
-      try {
-        const result = await attempt();
-        return { ok: true, result, attempts: i, warn: false };
-      } catch (err) {
-        lastErr = err;
-        if (classifyWakeFailure(err) === "no-console") break; // retrying cannot help
-        if (i === 1) await this.sleep(retryDelay);
+  private async execute(warnKey: string, attempt: () => Promise<WakeAttemptResult>): Promise<WakeOutcome> {
+    const gen = this.generation.get(warnKey) ?? 0;
+    this.executing.set(warnKey, (this.executing.get(warnKey) ?? 0) + 1);
+    try {
+      const retryDelay = this.opts.retryDelayMs ?? 400;
+      let lastErr: unknown;
+      let attempts = 0;
+      for (let i = 1; i <= 2; i++) {
+        attempts = i;
+        try {
+          const result = await attempt();
+          return { ok: true, result, attempts: i, warn: false };
+        } catch (err) {
+          lastErr = err;
+          if (classifyWakeFailure(err) === "no-console") break; // retrying cannot help
+          if (i === 1) await this.sleep(retryDelay);
+        }
       }
+      const kind = classifyWakeFailure(lastErr);
+      const reason = lastErr instanceof Error ? lastErr.message.split("\n")[0] : String(lastErr);
+      if ((this.generation.get(warnKey) ?? 0) !== gen) {
+        // The session this attempt was aimed at is gone; its failure must not
+        // be announced, nor suppress the new session's first warning.
+        return { ok: false, kind, attempts, warn: false, stale: true, reason };
+      }
+      return { ok: false, kind, attempts, warn: this.shouldWarn(warnKey, kind), reason };
+    } finally {
+      const left = (this.executing.get(warnKey) ?? 1) - 1;
+      if (left > 0) this.executing.set(warnKey, left); else this.executing.delete(warnKey);
+      this.reclaim(warnKey);
     }
-    const kind = classifyWakeFailure(lastErr);
-    const reason = lastErr instanceof Error ? lastErr.message.split("\n")[0] : String(lastErr);
-    if ((this.generation.get(warnKey) ?? 0) !== gen) {
-      // The session this attempt was aimed at is gone; its failure must not
-      // be announced, nor suppress the new session's first warning.
-      return { ok: false, kind, attempts, warn: false, stale: true, reason };
-    }
-    return { ok: false, kind, attempts, warn: this.shouldWarn(warnKey, kind), reason };
   }
 
   private shouldWarn(warnKey: string, kind: WakeFailureKind): boolean {

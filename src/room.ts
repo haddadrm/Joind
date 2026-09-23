@@ -20,17 +20,18 @@ export function setInjectBaseUrl(url: string): void {
 }
 const wakes = new WakeCoordinator();
 let roomSeq = 0;
-/** A process seen with a WezTerm pane in any room: pid-only registrations of
- *  the same process elsewhere must share that pane's lock. */
-const paneByPid = new Map<number, number>();
-/** Serialization key for a terminal: injections into one console never
- *  overlap, whichever room asks and however the agent registered. */
-export function terminalKey(agent: { pid: number; weztermPaneId?: number }): string {
-  const pane = agent.weztermPaneId ?? (agent.pid > 0 ? paneByPid.get(agent.pid) : undefined);
-  return pane != null ? `pane:${pane}` : `pid:${agent.pid}`;
+/** Every identity known for a terminal. A wake holds all of them, so a room
+ *  that registered the session pid-only and a room that registered it with
+ *  its pane still serialize on the shared pid. */
+export function terminalKeys(agent: { pid: number; weztermPaneId?: number }): string[] {
+  const keys: string[] = [];
+  if (agent.pid > 0) keys.push(`pid:${agent.pid}`);
+  if (agent.weztermPaneId != null) keys.push(`pane:${agent.weztermPaneId}`);
+  return keys.length > 0 ? keys : ["pid:0"];
 }
-function rememberPane(pid: number, pane: number | undefined): void {
-  if (pane != null && pid > 0) paneByPid.set(pid, pane);
+/** Session identity: any change of pid or pane is a different terminal. */
+export function terminalIdentity(agent: { pid: number; weztermPaneId?: number }): string {
+  return terminalKeys(agent).join("|");
 }
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
@@ -172,11 +173,10 @@ export class ChatRoom extends EventEmitter {
   }
 
   join(name: string, pid: number, weztermPaneId?: number, persistedRole?: string): Agent {
-    rememberPane(pid, weztermPaneId);
     const existing = this.agents.get(name);
     if (existing) {
       const now = Date.now();
-      const previousKey = terminalKey(existing);
+      const previousIdentity = terminalIdentity(existing);
       const pidChanged = existing.pid !== pid;
       // A different pid means a new session resumed the same identity;
       // readers deserve to know it is a fresh worker, not the old one, and
@@ -193,7 +193,7 @@ export class ChatRoom extends EventEmitter {
       existing.lastSeen = now;
       // Any change of terminal identity (pid or pane) is a fresh wake path:
       // it earns its own warning if it fails too.
-      if (pidChanged || terminalKey(existing) !== previousKey) wakes.forget(this.warnKey(name));
+      if (terminalIdentity(existing) !== previousIdentity) wakes.forget(this.warnKey(name));
       this.emit("room", { type: "join", data: existing } as RoomEvent);
       return existing;
     }
@@ -219,7 +219,7 @@ export class ChatRoom extends EventEmitter {
     if (agent) {
       agent.active = false;
       this.agents.delete(name);
-      wakes.forget(this.warnKey(name));
+      wakes.release(this.warnKey(name));
       // A dropped agent and a departed agent are different facts; say which.
       this.addSystem(
         reason === "timeout"
@@ -368,16 +368,16 @@ export class ChatRoom extends EventEmitter {
     if (this.destroyed) return;
     const queued = this.agents.get(name);
     if (!queued?.active || name === sender) return;
-    const key = terminalKey(queued);
+    const identity = terminalIdentity(queued);
     this.wakesInFlight.add(name);
     let moved = false;
     try {
-      const outcome = await wakes.run(key, this.warnKey(name), async () => {
+      const outcome = await wakes.run(terminalKeys(queued), this.warnKey(name), async () => {
         const agent = this.agents.get(name);
         if (this.destroyed || !agent?.active) return "skip";
-        if (terminalKey(agent) !== key) return "moved";
+        if (terminalIdentity(agent) !== identity) return "moved";
         const prompt = this.buildWakePrompt(sender, agent);
-        console.log(`  → Injecting into ${name} (${key})...`);
+        console.log(`  → Injecting into ${name} (${identity})...`);
         await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv());
         // Brief delay to let Windows console state settle before the next one
         if (process.platform === "win32") {
@@ -717,7 +717,10 @@ export class ChatRoom extends EventEmitter {
     this.rewakeAfter.clear();
     this.wakesInFlight.clear();
     // No queued or in-flight wake may inject, warn or re-queue after this.
-    for (const agent of this.agents.values()) agent.active = false;
+    for (const agent of this.agents.values()) {
+      agent.active = false;
+      wakes.release(this.warnKey(agent.name));
+    }
     this.agents.clear();
     cancelRoomListens(this);
   }
