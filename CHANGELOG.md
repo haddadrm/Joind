@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-09-24: Submit Fixes From the Injection Matrix
+
+The injection matrix (`tools/inject-matrix` on `feat/inject-matrix`) typed one prompt, `reply with exactly the word PONG and nothing else`, through every wake route into a real Claude Code 2.1.28x and a real Codex CLI 0.154.0, and read the screen back. Two routes delivered every byte and still never submitted, while the injector reported success.
+
+| route | Claude Code, before | Codex, before |
+|---|---|---|
+| console injector | submitted | never: prompt left in the input box; a second Enter submitted it |
+| `injectWezTerm` (line feed) | never: prompt left in the input box | never |
+| same call, carriage return | submitted, 6.3 s | never with one Enter |
+| `orca terminal send --enter` | submitted | submitted, 25 s |
+
+A raw key reader showed why the WezTerm route failed: it delivered U+000A, where every other route delivers U+000D. The Codex failures came from a name test: the double Enter fired only for a process named `codex.exe`, and an npm install of Codex runs as `node.exe` with `codex.js` on its command line.
+
+### Fixed
+- `injectWezTerm` ends the text with a carriage return instead of a line feed, and keeps `--no-paste`. The code comment carries the measurement.
+- New `src/target.ts`: the target is classified by its command line (CIM `Win32_Process.CommandLine` on Windows, `ps -o args=` on Unix), not its name. Codex is `codex.exe`, or a runtime such as node running `codex.js`, `@openai/codex` or a `codex-cli` checkout. Copilot is `copilot(.exe)`, `@github/copilot`, a `copilot-cli` path or `gh copilot`. Only the executable and the script it runs count, so `claude.exe --resume codex-notes` stays Claude. The result is a `SubmitPlan` (`doubleEnter`, `delayMs`): 300 ms and a second Enter for Codex and Copilot, 50 ms and one Enter otherwise.
+- The plan is worked out at most once per wake, only when a backend that presses Enter itself needs it, and shared between WezTerm and its console fallback. The console backend applied it before; WezTerm now sends a second carriage return `delayMs` later in its own `send-text` call, and tmux sends a second `Enter`. Orca gets no extra Enter: `orca terminal send --enter` submitted to Codex in one go, because Orca presses Enter separately from the text.
+- The lookup never holds up a wake. It has a 4 second timeout, is cached per pid for 60 seconds, and concurrent wakes share the lookup in flight. A failed or empty lookup is the single-Enter default and is not cached. `InjectBackends.classify` lets tests pass a fixed plan.
+
+### Verified after the fix (real agents, same harness, fresh session per route)
+
+| route | agent | submitted | reply |
+|---|---|---|---|
+| `injectWezTerm` | Claude Code 2.1.282 | yes | 4.9 s |
+| `injectWezTerm` | Codex CLI 0.154.0 (npm, node.exe) | yes, classified `codex`, no console fallback | 18.6 s |
+| console injector, conhost | Codex CLI 0.154.0 (npm, node.exe) | yes | 24.8 s |
+
+### Tests
+- 30 in `tests/submit-plan.test.ts`: classification of the native Codex build, the npm Codex under node (the field command line), `@openai/codex` on Unix, a `codex-cli` checkout, Copilot in four forms, and six negatives including Claude resuming a session named after Codex; the 60 second cache, a shared lookup in flight, failures neither cached nor fatal, no lookup without a pid; the WezTerm terminator and argv (`--no-auto-start`, `--no-paste`) and the Codex sequence (text and CR, the delay, a lone CR) with a fake spawn, and no second Enter after a failed first send; one lookup per wake shared with the console fallback, the plan reaching WezTerm, the Windows console and tmux, no lookup on the Orca path, and a throwing classifier giving a single-Enter wake.
+- `tests/wake-fallback.test.ts` and `tests/orca-wake-room.test.ts` pass a fixed plan: the Linux console path now looks up the command line too, and these tests settle on microtasks alone. Suite 211.
+
 ## 2026-09-24: Orca Wake-Ups
 
 Agents living in Orca terminals could not be woken: Orca's terminals are not WezTerm panes, and console injection into their pid does not reach Orca's input. Orca gives every shell `ORCA_TERMINAL_HANDLE=term_<uuid>` and a CLI that types into a live terminal by handle, so the handle now travels with the join exactly as the WezTerm pane does, under the same honesty rules.

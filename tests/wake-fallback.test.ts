@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const state = { console: [] as number[], gates: [] as Array<() => void> };
 vi.mock("../src/inject.js", async () => {
   const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
+  const { DEFAULT_PLAN } = await vi.importActual<typeof import("../src/target.js")>("../src/target.js");
   return {
     ...actual,
     inject: (pid: number, text: string, pane?: number, exe?: string, env?: Record<string, string>, _b?: unknown, options?: import("../src/inject.js").InjectOptions) =>
@@ -16,9 +17,11 @@ vi.mock("../src/inject.js", async () => {
         },
         windows: async (p) => { state.console.push(p); },
         unix: async (p) => { state.console.push(p); },
-        // "linux": the console path has no process-name lookup, so the test
-        // needs no real subprocess and settles on microtasks alone.
         platform: "linux",
+        // The console path classifies its target by command line on every
+        // platform; a fixed plan keeps the test free of real subprocesses so
+        // it settles on microtasks alone.
+        classify: async () => DEFAULT_PLAN,
       }, options),
   };
 });

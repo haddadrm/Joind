@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const state = { orca: [] as string[], texts: [] as string[], console: [] as number[], failOrca: false };
 vi.mock("../src/inject.js", async () => {
   const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
+  const { DEFAULT_PLAN } = await vi.importActual<typeof import("../src/target.js")>("../src/target.js");
   return {
     ...actual,
     inject: (pid: number, text: string, pane?: number, exe?: string, env?: Record<string, string>, _b?: unknown, options?: import("../src/inject.js").InjectOptions) =>
@@ -18,6 +19,8 @@ vi.mock("../src/inject.js", async () => {
         windows: async (p) => { state.console.push(p); },
         unix: async (p) => { state.console.push(p); },
         platform: "linux",
+        // No real command-line lookup: a fixed plan, microtasks only.
+        classify: async () => DEFAULT_PLAN,
       }, options),
   };
 });
