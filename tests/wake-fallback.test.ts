@@ -16,7 +16,9 @@ vi.mock("../src/inject.js", async () => {
         },
         windows: async (p) => { state.console.push(p); },
         unix: async (p) => { state.console.push(p); },
-        platform: "win32",
+        // "linux": the console path has no process-name lookup, so the test
+        // needs no real subprocess and settles on microtasks alone.
+        platform: "linux",
       }, options),
   };
 });
