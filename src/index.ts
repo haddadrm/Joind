@@ -29,7 +29,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
 import { visibleToViewer, type ChatMessage } from "./room.js";
-import { registerTools } from "./tools.js";
+import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
@@ -1473,22 +1473,9 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
 
-  // Auto-detect WezTerm pane if not provided
-  if (weztermPaneId == null && await checkWezTerm()) {
-    try {
-      const panes = await discoverWezTerm();
-      const claimedPanes = new Set<number>();
-      for (const c of manager.listConversations()) {
-        const r = manager.getRoom(c.id);
-        if (r) for (const a of r.who()) if (a.weztermPaneId != null) claimedPanes.add(a.weztermPaneId);
-      }
-      const unclaimed = panes.filter(p => p.weztermPaneId != null && !claimedPanes.has(p.weztermPaneId!) && p.type !== "unknown");
-      if (unclaimed.length === 1) {
-        weztermPaneId = unclaimed[0].weztermPaneId;
-        console.log(`  [wezterm] Auto-detected pane ${weztermPaneId} for ${name}`);
-      }
-    } catch { /* best effort */ }
-  }
+  // Bind a WezTerm pane only when it is live and really this process's.
+  const paneResolution = await resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager));
+  weztermPaneId = paneResolution.paneId;
 
   const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
   manager.bindAgent(name, convId, pid, weztermPaneId);
@@ -1498,7 +1485,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   // Name the WezTerm tab if available
   if (weztermPaneId != null) {
     const wtEnv = Object.keys(getWeztermEnv()).length > 0 ? { ...process.env, ...getWeztermEnv() } : undefined;
-    execFileAsync(getWeztermPath(), ["cli", "set-tab-title", name, "--pane-id", String(weztermPaneId)], { env: wtEnv })
+    execFileAsync(getWeztermPath(), ["cli", "--no-auto-start", "set-tab-title", name, "--pane-id", String(weztermPaneId)], { env: wtEnv })
       .catch(() => {});
   }
 
@@ -1514,6 +1501,8 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
     lastMessageId: lastId,
     recentMessages: recent,
     totalMessages: room.messageCount(),
+    weztermPaneId: agent.weztermPaneId,
+    ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
   });
 });
 

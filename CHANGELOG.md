@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-24: WezTerm Honesty
+
+From the first live wakes after the Honest Wake-Ups deploy: an agent started outside any terminal (WMI-spawned, no console) joined with WezTerm pane 0, which was someone else's shell; every mention was typed at the wrong pane and the honest failure line blamed a transient error. Underneath it, a process leak: every `wezterm cli` call ran without `--no-auto-start`, so whenever no GUI socket answered it spawned a headless mux server, one per call, forever (579 orphans on one host after three days of joins and 30-second checks).
+
+### Fixed
+- Every `wezterm cli` invocation carries `--no-auto-start` (list, send-text, set-tab-title); only the deliberate `spawn` used for launches may start WezTerm. A source-level test keeps it that way.
+- A WezTerm pane is bound to an agent only when it is live in the reachable WezTerm and, when the join carries a pid, that pid runs inside WezTerm on this host (`resolvePaneForJoin`, shared by `chat_join` and `POST /api/agent/join`; `isInsideWezTerm` walks the process tree). A pane that fails the checks is dropped with a log line, a `paneNote` in the REST response and a note in the MCP join text; the join still succeeds on the pid. Auto-detection no longer assigns a pane to a pid that provably runs elsewhere.
+- `inject()` falls back to console injection when the WezTerm path fails and a real pid is known, instead of giving up on a stale pane.
+- Tests: 8 in `tests/wezterm-honesty.test.ts` (pane resolution, process-tree check with the field case, fallback, the no-auto-start guard). Suite 125.
+
 ## 2026-09-23: Honest Wake-Ups
 
 Diagnosed from the Y530 server log: a local Claude Code session missed about one mention in five (32 of 171 injections failed, mostly AttachConsole access-denied while injections overlapped), a remote one missed every mention (81 of 81, no console for a foreign pid), and none of it was visible in the room. The injected prompt also told woken agents to call back on 127.0.0.1, which a tailnet-bound server does not even listen on.

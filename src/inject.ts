@@ -48,7 +48,7 @@ export async function spawnWeztermPane(opts: {
   if (opts.tabTitle) {
     execFileAsync(
       exe,
-      ["cli", "set-tab-title", "--pane-id", String(paneId), opts.tabTitle],
+      ["cli", "--no-auto-start", "set-tab-title", "--pane-id", String(paneId), opts.tabTitle],
       { timeout: 5000, env }
     ).catch(() => {});
   }
@@ -89,7 +89,7 @@ export async function injectWezTerm(paneId: number, text: string, weztermExe?: s
   const { spawn } = await import("child_process");
   const env = extraEnv && Object.keys(extraEnv).length > 0 ? { ...process.env, ...extraEnv } : undefined;
   return new Promise((resolve, reject) => {
-    const proc = spawn(exe, ["cli", "send-text", "--pane-id", String(paneId), "--no-paste"], {
+    const proc = spawn(exe, ["cli", "--no-auto-start", "send-text", "--pane-id", String(paneId), "--no-paste"], {
       timeout: 5000,
       stdio: ["pipe", "pipe", "pipe"],
       env,
@@ -107,26 +107,45 @@ export async function injectWezTerm(paneId: number, text: string, weztermExe?: s
   });
 }
 
+/** Backends, injectable for tests. */
+export interface InjectBackends {
+  wezterm: typeof injectWezTerm;
+  windows: (pid: number, text: string, delayMs: number, doubleEnter: boolean) => Promise<void>;
+  unix: (pid: number, text: string) => Promise<void>;
+  platform?: NodeJS.Platform;
+}
+
 /**
  * Inject a text prompt + Enter into the terminal of a running process.
- * Prefer WezTerm pane injection when paneId is provided.
+ * Prefer WezTerm pane injection when paneId is provided; when that path
+ * fails and a real pid is known, fall back to console injection rather than
+ * giving up (a pane id can be stale while the process is alive).
  */
-export async function inject(pid: number, text: string, weztermPaneId?: number, weztermExe?: string, weztermEnv?: Record<string, string>): Promise<void> {
-  // WezTerm path — clean, no Python/ctypes needed
+export async function inject(
+  pid: number, text: string, weztermPaneId?: number, weztermExe?: string, weztermEnv?: Record<string, string>,
+  backends: InjectBackends = { wezterm: injectWezTerm, windows: injectWindows, unix: injectUnix }
+): Promise<void> {
+  const platform = backends.platform ?? process.platform;
   if (weztermPaneId != null) {
-    return injectWezTerm(weztermPaneId, text, weztermExe, weztermEnv);
+    try {
+      return await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv);
+    } catch (err) {
+      if (!(pid > 0)) throw err;
+      const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      console.log(`  [inject] wezterm pane ${weztermPaneId} failed (${msg.slice(0, 120)}); falling back to pid ${pid}`);
+    }
   }
 
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     const procName = await getProcessName(pid);
     const isCodex = procName === "codex.exe";
     const isCopilot = procName?.includes("copilot") ?? false;
     const delayMs = (isCodex || isCopilot) ? CODEX_DELAY_MS : DEFAULT_DELAY_MS;
     const doubleEnter = isCodex || isCopilot;
     console.log(`  [inject] target=${procName ?? "unknown"} delay=${delayMs}ms doubleEnter=${doubleEnter}`);
-    await injectWindows(pid, text, delayMs, doubleEnter);
+    await backends.windows(pid, text, delayMs, doubleEnter);
   } else {
-    await injectUnix(pid, text);
+    await backends.unix(pid, text);
   }
 }
 

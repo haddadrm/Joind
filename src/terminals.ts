@@ -435,7 +435,10 @@ async function checkWezTerm(): Promise<boolean> {
 
   for (const candidate of findWezTermExe()) {
     try {
-      await execFileAsync(candidate, ["cli", "list", "--format", "json"], {
+      // --no-auto-start: without it, wezterm cli spawns a headless mux server
+      // whenever no GUI socket answers, one per call, forever (579 orphans on
+      // one host after three days of joins and heartbeat checks).
+      await execFileAsync(candidate, ["cli", "--no-auto-start", "list", "--format", "json"], {
         timeout: 3000,
         env,
       });
@@ -459,6 +462,74 @@ async function checkWezTerm(): Promise<boolean> {
 /** Get the resolved wezterm executable path. */
 export function getWeztermPath(): string { return weztermPath; }
 
+/** Ids of the panes the reachable WezTerm reports right now (never
+ *  auto-starting a mux server). Empty when WezTerm cannot be reached. */
+export async function listWezTermPaneIds(): Promise<Set<number>> {
+  try {
+    const env = Object.keys(weztermEnv).length > 0 ? { ...process.env, ...weztermEnv } : undefined;
+    const { stdout } = await execFileAsync(
+      weztermPath, ["cli", "--no-auto-start", "list", "--format", "json"],
+      { timeout: 3000, env }
+    );
+    const panes = JSON.parse(stdout.trim()) as Array<{ pane_id: number }>;
+    return new Set(panes.map((p) => p.pane_id).filter((id) => Number.isInteger(id)));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Parent pid for every process on this host (empty when unavailable). */
+export async function listParentPids(): Promise<Map<number, { ppid: number; name: string }>> {
+  const out = new Map<number, { ppid: number; name: string }>();
+  try {
+    if (process.platform === "win32") {
+      const { stdout } = await execFileAsync(
+        "wmic", ["process", "get", "processid,parentprocessid,name", "/format:csv"], { timeout: 10000 }
+      );
+      for (const line of stdout.trim().split("\n")) {
+        const parts = line.split(",").map((x) => x.trim());
+        if (parts.length < 4) continue;
+        const name = parts[parts.length - 3] ?? "";
+        const ppid = parseInt(parts[parts.length - 2] ?? "", 10);
+        const pid = parseInt(parts[parts.length - 1] ?? "", 10);
+        if (!Number.isFinite(pid) || pid === 0) continue;
+        out.set(pid, { ppid: Number.isFinite(ppid) ? ppid : 0, name });
+      }
+    } else {
+      const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,comm"], { timeout: 5000 });
+      for (const line of stdout.trim().split("\n").slice(1)) {
+        const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+        if (m) out.set(parseInt(m[1], 10), { ppid: parseInt(m[2], 10), name: m[3].trim() });
+      }
+    }
+  } catch { /* unavailable: callers treat as unknown */ }
+  return out;
+}
+
+const WEZTERM_PROCESS = /^wezterm(-gui|-mux-server)?(\.exe)?$/i;
+
+/**
+ * Does `pid` run inside WezTerm on this host (a WezTerm process among its
+ * ancestors)? False for a pid that does not exist here, which is what a
+ * remote agent's pid looks like. `tree` is injectable for tests.
+ */
+export function isInsideWezTermTree(pid: number, tree: Map<number, { ppid: number; name: string }>): boolean {
+  let cur = pid;
+  for (let depth = 0; depth < 64 && cur > 0; depth++) {
+    const entry = tree.get(cur);
+    if (!entry) return false;
+    if (WEZTERM_PROCESS.test(entry.name)) return true;
+    if (entry.ppid === cur) return false;
+    cur = entry.ppid;
+  }
+  return false;
+}
+
+export async function isInsideWezTerm(pid: number): Promise<boolean> {
+  if (!(pid > 0)) return false;
+  return isInsideWezTermTree(pid, await listParentPids());
+}
+
 /** Get extra env vars needed for wezterm CLI (socket path). */
 export function getWeztermEnv(): Record<string, string> { return weztermEnv; }
 
@@ -466,7 +537,7 @@ export async function discoverWezTerm(): Promise<TerminalInfo[]> {
   try {
     const env = Object.keys(weztermEnv).length > 0 ? { ...process.env, ...weztermEnv } : undefined;
     const { stdout } = await execFileAsync(
-      weztermPath, ["cli", "list", "--format", "json"],
+      weztermPath, ["cli", "--no-auto-start", "list", "--format", "json"],
       { timeout: 5000, env }
     );
     const panes = JSON.parse(stdout.trim()) as WezTermPane[];

@@ -16,9 +16,68 @@ import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
-import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv } from "./terminals.js";
+import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, listWezTermPaneIds, isInsideWezTerm } from "./terminals.js";
 
 const execFileAsync = promisify(execFile);
+
+/** Dependencies of resolvePaneForJoin, injectable for tests. */
+export interface PaneResolverDeps {
+  checkWezTerm: () => Promise<boolean>;
+  listPaneIds: () => Promise<Set<number>>;
+  isInsideWezTerm: (pid: number) => Promise<boolean>;
+  autoDetect: () => Promise<number | undefined>;
+  log?: (line: string) => void;
+}
+
+/**
+ * Decide which WezTerm pane, if any, a joining agent is bound to. A pane is
+ * accepted only when it is live in the reachable WezTerm AND, when the join
+ * carries a pid, that pid actually runs inside WezTerm on this host. Field
+ * case: an agent started outside any terminal joined with pane 0 (someone
+ * else's shell), every mention was typed at the wrong pane, and the honest
+ * failure line blamed a transient error. A pane that fails these checks is
+ * dropped with a log line; the join still succeeds on the pid.
+ */
+export async function resolvePaneForJoin(
+  name: string, pid: number, requested: number | undefined, deps: PaneResolverDeps
+): Promise<{ paneId: number | undefined; note?: string }> {
+  const log = deps.log ?? ((line: string) => console.log(`  [wezterm] ${line}`));
+  if (!(await deps.checkWezTerm())) {
+    if (requested != null) {
+      const note = `pane ${requested} ignored for ${name}: no WezTerm reachable from this server`;
+      log(note);
+      return { paneId: undefined, note };
+    }
+    return { paneId: undefined };
+  }
+  if (requested != null) {
+    const live = await deps.listPaneIds();
+    if (!live.has(requested)) {
+      const note = `pane ${requested} ignored for ${name}: not a live WezTerm pane`;
+      log(note);
+      return { paneId: undefined, note };
+    }
+    if (pid > 0 && !(await deps.isInsideWezTerm(pid))) {
+      const note = `pane ${requested} ignored for ${name}: pid ${pid} does not run inside WezTerm on this host`;
+      log(note);
+      return { paneId: undefined, note };
+    }
+    return { paneId: requested };
+  }
+  // No pane requested: auto-detect only for a process that is inside WezTerm
+  // (or an unknown one), never for a pid that is provably elsewhere.
+  if (pid > 0 && !(await deps.isInsideWezTerm(pid))) return { paneId: undefined };
+  return { paneId: await deps.autoDetect() };
+}
+
+export function defaultPaneResolverDeps(manager: ConversationManager): PaneResolverDeps {
+  return {
+    checkWezTerm,
+    listPaneIds: listWezTermPaneIds,
+    isInsideWezTerm,
+    autoDetect: () => autoDetectWezTermPane(manager),
+  };
+}
 
 /**
  * Auto-detect WezTerm pane ID for a newly joining agent.
@@ -126,11 +185,8 @@ export function registerTools(
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
 
-      // Auto-detect WezTerm pane if not provided
-      let resolvedPaneId = weztermPaneId;
-      if (resolvedPaneId == null && await checkWezTerm()) {
-        resolvedPaneId = await autoDetectWezTermPane(manager);
-      }
+      // Bind a WezTerm pane only when it is live and really this process's.
+      const { paneId: resolvedPaneId, note: paneNote } = await resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager));
 
       const persistedRole = getPersistedRole?.(name);
       const agent = room.join(name, pid, resolvedPaneId, persistedRole);
@@ -141,7 +197,7 @@ export function registerTools(
       // Name the WezTerm tab to just the agent name
       if (agent.weztermPaneId != null) {
         const wtEnv = Object.keys(getWeztermEnv()).length > 0 ? { ...process.env, ...getWeztermEnv() } : undefined;
-        execFileAsync(getWeztermPath(), ["cli", "set-tab-title", name, "--pane-id", String(agent.weztermPaneId)], { env: wtEnv })
+        execFileAsync(getWeztermPath(), ["cli", "--no-auto-start", "set-tab-title", name, "--pane-id", String(agent.weztermPaneId)], { env: wtEnv })
           .catch(() => {});
       }
 
@@ -165,6 +221,7 @@ export function registerTools(
           text:
             `Joined conversation "${meta?.name ?? convId}".\n` +
             `Online: ${online.join(", ") || "just you"}` +
+            (paneNote ? `\nNote: ${paneNote}. Mentions reach you by console injection (pid) if that works here, otherwise only by chat_listen.` : "") +
             recentText + historyHint,
         }],
       };
