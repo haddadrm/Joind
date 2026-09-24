@@ -743,7 +743,7 @@ app.post("/api/join", express.json(), async (req, res) => {
   // conversation can change while pane resolution runs, and membership and
   // routing must land in the same room.
   const convId = manager.getActiveId();
-  if (!convId || !activeRoom(res)) return;
+  if (!convId) { res.status(400).json({ error: "No active conversation. Create or select one." }); return; }
   const { name, pid, wtSession, weztermPaneId: requestedPane } = req.body as {
     name?: string; pid?: number; wtSession?: string; weztermPaneId?: number;
   };

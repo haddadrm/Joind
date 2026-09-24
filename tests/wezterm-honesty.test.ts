@@ -141,8 +141,11 @@ describe("isInsideWezTermTree", () => {
     const missing = new Map<number, ProcessEntry>([
       [1, { ppid: 0, name: "wezterm-gui.exe" }],
       [2, { ppid: 1, name: "claude.exe", started: t0 }],
+      [3, { ppid: 999, name: "claude.exe", started: t0 }], // parent exited: unverifiable, not disproved
     ]);
     expect(isInsideWezTermTree(2, missing)).toBe("unknown");
+    expect(isInsideWezTermTree(3, missing)).toBe("unknown");
+    expect(isInsideWezTermTree(999, missing)).toBe(false); // the joining pid itself is absent
   });
   it("parses WMI creation dates, ps etime, and the PowerShell process table with separators in names", () => {
     expect(parseCimDate("20260924085113.123456+240")).toBe(Date.UTC(2026, 8, 24, 8, 51, 13, 123) - 240 * 60_000);

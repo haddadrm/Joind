@@ -593,7 +593,10 @@ export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>
     if (WEZTERM_PROCESS.test(processBasename(entry.name))) return true;
     if (entry.ppid === cur || entry.ppid <= 0) return false;
     const parent = tree.get(entry.ppid);
-    if (!parent) return false;
+    // The chain breaks above a live process: an exited intermediary leaves
+    // the terminal association unverifiable, which is not the same as
+    // disproved (only a joining pid that is absent altogether is "false").
+    if (!parent) return "unknown";
     if (child?.started == null || parent.started == null) return "unknown";
     const precision = Math.max(child.startedPrecisionMs ?? 1, parent.startedPrecisionMs ?? 1);
     const gap = parent.started - child.started; // positive: parent "younger" than child
