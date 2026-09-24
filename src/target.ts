@@ -10,12 +10,16 @@
  * of Codex runs as node.exe with codex.js on its command line, so the check
  * never matched and the double Enter never fired. This reads the command
  * line instead (CIM Win32_Process.CommandLine on Windows, `ps -o args=` on
- * Unix) and matches the executable or the script it runs.
+ * Unix) and identifies the application the process runs.
  *
- * Cheap and never blocking: at most one lookup per pid per minute (cached,
- * and concurrent wakes share the lookup in flight), a hard timeout, and on
- * any failure the plain single-Enter plan, which is what every agent but
- * these two needs.
+ * One lookup per wake, never a stale answer. A plan cached by pid would be
+ * inherited by whatever process reuses that pid, and learning the process's
+ * start time to tell incarnations apart costs the same call as reading its
+ * command line, so there is no cross-wake cache: every wake reads the
+ * process it is about to type into. The call has a hard timeout, wakes that
+ * overlap on one pid share the read in flight, a lifecycle signal (the
+ * wake's guard saying the target left or moved) drops that shared read, and
+ * any failure is the plain single-Enter plan.
  */
 
 import { execFile } from "child_process";
@@ -44,43 +48,145 @@ function tokens(commandLine: string): string[] {
   return out;
 }
 
+function normalise(token: string): string {
+  return token.replace(/\\/g, "/").toLowerCase();
+}
+
 function basename(token: string): string {
-  const parts = token.replace(/\\/g, "/").split("/");
-  return (parts[parts.length - 1] ?? "").toLowerCase();
+  const parts = normalise(token).split("/");
+  return parts[parts.length - 1] ?? "";
 }
 
-/** The executable plus the first non-flag argument (the script a runtime
- *  such as node runs). Later arguments are data, not identity: a Claude
- *  session started with `--resume codex-notes` is still Claude. */
-function identityTokens(commandLine: string): string[] {
-  const t = tokens(commandLine);
-  if (t.length === 0) return [];
-  const exe = t[0];
-  const script = t.slice(1).find((a) => !a.startsWith("-"));
-  return script === undefined ? [exe] : [exe, script];
+/** Basename without the extensions an executable or entry script carries. */
+function stem(token: string): string {
+  return basename(token).replace(/\.(exe|cmd|bat|ps1|js|cjs|mjs|ts)$/, "");
 }
 
-const RUNTIMES = new Set(["node", "node.exe", "nodejs", "bun", "bun.exe", "deno", "deno.exe"]);
+const RUNTIMES = new Set(["node", "nodejs", "bun", "deno"]);
+
+/** Runtime options that take their value as the NEXT argument. The `=` form
+ *  (`--inspect=9229`, `--max-old-space-size=4096`) is one token and needs no
+ *  entry here. Node's list, plus the few Bun and Deno spell the same way. */
+const OPTIONS_WITH_VALUE = new Set([
+  "-r", "--require", "--import", "--loader", "--experimental-loader",
+  "-C", "--conditions", "--input-type", "--env-file", "--title", "--inspect-port",
+  "--redirect-warnings", "--diagnostic-dir", "--icu-data-dir", "--openssl-config",
+  "--watch-path", "--experimental-policy", "--policy-integrity", "--heapsnapshot-signal",
+  "--report-dir", "--report-directory", "--report-filename", "--report-signal",
+  "--trace-event-categories", "--trace-event-file-pattern", "--unhandled-rejections",
+  "--tls-cipher-list", "--disable-proto", "--dns-result-order", "--max-http-header-size",
+  "--secure-heap", "--secure-heap-min", "--test-reporter", "--test-reporter-destination",
+  "--config", "--cwd", "--preload", "--import-map", "--lock", "--cert", "--location",
+]);
+/** Options whose value is the program itself: there is no entry script. */
+const INLINE_PROGRAM = new Set(["-e", "--eval", "-p", "--print"]);
+/** Runtimes that take a `run` subcommand before the script (`bun run x`,
+ *  `deno run x`). For node, `run` is just a file name. */
+const RUN_SUBCOMMAND_RUNTIMES = new Set(["bun", "deno"]);
+
+/**
+ * The entry script a runtime runs, or null when there is none (an inline
+ * `-e` program, a bare REPL). Options and their values are skipped, `--`
+ * ends the options, and a `run` subcommand is stepped over.
+ */
+export function entryScript(args: string[], runtime = "node"): string | null {
+  let i = 0;
+  let sawSubcommand = !RUN_SUBCOMMAND_RUNTIMES.has(runtime);
+  while (i < args.length) {
+    const a = args[i];
+    if (a === "--") return args[i + 1] ?? null;
+    // Case matters: node's -C takes a value, its -c does not.
+    const flag = a.split("=")[0];
+    if (INLINE_PROGRAM.has(flag)) return null;
+    if (a.startsWith("-")) {
+      i += OPTIONS_WITH_VALUE.has(flag) && !a.includes("=") ? 2 : 1;
+      continue;
+    }
+    if (!sawSubcommand && a === "run") { sawSubcommand = true; i++; continue; }
+    return a;
+  }
+  return null;
+}
+
+/** Known applications by the npm package they ship in. */
+const PACKAGES: Array<[string, AgentKind]> = [
+  ["@openai/codex", "codex"],
+  ["@github/copilot", "copilot"],
+  ["@githubnext/github-copilot-cli", "copilot"],
+  ["@anthropic-ai/claude-code", "default"],
+];
+
+/** The package a path runs from: the LAST `node_modules/<pkg>` in it, so a
+ *  package nested in another package's tree is the one that counts. */
+function packageOf(path: string): string | null {
+  const re = /node_modules\/((?:@[^/]+\/)?[^/]+)/g;
+  let last: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(path)) !== null) last = m[1];
+  return last;
+}
+
+/** An application's own name, as its executable or entry script. */
+function kindOfName(name: string): AgentKind | null {
+  if (name === "codex" || name === "codex-cli") return "codex";
+  if (name === "copilot" || name.startsWith("copilot-")) return "copilot";
+  if (name === "claude" || name === "claude-code") return "default";
+  return null;
+}
+
+/** Entry points that say nothing about the application they start. */
+const GENERIC_ENTRIES = new Set(["index", "main", "cli", "bin", "run", "start", "app", "entry"]);
+/** Build and layout folders between an application's root and its entry. */
+const LAYOUT_DIRS = new Set(["dist", "bin", "build", "lib", "src", "out", "cli", "esm", "cjs"]);
+
+/**
+ * The application a path starts, most explicit evidence first:
+ *   1. the npm package it runs from (the last node_modules/<pkg>);
+ *   2. the entry point's own name (codex.exe, copilot, claude);
+ *   3. only for a generic entry (cli.js, index.js), its application root:
+ *      the first parent folder that is not a build or layout folder.
+ * Folders above that root are never consulted, so a checkout folder named
+ * codex-cli does not make every tool inside it Codex.
+ */
+function kindOfPath(subject: string): AgentKind {
+  const path = normalise(subject);
+  const pkg = packageOf(path);
+  if (pkg !== null) {
+    const known = PACKAGES.find(([p]) => p === pkg);
+    if (known) return known[1];
+  }
+  const own = kindOfName(stem(subject));
+  if (own !== null) return own;
+  if (pkg === null && GENERIC_ENTRIES.has(stem(subject))) {
+    const dirs = path.split("/").slice(0, -1);
+    for (let i = dirs.length - 1; i >= 0; i--) {
+      if (LAYOUT_DIRS.has(dirs[i])) continue;
+      return kindOfName(dirs[i]) ?? "default";
+    }
+  }
+  return "default";
+}
+
+function planFor(kind: AgentKind): SubmitPlan {
+  return kind === "codex" ? CODEX_PLAN : kind === "copilot" ? COPILOT_PLAN : DEFAULT_PLAN;
+}
 
 /** Classify a process command line. Pure; null or empty is the default plan. */
 export function classifyCommandLine(commandLine: string | null | undefined): SubmitPlan {
   if (!commandLine || !commandLine.trim()) return DEFAULT_PLAN;
-  const [exe, script] = identityTokens(commandLine);
-  const exeBase = basename(exe);
-  // A runtime's identity is the script it runs; anything else is its own.
-  const subject = RUNTIMES.has(exeBase) && script !== undefined ? script : exe;
-  const path = subject.replace(/\\/g, "/").toLowerCase();
-  const base = basename(subject).replace(/\.(exe|js|cjs|mjs)$/, "");
-
-  if (base === "codex" || /(^|\/)@openai\/codex(\/|$)/.test(path) || /(^|\/)codex-cli(\/|$)/.test(path)) {
-    return CODEX_PLAN;
-  }
-  if (base === "copilot" || base.startsWith("copilot-") || /(^|\/)@github\/copilot(\/|$)/.test(path) || /(^|\/)copilot-cli(\/|$)/.test(path)) {
-    return COPILOT_PLAN;
+  const t = tokens(commandLine);
+  if (t.length === 0) return DEFAULT_PLAN;
+  const exe = t[0];
+  const exeStem = stem(exe);
+  if (RUNTIMES.has(exeStem)) {
+    // A runtime's identity is the script it runs; with no script (an inline
+    // program, a REPL) it is nothing we know.
+    const script = entryScript(t.slice(1), exeStem);
+    return script === null ? DEFAULT_PLAN : planFor(kindOfPath(script));
   }
   // `gh copilot ...`: the extension runs under gh with "copilot" as its verb.
-  if ((exeBase === "gh" || exeBase === "gh.exe") && script?.toLowerCase() === "copilot") return COPILOT_PLAN;
-  return DEFAULT_PLAN;
+  if (exeStem === "gh" && t[1]?.toLowerCase() === "copilot") return COPILOT_PLAN;
+  return planFor(kindOfPath(exe));
 }
 
 export type CommandLineReader = (pid: number, platform: NodeJS.Platform) => Promise<string | null>;
@@ -104,40 +210,37 @@ export const readCommandLine: CommandLineReader = (pid, platform) => {
   });
 };
 
-const CACHE_TTL_MS = 60_000;
-const cache = new Map<number, { at: number; plan: Promise<SubmitPlan> }>();
+/** Reads in flight, by pid: wakes that overlap on one process share one. */
+const inFlight = new Map<number, Promise<SubmitPlan>>();
 
 export interface ClassifyDeps {
   read?: CommandLineReader;
-  now?: () => number;
 }
 
 /**
- * The submit plan for the process a wake types into. Cached per pid for a
- * minute (a pid recycled within that minute keeps the old plan until it
- * expires; the cost of that is one extra or one missing Enter). A failed or
- * empty lookup is the default plan and is not cached, so the next wake
- * tries again.
+ * The submit plan for the process a wake is about to type into, read now.
+ * A failed or empty read is the single-Enter default; it never throws.
  */
 export function classifyTarget(pid: number, platform: NodeJS.Platform = process.platform, deps: ClassifyDeps = {}): Promise<SubmitPlan> {
   if (!(pid > 0)) return Promise.resolve(DEFAULT_PLAN);
-  const now = (deps.now ?? Date.now)();
-  const hit = cache.get(pid);
-  if (hit && now - hit.at < CACHE_TTL_MS) return hit.plan;
+  const shared = inFlight.get(pid);
+  if (shared) return shared;
   const read = deps.read ?? readCommandLine;
-  const entry: { at: number; plan: Promise<SubmitPlan> } = { at: now, plan: Promise.resolve(DEFAULT_PLAN) };
-  // Forget a failed lookup, but only if no newer lookup has replaced it.
-  const forget = (): void => { if (cache.get(pid) === entry) cache.delete(pid); };
-  entry.plan = read(pid, platform).then(
-    (line) => {
-      if (line === null) forget();
-      return classifyCommandLine(line);
-    },
-    () => { forget(); return DEFAULT_PLAN; }
-  );
-  cache.set(pid, entry);
-  return entry.plan;
+  const plan: Promise<SubmitPlan> = read(pid, platform).then(
+    (line) => classifyCommandLine(line),
+    () => DEFAULT_PLAN
+  ).finally(() => {
+    if (inFlight.get(pid) === plan) inFlight.delete(pid);
+  });
+  inFlight.set(pid, plan);
+  return plan;
 }
 
-/** Test hook: forget every cached classification. */
-export function resetTargetCache(): void { cache.clear(); }
+/** A lifecycle signal for this pid (the wake's guard said the target left
+ *  or moved): nothing read before it may serve a later wake. */
+export function forgetTarget(pid: number): void {
+  inFlight.delete(pid);
+}
+
+/** Test hook: forget every read in flight. */
+export function resetTargetCache(): void { inFlight.clear(); }

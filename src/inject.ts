@@ -8,7 +8,7 @@
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { injectOrca } from "./orca.js";
-import { classifyTarget, DEFAULT_PLAN, type SubmitPlan } from "./target.js";
+import { classifyTarget, forgetTarget, DEFAULT_PLAN, type SubmitPlan } from "./target.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,6 +73,11 @@ const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r
 export interface WezTermSendOptions {
   /** How to submit: a second carriage return after delayMs for Codex and Copilot. */
   plan?: SubmitPlan;
+  /** Re-asked immediately before each send that follows a wait (the second
+   *  Enter and its one recovery). It throws (the caller's
+   *  WakeFallbackAborted) when the target left, moved, or needs locks this
+   *  wake does not hold. */
+  guard?: () => void;
   /** Injectable for tests. */
   spawn?: SpawnSendText;
   sleep?: (ms: number) => Promise<void>;
@@ -96,6 +101,21 @@ function weztermSendText(spawnFn: SpawnSendText, exe: string, paneId: number, pa
     proc.stdin?.write(payload);
     proc.stdin?.end();
   });
+}
+
+/**
+ * The text reached the terminal but the Enter that submits it could not be
+ * sent, even after one retry of the Enter alone. The prompt is sitting in the
+ * agent's input box. Never answered with a full-payload fallback or a
+ * coordinator retry: either would type the prompt a second time behind the
+ * first. classifyWakeFailure reports it as "partial".
+ */
+export class PartialDeliveryError extends Error {
+  readonly phase = "text-delivered" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "PartialDeliveryError";
+  }
 }
 
 /**
@@ -124,10 +144,27 @@ export async function injectWezTerm(paneId: number, text: string, weztermExe?: s
   const sleep = opts.sleep ?? realSleep;
   console.log(`  [inject:wezterm] pane=${paneId} len=${text.length} doubleEnter=${plan.doubleEnter}`);
   const env = extraEnv && Object.keys(extraEnv).length > 0 ? { ...process.env, ...extraEnv } : undefined;
+  // A failure here is ambiguous (the text may or may not have arrived), so it
+  // stays an ordinary error and the caller may fall back.
   await weztermSendText(spawnFn, exe, paneId, text + "\r", env);
   if (plan.doubleEnter) {
+    // From here the text is in the pane. Only the missing Enter may be sent
+    // again, and every send after a wait re-asks the guard first.
     await sleep(plan.delayMs);
-    await weztermSendText(spawnFn, exe, paneId, "\r", env);
+    opts.guard?.();
+    try {
+      await weztermSendText(spawnFn, exe, paneId, "\r", env);
+    } catch (first) {
+      const why = first instanceof Error ? first.message.split("\n")[0] : String(first);
+      console.log(`  [inject:wezterm] second Enter failed (${why.slice(0, 120)}); sending the Enter once more`);
+      opts.guard?.();
+      try {
+        await weztermSendText(spawnFn, exe, paneId, "\r", env);
+      } catch (second) {
+        const again = second instanceof Error ? second.message.split("\n")[0] : String(second);
+        throw new PartialDeliveryError(`wezterm pane ${paneId}: text delivered, but the Enter that submits it failed twice (${again.slice(0, 120)})`);
+      }
+    }
   }
 }
 
@@ -175,6 +212,16 @@ export async function inject(
   options: InjectOptions = {}
 ): Promise<void> {
   const platform = backends.platform ?? process.platform;
+  // The guard, and a lifecycle signal for the target classifier: when the
+  // target left or moved, no read taken for this pid may serve a later wake.
+  const guard = (): void => {
+    try {
+      assertStillTarget(options);
+    } catch (err) {
+      if (err instanceof WakeFallbackAborted && pid > 0) forgetTarget(pid);
+      throw err;
+    }
+  };
   // How to submit, worked out at most once per wake and only when a backend
   // that presses Enter itself needs it (the Orca path does not).
   let planPromise: Promise<SubmitPlan> | null = null;
@@ -194,12 +241,13 @@ export async function inject(
     // Codex CLI in one go in the injection matrix (25 s to reply), where every
     // single-Enter keystroke route needed a second one. Orca presses Enter
     // separately from the text, which is what Codex waits for.
-    attempt = () => orca(handle, text, { beforeRetry: () => assertStillTarget(options) });
+    attempt = () => orca(handle, text, { beforeRetry: guard });
   } else if (weztermPaneId != null) {
     via = `wezterm pane ${weztermPaneId}`;
     attempt = async () => {
       const p = await plan();
-      await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv, { plan: p });
+      guard(); // the classification awaited: is this still the session to type into?
+      await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv, { plan: p, guard });
     };
   }
   if (attempt) {
@@ -207,6 +255,9 @@ export async function inject(
       return await attempt();
     } catch (err) {
       if (err instanceof WakeFallbackAborted) throw err; // the guard stopped the backend's own retry
+      // The text is already in the terminal: typing it again elsewhere would
+      // put the prompt in twice. Report it; never fall back.
+      if (err instanceof PartialDeliveryError) throw err;
       if (!(pid > 0)) throw err;
       primary = err;
       const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
@@ -215,6 +266,7 @@ export async function inject(
       const verdict = options.fallbackGuard?.() ?? "proceed";
       if (verdict !== "proceed") {
         console.log(`  [inject] ${via} failed (${msg.slice(0, 120)}); no console fallback: target ${verdict === "skip" ? "left" : "moved"}`);
+        forgetTarget(pid);
         throw new WakeFallbackAborted(verdict);
       }
       console.log(`  [inject] ${via} failed (${msg.slice(0, 120)}); falling back to pid ${pid}`);
@@ -222,9 +274,9 @@ export async function inject(
   }
 
   try {
-    await injectConsole(pid, text, platform, backends, options, plan);
+    await injectConsole(pid, text, platform, backends, guard, plan);
   } catch (err) {
-    if (primary === undefined || err instanceof WakeFallbackAborted) throw err;
+    if (primary === undefined || err instanceof WakeFallbackAborted || err instanceof PartialDeliveryError) throw err;
     // Both paths failed: the first backend's error stays the reported one,
     // so a transient socket failure is still retried rather than being
     // reclassed as "no console" by the fallback's own complaint.
@@ -253,15 +305,15 @@ async function resolvePlan(pid: number, platform: NodeJS.Platform, backends: Inj
   }
 }
 
-async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends, options: InjectOptions, plan: () => Promise<SubmitPlan>): Promise<void> {
+async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends, guard: () => void, plan: () => Promise<SubmitPlan>): Promise<void> {
   const p = await plan();
   if (platform === "win32") {
-    assertStillTarget(options);
+    guard();
     await backends.windows(pid, text, p.delayMs, p.doubleEnter);
   } else {
-    assertStillTarget(options);
+    guard();
     // tmux discovery inside the backend awaits too; it re-asks before typing.
-    await backends.unix(pid, text, () => assertStillTarget(options), p);
+    await backends.unix(pid, text, guard, p);
   }
 }
 
@@ -402,7 +454,21 @@ print(f'Injected {len(text)} chars + Enter (delay={delay_s}s, double={double_ent
 // Unix: tmux send-keys
 // ---------------------------------------------------------------------------
 
-async function injectUnix(pid: number, text: string, guard?: () => void, plan: SubmitPlan = DEFAULT_PLAN): Promise<void> {
+/** The one way injectUnix runs tmux and pgrep; injectable for tests. */
+export type UnixExec = (cmd: string, args: string[], opts: { timeout: number }) => Promise<{ stdout: string }>;
+const realUnixExec: UnixExec = async (cmd, args, opts) => {
+  const { stdout } = await execFileAsync(cmd, args, opts);
+  return { stdout: String(stdout) };
+};
+
+export interface UnixSendDeps {
+  exec?: UnixExec;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export async function injectUnix(pid: number, text: string, guard?: () => void, plan: SubmitPlan = DEFAULT_PLAN, deps: UnixSendDeps = {}): Promise<void> {
+  const execFileAsync = deps.exec ?? realUnixExec;
+  const sleep = deps.sleep ?? realSleep;
   try {
     const { stdout } = await execFileAsync(
       "tmux",
@@ -458,12 +524,27 @@ async function injectUnix(pid: number, text: string, guard?: () => void, plan: S
       timeout: 5000,
     });
     if (plan.doubleEnter) {
-      // Codex and Copilot submit on the second Enter (see target.ts).
-      await realSleep(plan.delayMs);
-      await execFileAsync("tmux", ["send-keys", "-t", target, "Enter"], { timeout: 5000 });
+      // Codex and Copilot submit on the second Enter (see target.ts). The
+      // text is in the pane now: only the Enter may be sent again, and the
+      // guard is re-asked before each send that follows a wait.
+      await sleep(plan.delayMs);
+      guard?.();
+      try {
+        await execFileAsync("tmux", ["send-keys", "-t", target, "Enter"], { timeout: 5000 });
+      } catch (first) {
+        if (first instanceof WakeFallbackAborted) throw first;
+        guard?.();
+        try {
+          await execFileAsync("tmux", ["send-keys", "-t", target, "Enter"], { timeout: 5000 });
+        } catch (second) {
+          const why = second instanceof Error ? second.message.split("\n")[0] : String(second);
+          throw new PartialDeliveryError(`tmux pane ${target}: text delivered, but the Enter that submits it failed twice (${why.slice(0, 120)})`);
+        }
+      }
     }
   } catch (err: unknown) {
     if (err instanceof WakeFallbackAborted) throw err;
+    if (err instanceof PartialDeliveryError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
       `Unix injection failed: ${msg}. Ensure the agent runs inside tmux.`

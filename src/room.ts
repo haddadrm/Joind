@@ -470,7 +470,9 @@ export class ChatRoom extends EventEmitter {
         // (Not after teardown: a late line would recreate the deleted log.)
         if (outcome.warn && !this.destroyed && this.agents.has(name)) {
           this.addSystem(
-            outcome.kind === "no-console" && /^orca /i.test(outcome.reason ?? "")
+            outcome.kind === "partial"
+              ? `Could not submit the prompt to ${name}; the text is in their input box.`
+              : outcome.kind === "no-console" && /^orca /i.test(outcome.reason ?? "")
               ? `Could not wake ${name}: their Orca terminal is not reachable from this server (${outcome.reason}). They will see mentions only when they read on their own schedule, or after rejoining with a live orcaTerminal.`
               : outcome.kind === "no-console"
               ? `Could not wake ${name}: no console reachable from this server (remote session, or joined without its real terminal pid). They will see mentions only when they read on their own schedule.`

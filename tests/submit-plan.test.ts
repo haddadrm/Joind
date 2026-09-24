@@ -52,19 +52,17 @@ describe("classifyCommandLine", () => {
   });
 });
 
-describe("classifyTarget: one lookup per pid per minute, never a failed wake", () => {
+describe("classifyTarget: one read per wake, never a failed wake", () => {
   beforeEach(() => resetTargetCache());
 
-  it("reads the command line once and serves the cache for 60 s", async () => {
-    let t = 1_000;
+  // Gate round 1, finding 4: a plan cached by pid would be inherited by the
+  // next process to reuse that pid, so every wake reads the process it is
+  // about to type into (was: one read per pid per minute).
+  it("every wake reads the current process; nothing carries over", async () => {
     const reads: number[] = [];
     const read = async (pid: number) => { reads.push(pid); return "node /x/@openai/codex/bin/codex.js"; };
-    expect(await classifyTarget(42, "win32", { read, now: () => t })).toEqual(CODEX_PLAN);
-    t += 59_000;
-    expect(await classifyTarget(42, "win32", { read, now: () => t })).toEqual(CODEX_PLAN);
-    expect(reads).toEqual([42]);
-    t += 2_000;
-    await classifyTarget(42, "win32", { read, now: () => t });
+    expect(await classifyTarget(42, "win32", { read })).toEqual(CODEX_PLAN);
+    expect(await classifyTarget(42, "win32", { read })).toEqual(CODEX_PLAN);
     expect(reads).toEqual([42, 42]);
   });
 
