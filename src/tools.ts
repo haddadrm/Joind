@@ -194,13 +194,19 @@ export function registerTools(
         manager.setActive(convId);
       }
 
-      const room = manager.getRoom(convId);
-      if (!room) {
+      if (!manager.getRoom(convId)) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
 
       // Bind a WezTerm pane only when it is live and really this process's.
       const { paneId: resolvedPaneId, note: paneNote } = await resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager));
+
+      // Re-fetch after the await: a conversation deleted meanwhile must not
+      // be resurrected by joining its destroyed room.
+      const room = manager.getRoom(convId);
+      if (!room) {
+        return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
+      }
 
       const persistedRole = getPersistedRole?.(name);
       const agent = room.join(name, pid, resolvedPaneId, persistedRole);

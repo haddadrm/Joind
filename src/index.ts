@@ -1480,12 +1480,16 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
     manager.setActive(convId); // First conversation — make it active for web UI
   }
 
-  const room = manager.getRoom(convId);
-  if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
+  if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
 
   // Bind a WezTerm pane only when it is live and really this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager));
   const boundPane = paneResolution.paneId;
+
+  // Re-fetch after the await: a conversation deleted meanwhile must not be
+  // resurrected by joining its destroyed room.
+  const room = manager.getRoom(convId);
+  if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
 
   const agent = room.join(name, pid || 0, boundPane, agentRoles[name]);
   manager.bindAgent(name, convId, pid, boundPane);
