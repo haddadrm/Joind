@@ -56,6 +56,7 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
   - tmux delivering after a WezTerm failure: the Enter goes through tmux.
 
   In `tests/inject-fixes-gate1.test.ts`, the 7 round-2 tests of the delivered flag and Enter-only mode are deleted and 4 finish-in-place tests take their place. Suite 258. Gate round 4 adds the bridge departure-and-rejoin sequence as an eighth room-level case (one prompt, no Enter, the partial line), failing on 1f1a070. Suite 259.
+- Codex gate round 5 (1 finding, closed): `--env-file-if-exists` and the other value-taking Node options that were missing (`--localstorage-file`, `--run`, the test and profiling options) no longer hide the entry script; both the separate-value and the `=` form are tested.
 
 ## 2026-09-24: Orca Wake-Ups
 

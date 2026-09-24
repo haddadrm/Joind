@@ -226,6 +226,9 @@ describe("finding 5: node options that take a value are not the entry script", (
   const cases: Array<[string, string, SubmitPlan]> = [
     ["--require with a separate value (the gate's case)", "node --require /opt/tracing/register.cjs /usr/lib/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
     ["-r", "node -r /opt/tracing/register.cjs /usr/lib/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
+    ["--env-file-if-exists with a separate value (gate round 5)", "node --env-file-if-exists .env /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
+    ["--env-file-if-exists in = form", "node --env-file-if-exists=.env /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
+    ["--env-file and --localstorage-file with separate values", "node --env-file .env --localstorage-file /tmp/ls.db /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
     ["--import", "node --import ./otel.mjs /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
     ["--loader and --experimental-loader", "node --loader ts-node/esm --experimental-loader ./l.mjs /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
     ["= forms are one token", "node --inspect=9229 --max-old-space-size=4096 /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],

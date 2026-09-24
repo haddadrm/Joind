@@ -69,7 +69,11 @@ const RUNTIMES = new Set(["node", "nodejs", "bun", "deno"]);
  *  entry here. Node's list, plus the few Bun and Deno spell the same way. */
 const OPTIONS_WITH_VALUE = new Set([
   "-r", "--require", "--import", "--loader", "--experimental-loader",
-  "-C", "--conditions", "--input-type", "--env-file", "--title", "--inspect-port",
+  "-C", "--conditions", "--input-type", "--env-file", "--env-file-if-exists", "--title", "--inspect-port",
+  "--experimental-default-type", "--experimental-sea-config", "--localstorage-file", "--run",
+  "--test-name-pattern", "--test-skip-pattern", "--test-shard", "--test-isolation",
+  "--test-coverage-include", "--test-coverage-exclude", "--snapshot-blob",
+  "--cpu-prof-dir", "--cpu-prof-name", "--heap-prof-dir", "--heap-prof-name",
   "--redirect-warnings", "--diagnostic-dir", "--icu-data-dir", "--openssl-config",
   "--watch-path", "--experimental-policy", "--policy-integrity", "--heapsnapshot-signal",
   "--report-dir", "--report-directory", "--report-filename", "--report-signal",
