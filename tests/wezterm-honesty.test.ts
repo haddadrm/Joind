@@ -210,6 +210,28 @@ describe("inject fallback", () => {
     expect(calls).toEqual(["windows:100"]);
   });
 
+  it("re-asks the guard right before typing, on the direct console path too", async () => {
+    const calls: string[] = [];
+    const verdicts: Array<"proceed" | "skip"> = ["proceed", "skip"];
+    const backends = {
+      wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
+      windows: async (pid: number) => { calls.push(`windows:${pid}`); },
+      unix: async (pid: number) => { calls.push(`unix:${pid}`); },
+      platform: "linux" as const,
+    };
+    // Fallback path: the guard passes once (before fallback) and refuses at the last check.
+    const aborted = await inject(100, "hi", 0, undefined, undefined, backends, { fallbackGuard: () => verdicts.shift() ?? "skip" }).catch((e) => e);
+    expect(aborted).toBeInstanceOf(WakeFallbackAborted);
+    expect(calls).toEqual([]);
+    // Direct console path (no pane): the guard is consulted before the backend as well.
+    const direct = await inject(100, "hi", undefined, undefined, undefined, backends, { fallbackGuard: () => "moved" }).catch((e) => e);
+    expect(direct).toBeInstanceOf(WakeFallbackAborted);
+    expect((direct as WakeFallbackAborted).result).toBe("moved");
+    expect(calls).toEqual([]);
+    await inject(100, "hi", undefined, undefined, undefined, backends, { fallbackGuard: () => "proceed" });
+    expect(calls).toEqual(["unix:100"]);
+  });
+
   it("surfaces the WezTerm failure when there is no pid to fall back to", async () => {
     await expect(inject(0, "hello", 0, undefined, undefined, {
       wezterm: async () => { throw new Error("wezterm send-text exit 1"); },

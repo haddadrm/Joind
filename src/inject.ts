@@ -67,13 +67,14 @@ const CODEX_DELAY_MS = 300;
 async function getProcessName(pid: number): Promise<string | null> {
   if (process.platform !== "win32") return null;
   try {
+    // wmic is gone from current Windows builds; CIM through PowerShell instead.
     const { stdout } = await execFileAsync(
-      "wmic",
-      ["process", "where", `ProcessId=${pid}`, "get", "Name", "/value"],
-      { timeout: 5000 }
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Math.floor(pid)}").Name`],
+      { timeout: 8000 }
     );
-    const match = stdout.match(/Name=(.+)/i);
-    return match ? match[1].trim().toLowerCase() : null;
+    const name = stdout.trim().toLowerCase();
+    return name ? name : null;
   } catch {
     return null;
   }
@@ -162,9 +163,9 @@ export async function inject(
   }
 
   try {
-    await injectConsole(pid, text, platform, backends);
+    await injectConsole(pid, text, platform, backends, options);
   } catch (err) {
-    if (primary === undefined) throw err;
+    if (primary === undefined || err instanceof WakeFallbackAborted) throw err;
     // Both paths failed: the WezTerm error stays the reported one, so a
     // transient socket failure is still retried rather than being reclassed
     // as "no console" by the fallback's own complaint.
@@ -174,7 +175,14 @@ export async function inject(
   }
 }
 
-async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends): Promise<void> {
+/** The last word before typing: the caller's guard, re-asked after every
+ *  await that precedes the backend (the process-name lookup takes time too). */
+function assertStillTarget(options: InjectOptions): void {
+  const verdict = options.fallbackGuard?.() ?? "proceed";
+  if (verdict !== "proceed") throw new WakeFallbackAborted(verdict);
+}
+
+async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends, options: InjectOptions): Promise<void> {
   if (platform === "win32") {
     const procName = await getProcessName(pid);
     const isCodex = procName === "codex.exe";
@@ -182,8 +190,10 @@ async function injectConsole(pid: number, text: string, platform: NodeJS.Platfor
     const delayMs = (isCodex || isCopilot) ? CODEX_DELAY_MS : DEFAULT_DELAY_MS;
     const doubleEnter = isCodex || isCopilot;
     console.log(`  [inject] target=${procName ?? "unknown"} delay=${delayMs}ms doubleEnter=${doubleEnter}`);
+    assertStillTarget(options);
     await backends.windows(pid, text, delayMs, doubleEnter);
   } else {
+    assertStillTarget(options);
     await backends.unix(pid, text);
   }
 }
