@@ -127,7 +127,7 @@ export interface InjectOptions {
 export interface InjectBackends {
   wezterm: typeof injectWezTerm;
   windows: (pid: number, text: string, delayMs: number, doubleEnter: boolean) => Promise<void>;
-  unix: (pid: number, text: string) => Promise<void>;
+  unix: (pid: number, text: string, guard?: () => void) => Promise<void>;
   platform?: NodeJS.Platform;
 }
 
@@ -194,7 +194,8 @@ async function injectConsole(pid: number, text: string, platform: NodeJS.Platfor
     await backends.windows(pid, text, delayMs, doubleEnter);
   } else {
     assertStillTarget(options);
-    await backends.unix(pid, text);
+    // tmux discovery inside the backend awaits too; it re-asks before typing.
+    await backends.unix(pid, text, () => assertStillTarget(options));
   }
 }
 
@@ -335,7 +336,7 @@ print(f'Injected {len(text)} chars + Enter (delay={delay_s}s, double={double_ent
 // Unix: tmux send-keys
 // ---------------------------------------------------------------------------
 
-async function injectUnix(pid: number, text: string): Promise<void> {
+async function injectUnix(pid: number, text: string, guard?: () => void): Promise<void> {
   try {
     const { stdout } = await execFileAsync(
       "tmux",
@@ -383,6 +384,7 @@ async function injectUnix(pid: number, text: string): Promise<void> {
       throw new Error(`PID ${pid} not found in any tmux pane`);
     }
 
+    guard?.(); // discovery took time: is this still the session we were asked to wake?
     await execFileAsync("tmux", ["send-keys", "-t", target, "-l", text], {
       timeout: 5000,
     });
@@ -390,6 +392,7 @@ async function injectUnix(pid: number, text: string): Promise<void> {
       timeout: 5000,
     });
   } catch (err: unknown) {
+    if (err instanceof WakeFallbackAborted) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
       `Unix injection failed: ${msg}. Ensure the agent runs inside tmux.`

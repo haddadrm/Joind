@@ -60,6 +60,28 @@ describe("resolvePaneForJoin", () => {
   });
 });
 
+describe("join generations", () => {
+  it("a join that waited is refused once a newer join or a departure for the name happened", () => {
+    const room = new ChatRoom();
+    try {
+      const first = room.beginJoin("Claude");
+      const second = room.beginJoin("Claude");
+      expect(room.joinIsCurrent("Claude", second)).toBe(true);
+      expect(room.joinIsCurrent("Claude", first)).toBe(false);
+      room.join("Claude", 200, 8);
+      expect(room.joinIsCurrent("Claude", second)).toBe(true); // applying a join does not supersede itself
+      room.leave("Claude");
+      expect(room.joinIsCurrent("Claude", second)).toBe(false);
+      const third = room.beginJoin("Claude");
+      expect(room.joinIsCurrent("Claude", third)).toBe(true);
+      expect(room.joinIsCurrent("Other", 1)).toBe(false);
+    } finally {
+      room.destroy();
+    }
+    expect(room.joinIsCurrent("Claude", 3)).toBe(false); // destroyed room: never current
+  });
+});
+
 describe("a rejected pane does not survive a rejoin", () => {
   it("ChatRoom.join clears the pane on null and keeps it on undefined", () => {
     const room = new ChatRoom();
@@ -230,6 +252,24 @@ describe("inject fallback", () => {
     expect(calls).toEqual([]);
     await inject(100, "hi", undefined, undefined, undefined, backends, { fallbackGuard: () => "proceed" });
     expect(calls).toEqual(["unix:100"]);
+  });
+
+  it("hands the guard to the Unix backend so tmux discovery cannot outlive the target", async () => {
+    const calls: string[] = [];
+    let verdict: "proceed" | "skip" = "proceed";
+    const backends = {
+      wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
+      windows: async () => {},
+      unix: async (pid: number, _text: string, guard?: () => void) => {
+        verdict = "skip";   // the target leaves during tmux discovery
+        guard?.();          // the backend re-asks before send-keys
+        calls.push(`unix:${pid}`);
+      },
+      platform: "linux" as const,
+    };
+    const out = await inject(100, "hi", 0, undefined, undefined, backends, { fallbackGuard: () => verdict }).catch((e) => e);
+    expect(out).toBeInstanceOf(WakeFallbackAborted);
+    expect(calls).toEqual([]);
   });
 
   it("surfaces the WezTerm failure when there is no pid to fall back to", async () => {

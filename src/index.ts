@@ -748,11 +748,14 @@ app.post("/api/join", express.json(), async (req, res) => {
     name?: string; pid?: number; wtSession?: string; weztermPaneId?: number;
   };
   if (!name || (!pid && requestedPane == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
+  const joinGen = manager.getRoom(convId)?.beginJoin(name);
+  if (joinGen == null) { res.status(404).json({ error: "Conversation not found" }); return; }
   // Same invariant as the agent joins: a pane is bound only when it is live and this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager));
   const weztermPaneId = paneResolution.paneId;
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
+  if (!room.joinIsCurrent(name, joinGen)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
   const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
   manager.bindAgent(name, convId, pid, weztermPaneId);
   if (pid) renameTabTitle(pid, name).catch(() => {});
@@ -1480,16 +1483,19 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
     manager.setActive(convId); // First conversation — make it active for web UI
   }
 
-  if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
+  const joinGen = manager.getRoom(convId)?.beginJoin(name);
+  if (joinGen == null) { res.status(404).json({ error: "Conversation not found" }); return; }
 
   // Bind a WezTerm pane only when it is live and really this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager));
   const boundPane = paneResolution.paneId;
 
   // Re-fetch after the await: a conversation deleted meanwhile must not be
-  // resurrected by joining its destroyed room.
+  // resurrected by joining its destroyed room, and a newer join or a
+  // departure for this name meanwhile wins over this one.
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
+  if (!room.joinIsCurrent(name, joinGen)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
 
   const agent = room.join(name, pid || 0, boundPane, agentRoles[name]);
   manager.bindAgent(name, convId, pid, boundPane);

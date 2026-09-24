@@ -194,18 +194,24 @@ export function registerTools(
         manager.setActive(convId);
       }
 
-      if (!manager.getRoom(convId)) {
+      const roomBefore = manager.getRoom(convId);
+      if (!roomBefore) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
+      const joinGen = roomBefore.beginJoin(name);
 
       // Bind a WezTerm pane only when it is live and really this process's.
       const { paneId: resolvedPaneId, note: paneNote } = await resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager));
 
       // Re-fetch after the await: a conversation deleted meanwhile must not
-      // be resurrected by joining its destroyed room.
+      // be resurrected by joining its destroyed room, and a newer join or a
+      // departure for this name meanwhile wins over this one.
       const room = manager.getRoom(convId);
       if (!room) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
+      }
+      if (!room.joinIsCurrent(name, joinGen)) {
+        return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
       const persistedRole = getPersistedRole?.(name);
