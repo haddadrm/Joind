@@ -203,6 +203,9 @@ export class ConversationManager extends EventEmitter {
       if (persistedAsks.length > 0) room.applyAskRecords(persistedAsks);
       // Forward room events with conversation ID
       room.on("room", (event: RoomEvent) => {
+        // Any departure (deliberate, timed out, or rename away) supersedes
+        // every join for that name that is still waiting on validation.
+        if (event.type === "leave") this.supersedeJoins((event.data as { name: string }).name);
         this.emit("room", { ...event, conversationId: id });
         // Update message count
         if (event.type === "message") {
@@ -272,6 +275,37 @@ export class ConversationManager extends EventEmitter {
   // -----------------------------------------------------------------------
   // Agent binding
   // -----------------------------------------------------------------------
+
+  // ---- Join generations -------------------------------------------------
+  // A join that awaits validation takes a generation first and applies only
+  // if it is still the latest for that name and terminal afterwards. The
+  // record lives here, not in a room: a newer join into ANOTHER room, or a
+  // departure before the first join ever landed, must supersede it too.
+  // Different terminals of one name stay independent registrations.
+  private joinGenerations = new Map<string, number>();
+
+  static joinTerminalKey(pid: number | undefined, paneId: number | undefined): string {
+    return pid && pid > 0 ? `pid:${pid}` : paneId != null ? `pane:${paneId}` : "pid:0";
+  }
+
+  beginJoin(agentName: string, terminal: string): number {
+    const key = `${agentName}|${terminal}`;
+    const gen = (this.joinGenerations.get(key) ?? 0) + 1;
+    this.joinGenerations.set(key, gen);
+    return gen;
+  }
+
+  joinIsCurrent(agentName: string, terminal: string, generation: number): boolean {
+    return this.joinGenerations.get(`${agentName}|${terminal}`) === generation;
+  }
+
+  /** A departure for this name, from any terminal, ends every pending join for it. */
+  supersedeJoins(agentName: string): void {
+    const prefix = `${agentName}|`;
+    for (const [key, gen] of this.joinGenerations) {
+      if (key.startsWith(prefix)) this.joinGenerations.set(key, gen + 1);
+    }
+  }
 
   /** `paneId` null clears a previously bound pane (proved stale on rejoin); undefined keeps it. */
   bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number | null): void {

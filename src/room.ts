@@ -195,21 +195,6 @@ export class ChatRoom extends EventEmitter {
     }
   }
 
-  private joinGenerations = new Map<string, number>();
-
-  /** A join that must await something (pane validation) calls this first
-   *  and checks joinIsCurrent() after: a newer join or a departure for the
-   *  same name in between supersedes it, and it must not apply. */
-  beginJoin(name: string): number {
-    const gen = (this.joinGenerations.get(name) ?? 0) + 1;
-    this.joinGenerations.set(name, gen);
-    return gen;
-  }
-
-  joinIsCurrent(name: string, generation: number): boolean {
-    return !this.destroyed && this.joinGenerations.get(name) === generation;
-  }
-
   /** `weztermPaneId`: a number binds that pane, null clears any pane held
    *  before (the join proved it stale), undefined leaves it as it was. */
   join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string): Agent {
@@ -261,8 +246,6 @@ export class ChatRoom extends EventEmitter {
   }
 
   leave(name: string, reason: "deliberate" | "timeout" = "deliberate"): void {
-    // A departure supersedes any join still waiting on validation.
-    this.joinGenerations.set(name, (this.joinGenerations.get(name) ?? 0) + 1);
     const agent = this.agents.get(name);
     if (agent) {
       agent.active = false;

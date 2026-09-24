@@ -9,7 +9,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ConversationManager } from "./manager.js";
+import { ConversationManager } from "./manager.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { visibleToViewer } from "./room.js";
 import type { TaskStore } from "./tasks.js";
@@ -194,11 +194,11 @@ export function registerTools(
         manager.setActive(convId);
       }
 
-      const roomBefore = manager.getRoom(convId);
-      if (!roomBefore) {
+      if (!manager.getRoom(convId)) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      const joinGen = roomBefore.beginJoin(name);
+      const joinTerminal = ConversationManager.joinTerminalKey(pid, weztermPaneId);
+      const joinGen = manager.beginJoin(name, joinTerminal);
 
       // Bind a WezTerm pane only when it is live and really this process's.
       const { paneId: resolvedPaneId, note: paneNote } = await resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager));
@@ -210,7 +210,7 @@ export function registerTools(
       if (!room) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      if (!room.joinIsCurrent(name, joinGen)) {
+      if (!manager.joinIsCurrent(name, joinTerminal, joinGen)) {
         return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
@@ -449,6 +449,9 @@ export function registerTools(
       }),
     },
     async ({ name }, extra) => {
+      // Even before any binding exists (a first join still validating), a
+      // leave must win over that join.
+      manager.supersedeJoins(name);
       const target = getRoom(manager, extra, name);
       if (target) {
         target.room.leave(name);
