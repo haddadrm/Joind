@@ -77,8 +77,8 @@ describe("console fallback after a WezTerm failure (real inject, fake backends)"
       await vi.advanceTimersByTimeAsync(5000);
       await settle();
       for (let i = 0; i < 4; i++) { while (state.gates.length) state.gates.shift()!(); await vi.advanceTimersByTimeAsync(2500); await settle(); }
-      // Whatever the final order, no console injection ran while another wake for a linked terminal was in flight.
-      expect(state.console.every((p) => p === 100 || p === 200)).toBe(true);
+      // Both wakes are delivered in the end, one at a time, and nothing else was typed.
+      expect([...state.console].sort()).toEqual([100, 200]);
     } finally {
       while (state.gates.length) state.gates.shift()!();
       await settle();
