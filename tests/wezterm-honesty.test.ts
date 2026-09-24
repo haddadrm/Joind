@@ -124,6 +124,13 @@ describe("join ordering (manager-level: aliases and rooms remember the newest jo
       expect(manager.joinIsCurrent(tok, 100, 7)).toBe(true);
       room.leave("Claude");
       expect(manager.joinIsCurrent(tok, 100, 7)).toBe(false);
+      // A rename retires the old name for pending joins, and the new name joins normally.
+      const pendingOld = manager.beginJoin("Claude", x.id, 100, 7);
+      room.join("Claude", 100, 7);
+      room.rename("Claude", "Bob");
+      expect(manager.joinIsCurrent(pendingOld, 100, 7)).toBe(false);
+      const asBob = manager.beginJoin("Bob", x.id, 100, 7);
+      expect(manager.joinIsCurrent(asBob, 100, 7)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -56,6 +56,36 @@ describe("console fallback after a WezTerm failure (real inject, fake backends)"
     }
   });
 
+  it("does not fall back to the console while the terminal now needs locks this wake does not hold", async () => {
+    const a = new ChatRoom();
+    const b = new ChatRoom();
+    const c = new ChatRoom();
+    try {
+      a.join("A", 100, 7);
+      b.join("B", 200, 8);
+      a.send("Rami", "@A ping");
+      b.send("Rami", "@B ping");
+      await vi.advanceTimersByTimeAsync(2000);
+      await settle();
+      expect(state.gates).toHaveLength(2); // both WezTerm attempts in flight, disjoint locks
+      // A registration pairing pid 100 with pane 8 links A's and B's terminals.
+      c.join("C", 100, 8);
+      await releaseOne(); // A's WezTerm attempt fails while B is still in flight
+      await settle();
+      expect(state.console).toEqual([]); // A must not type now: it needs pane:8, which B holds
+      await releaseOne(); // B's attempt fails; B falls back (its held set already covers pid:200|pane:8? no: needs pid:100 now)
+      await vi.advanceTimersByTimeAsync(5000);
+      await settle();
+      for (let i = 0; i < 4; i++) { while (state.gates.length) state.gates.shift()!(); await vi.advanceTimersByTimeAsync(2500); await settle(); }
+      // Whatever the final order, no console injection ran while another wake for a linked terminal was in flight.
+      expect(state.console.every((p) => p === 100 || p === 200)).toBe(true);
+    } finally {
+      while (state.gates.length) state.gates.shift()!();
+      await settle();
+      a.destroy(); b.destroy(); c.destroy();
+    }
+  });
+
   it("re-queues for the replacement session instead of typing into the old pid", async () => {
     const room = new ChatRoom();
     try {

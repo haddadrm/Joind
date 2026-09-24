@@ -424,6 +424,9 @@ export class ChatRoom extends EventEmitter {
               const live = this.agents.get(name);
               if (this.destroyed || !live?.active) return "skip";
               if (terminalIdentity(live) !== identity) return "moved";
+              // Same rule as before the WezTerm attempt: if the terminal now
+              // needs locks this wake does not hold, queue again under the full set.
+              if (lockKeysFor(live).some((k) => !held.has(k))) return "moved";
               return "proceed";
             },
           });
