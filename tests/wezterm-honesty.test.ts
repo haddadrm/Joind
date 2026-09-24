@@ -131,6 +131,14 @@ describe("join ordering (manager-level: aliases and rooms remember the newest jo
       expect(manager.joinIsCurrent(pendingOld, 100, 7)).toBe(false);
       const asBob = manager.beginJoin("Bob", x.id, 100, 7);
       expect(manager.joinIsCurrent(asBob, 100, 7)).toBe(true);
+      // Round-15 case: a join for the DESTINATION name that was still validating when the
+      // rename happened must not overwrite the renamed session; a later Bob join is fine.
+      room.rename("Bob", "Claude");
+      const pendingBob = manager.beginJoin("Bob", x.id, 200, 8);
+      room.rename("Claude", "Bob");
+      expect(manager.joinIsCurrent(pendingBob, 200, 8)).toBe(false);
+      const laterBob = manager.beginJoin("Bob", x.id, 200, 8);
+      expect(manager.joinIsCurrent(laterBob, 200, 8)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

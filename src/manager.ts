@@ -216,8 +216,14 @@ export class ConversationManager extends EventEmitter {
         // Any departure (deliberate, timed out, or rename away) supersedes
         // every join for that name that is still waiting on validation.
         if (event.type === "leave") this.supersedeJoins((event.data as { name: string }).name);
-        // A rename retires the old name: a join for it still validating must not resurrect it.
-        if (event.type === "rename") this.supersedeJoins((event.data as { oldName: string }).oldName);
+        // A rename retires the old name (a join for it still validating must
+        // not resurrect it) and claims the new name (an older join for the new
+        // name still validating must not overwrite the renamed session).
+        if (event.type === "rename") {
+          const d = event.data as { oldName: string; newName: string };
+          this.supersedeJoins(d.oldName);
+          this.supersedeJoins(d.newName);
+        }
         this.emit("room", { ...event, conversationId: id });
         // Update message count
         if (event.type === "message") {
