@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { resolvePaneForJoin, type PaneResolverDeps } from "../src/tools.js";
-import { isInsideWezTermTree, parseCimDate, parseEtime, parseWmicList, type ProcessEntry } from "../src/terminals.js";
+import { isInsideWezTermTree, parseCimDate, parseEtime, parseProcessTable, type ProcessEntry } from "../src/terminals.js";
 import { inject } from "../src/inject.js";
 import { ChatRoom } from "../src/room.js";
 import { ConversationManager } from "../src/manager.js";
@@ -144,7 +144,7 @@ describe("isInsideWezTermTree", () => {
     ]);
     expect(isInsideWezTermTree(2, missing)).toBe("unknown");
   });
-  it("parses WMI creation dates, ps etime, and wmic list output with commas in names", () => {
+  it("parses WMI creation dates, ps etime, and the PowerShell process table with separators in names", () => {
     expect(parseCimDate("20260924085113.123456+240")).toBe(Date.UTC(2026, 8, 24, 8, 51, 13, 123) - 240 * 60_000);
     expect(parseCimDate("garbage")).toBeUndefined();
     expect(parseCimDate(undefined)).toBeUndefined();
@@ -152,22 +152,18 @@ describe("isInsideWezTermTree", () => {
     expect(parseEtime("1:02:03")).toBe(3723);
     expect(parseEtime("2-01:00:00")).toBe(2 * 86400 + 3600);
     expect(parseEtime("nope")).toBeUndefined();
-    const listed = parseWmicList([
+    const t1 = Date.UTC(2026, 8, 24, 4, 51, 13, 123);
+    const listed = parseProcessTable([
       "",
-      "CreationDate=20260924085113.123456+240",
-      "Name=claude,agent.exe",
-      "ParentProcessId=17280",
-      "ProcessId=5001",
-      "",
-      "",
-      "CreationDate=20260924084926.000000+240",
-      "Name=wezterm-gui.exe",
-      "ParentProcessId=11324",
-      "ProcessId=17280",
+      `5001|17280|${t1}|claude,agent|weird.exe`,
+      `17280|11324|${t1 - 120_000}|wezterm-gui.exe`,
+      "0|0||System Idle Process",
+      "9|4||no-start.exe",
       "",
     ].join("\r\n"));
-    expect(listed.get(5001)).toMatchObject({ ppid: 17280, name: "claude,agent.exe", startedPrecisionMs: 1 });
-    expect(listed.get(5001)!.started).toBe(Date.UTC(2026, 8, 24, 8, 51, 13, 123) - 240 * 60_000);
+    expect(listed.get(5001)).toMatchObject({ ppid: 17280, name: "claude,agent|weird.exe", started: t1, startedPrecisionMs: 1 });
+    expect(listed.get(9)!.started).toBeUndefined();
+    expect(listed.has(0)).toBe(false);
     expect(isInsideWezTermTree(5001, listed)).toBe(true);
   });
 });

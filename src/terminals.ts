@@ -505,28 +505,36 @@ export function parseEtime(v: string | undefined): number | undefined {
   return (+(dd ?? 0)) * 86400 + (+(hh ?? 0)) * 3600 + (+mm) * 60 + (+ss);
 }
 
-/** Parse `wmic ... /format:list` output: records of Key=Value lines separated
- *  by blank lines. Unlike the csv format, a value containing commas is safe. */
-export function parseWmicList(stdout: string): Map<number, ProcessEntry> {
+/** Parse the pipe-separated process table produced by PS_PROCESS_TABLE:
+ *  one `pid|ppid|startMs|name` line per process, name last so a name that
+ *  contains the separator still parses. */
+export function parseProcessTable(stdout: string): Map<number, ProcessEntry> {
   const out = new Map<number, ProcessEntry>();
-  for (const block of stdout.replace(/\r/g, "").split(/\n\s*\n/)) {
-    const rec: Record<string, string> = {};
-    for (const line of block.split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq > 0) rec[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
-    }
-    const pid = parseInt(rec.ProcessId ?? "", 10);
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^(\d+)\|(\d*)\|(\d*)\|(.*)$/);
+    if (!m) continue;
+    const pid = parseInt(m[1], 10);
     if (!Number.isFinite(pid) || pid === 0) continue;
-    const ppid = parseInt(rec.ParentProcessId ?? "", 10);
+    const ppid = parseInt(m[2], 10);
+    const started = m[3] ? parseInt(m[3], 10) : undefined;
     out.set(pid, {
       ppid: Number.isFinite(ppid) ? ppid : 0,
-      name: rec.Name ?? "",
-      started: parseCimDate(rec.CreationDate),
+      name: m[4].trim(),
+      started: Number.isFinite(started as number) ? started : undefined,
       startedPrecisionMs: 1,
     });
   }
   return out;
 }
+
+/** wmic is gone from current Windows builds (absent on every host seen in
+ *  September 2026), so the table comes from CIM through PowerShell. About a
+ *  second per call; it runs only at join time, never on heartbeats. */
+const PS_PROCESS_TABLE =
+  "Get-CimInstance Win32_Process | ForEach-Object { " +
+  "\"$($_.ProcessId)|$($_.ParentProcessId)|$(if ($_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() } else { '' })|$($_.Name)\" }";
 
 /**
  * Parent pid, name and start time for every process on this host, or null
@@ -536,9 +544,10 @@ export async function listParentPids(): Promise<Map<number, ProcessEntry> | null
   try {
     if (process.platform === "win32") {
       const { stdout } = await execFileAsync(
-        "wmic", ["process", "get", "processid,parentprocessid,name,creationdate", "/format:list"], { timeout: 10000 }
+        "powershell", ["-NoProfile", "-NonInteractive", "-Command", PS_PROCESS_TABLE],
+        { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }
       );
-      const out = parseWmicList(stdout);
+      const out = parseProcessTable(stdout);
       return out.size > 0 ? out : null;
     }
     const out = new Map<number, ProcessEntry>();
