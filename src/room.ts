@@ -64,6 +64,15 @@ export function lockKeysFor(
 function terminalRefOf(agent: TerminalRef): TerminalRef {
   return { pid: agent.pid, weztermPaneId: agent.weztermPaneId, orcaTerminal: agent.orcaTerminal };
 }
+/** Could `a` and `b` be the same terminal? Any shared pid, pane or handle. */
+function sharesTerminal(a: TerminalRef, b: TerminalRef): boolean {
+  return (a.pid > 0 && a.pid === b.pid)
+    || (a.weztermPaneId != null && a.weztermPaneId === b.weztermPaneId)
+    || (!!a.orcaTerminal && a.orcaTerminal === b.orcaTerminal);
+}
+/** A wake interrupted after its text reached a terminal: only the Enter is
+ *  missing, and only that terminal (that identity) may receive it. */
+interface EnterResume { identity: string; to: TerminalRef; }
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
@@ -416,7 +425,11 @@ export class ChatRoom extends EventEmitter {
    * is skipped, one that rejoined from a new terminal is queued again under
    * that terminal's key, and the prompt always names the pid it goes to.
    */
-  private async wakeAgent(sender: string, name: string): Promise<void> {
+  /**
+   * `resume`: this wake only completes an earlier one whose text is already in
+   * that terminal; it sends the missing Enter and nothing else.
+   */
+  private async wakeAgent(sender: string, name: string, resume?: EnterResume): Promise<void> {
     if (this.destroyed) return;
     const queued = this.agents.get(name);
     if (!queued?.active || name === sender) return;
@@ -424,22 +437,61 @@ export class ChatRoom extends EventEmitter {
     const held = new Set(lockKeysFor(queued));
     this.wakesInFlight.add(name);
     let moved = false;
+    // Set by an attempt whose text was delivered before it was interrupted.
+    let next: EnterResume | undefined;
+    let partialLine = false;
+    /** The text reached `to` (identity `at`) and the wake was then stopped.
+     *  Never type the prompt into that terminal again. */
+    const afterDelivered = (at: string, to: TerminalRef): "skip" | "moved" => {
+      const live = this.agents.get(name);
+      if (this.destroyed || !live?.active) {
+        console.log(`  [wake] ${name} left after the prompt reached ${at}; nothing more to type`);
+        return "skip";
+      }
+      if (terminalIdentity(live) === at) {
+        // Same terminal; only the locks it needs grew. Re-queue under the full
+        // set and send the missing Enter alone.
+        next = { identity: at, to };
+        return "moved";
+      }
+      if (sharesTerminal(to, live)) {
+        // The registration changed but may still be the terminal holding the
+        // text: a fresh wake could type the prompt in twice. Say so instead.
+        console.log(`  [wake] ${name}'s terminal changed (${at} -> ${terminalIdentity(live)}) after the prompt reached it; not typing it again`);
+        partialLine = true;
+        return "skip";
+      }
+      console.log(`  [wake] ${name} moved to a different terminal (${terminalIdentity(live)}) after the prompt reached ${at}; that terminal keeps the unsent text; waking the new one`);
+      return "moved";
+    };
     try {
       const outcome = await wakes.run([...held], this.warnKey(name), async () => {
+        next = undefined;
+        partialLine = false;
         const agent = this.agents.get(name);
-        if (this.destroyed || !agent?.active) return "skip";
+        if (this.destroyed || !agent?.active) {
+          if (resume) console.log(`  [wake] ${name} left before the delivered prompt was submitted; nothing more to type`);
+          return "skip";
+        }
+        if (resume && terminalIdentity(agent) !== resume.identity) return afterDelivered(resume.identity, resume.to);
         if (terminalIdentity(agent) !== identity) return "moved";
         // Terminal equivalence can grow while a wake waits its turn (a
         // registration pairing this pid with a pane came back). Never inject
         // holding fewer keys than the terminal now needs: queue again under
         // the full set instead.
-        if (lockKeysFor(agent).some((k) => !held.has(k))) return "moved";
-        const prompt = this.buildWakePrompt(sender, agent);
-        console.log(`  → Injecting into ${name} (${identity})...`);
+        if (lockKeysFor(agent).some((k) => !held.has(k))) {
+          next = resume;
+          return "moved";
+        }
+        const deliveredTo = terminalRefOf(agent);
+        const prompt = resume ? "" : this.buildWakePrompt(sender, agent);
+        console.log(resume ? `  → Submitting the delivered prompt for ${name} (${identity}): Enter only` : `  → Injecting into ${name} (${identity})...`);
         try {
           await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv(), undefined, {
-            // Orca's own input path first when the join bound a handle.
-            orcaTerminal: agent.orcaTerminal,
+            // Orca's own input path first when the join bound a handle; an
+            // Enter-only resume stays on the route that carried the text.
+            orcaTerminal: resume ? undefined : agent.orcaTerminal,
+            submitOnly: resume ? true : undefined,
             // Between the Orca or WezTerm failure and the console fallback the target
             // must still be this session; otherwise skip or re-queue.
             fallbackGuard: () => {
@@ -453,7 +505,9 @@ export class ChatRoom extends EventEmitter {
             },
           });
         } catch (err) {
-          if (err instanceof WakeFallbackAborted) return err.result;
+          if (err instanceof WakeFallbackAborted) {
+            return err.delivered === "text" ? afterDelivered(identity, deliveredTo) : err.result;
+          }
           throw err;
         }
         // Brief delay to let Windows console state settle before the next one
@@ -464,6 +518,9 @@ export class ChatRoom extends EventEmitter {
       });
       if (outcome.ok) {
         moved = outcome.result === "moved";
+        if (partialLine && !this.destroyed && this.agents.has(name)) {
+          this.addSystem(`Could not submit the prompt to ${name}; the text is in their input box.`);
+        }
       } else {
         console.error(`  ✗ Injection failed for ${name} (${outcome.kind}, ${outcome.attempts} attempt(s)): ${outcome.reason}`);
         // Tell the room: a mention that did not land must not look landed.
@@ -484,7 +541,7 @@ export class ChatRoom extends EventEmitter {
       this.wakesInFlight.delete(name);
     }
     if (this.destroyed) return;
-    if (moved) return this.wakeAgent(sender, name);
+    if (moved) return this.wakeAgent(sender, name, next);
     if (this.rewakeAfter.delete(name)) this.queueWake(sender, name);
   }
 
