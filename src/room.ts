@@ -397,11 +397,14 @@ export class ChatRoom extends EventEmitter {
     const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
     const pidParam = agent.pid ? `&pid=${agent.pid}` : "";
     const paneParam = agent.weztermPaneId != null ? `&paneId=${agent.weztermPaneId}` : "";
-    const pidBody = agent.pid ? `,"pid":${agent.pid}` : "";
+    // A handle-only registration is found by its handle (the read and send
+    // routes match it before pid and pane); handles are term_<id>, URL-safe.
+    const orcaParam = agent.orcaTerminal ? `&orcaTerminal=${encodeURIComponent(agent.orcaTerminal)}` : "";
+    const pidBody = (agent.pid ? `,"pid":${agent.pid}` : "") + (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "");
     const since = this.getCursor(agent.name);
     return (
       `[joind] @${agent.name} mentioned by ${sender}.${roleHint} ` +
-      `Read: curl -s "${INJECT_BASE_URL}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}" then ` +
+      `Read: curl -s "${INJECT_BASE_URL}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}" then ` +
       `Reply: curl -s -X POST ${INJECT_BASE_URL}/api/agent/send -H "Content-Type: application/json" ` +
       `-d '{"sender":"${agent.name}","text":"YOUR_REPLY"${pidBody}}'`
     );

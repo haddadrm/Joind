@@ -287,24 +287,24 @@ describe("Orca CLI results and failure classification", () => {
   it("injectOrca passes the prompt as one argv entry, never through a shell", async () => {
     const calls: string[][] = [];
     const text = `[joind] @A mentioned. Read: curl -s "http://x/api/agent/read?sender=A&since=3&pid=1" then | echo 'q'`;
-    await injectOrca(H1, text, async (args) => { calls.push(args); return res(accepted); });
+    await injectOrca(H1, text, { run: async (args) => { calls.push(args); return res(accepted); } });
     expect(calls).toEqual([["terminal", "send", "--terminal", H1, "--text", text, "--enter", "--json"]]);
   });
 
   it("injectOrca re-issues an ambiguous failure once with its retry id, and not a stale handle or a no-runtime refusal", async () => {
     const calls: string[][] = [];
     let n = 0;
-    await injectOrca(H1, "x", async (args) => { calls.push(args); return res(n++ === 0 ? ambiguous : accepted); });
+    await injectOrca(H1, "x", { run: async (args) => { calls.push(args); return res(n++ === 0 ? ambiguous : accepted); } });
     expect(calls).toHaveLength(2);
     expect(calls[1].slice(-4)).toEqual(["--retry-request", "req-7", "--wait-submit", "2"]);
 
     const staleCalls: string[][] = [];
-    await expect(injectOrca(H1, "x", async (a) => { staleCalls.push(a); return res(stale, 1); })).rejects.toThrow(/unavailable \(terminal_handle_stale\)/);
+    await expect(injectOrca(H1, "x", { run: async (a) => { staleCalls.push(a); return res(stale, 1); } })).rejects.toThrow(/unavailable \(terminal_handle_stale\)/);
     expect(staleCalls).toHaveLength(1);
     const rtCalls: string[][] = [];
-    await expect(injectOrca(H1, "x", async (a) => { rtCalls.push(a); return res(noRuntime); })).rejects.toThrow(/orca send failed \(runtime_unavailable\)/);
+    await expect(injectOrca(H1, "x", { run: async (a) => { rtCalls.push(a); return res(noRuntime); } })).rejects.toThrow(/orca send failed \(runtime_unavailable\)/);
     expect(rtCalls).toHaveLength(1);
-    await expect(injectOrca("--help", "x", async () => res(accepted))).rejects.toThrow(/malformed_handle/);
+    await expect(injectOrca("--help", "x", { run: async () => res(accepted) })).rejects.toThrow(/malformed_handle/);
   });
 
   it("parses the live terminal listing, and a failed listing is unreachable", async () => {

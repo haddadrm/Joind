@@ -913,7 +913,7 @@ app.post("/api/message/:id/resolve", express.json(), (req, res) => {
     }
   } else {
     if (!sender) { res.status(400).json({ error: "sender required" }); return; }
-    const ctx = agentRoom(sender, res, pid, paneId);
+    const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
     if (!ctx) return;
     room = ctx.room;
     by = sender;
@@ -980,7 +980,7 @@ app.get("/api/agent/decisions", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const bound = agentRoom(sender, res, pid, paneId);
+  const bound = agentRoom(sender, res, pid, paneId, orcaOf(req));
   if (!bound) return;
   const forName = req.query.for as string | undefined;
   const out: unknown[] = [];
@@ -1059,7 +1059,7 @@ app.get("/api/agent/unread", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId);
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   const cursor = cursorStore.get(sender);
   const newMsgs = ctx.room.read(cursor, 100000, undefined, sender);
@@ -1420,13 +1420,22 @@ app.post("/api/turn-guard", express.json(), (req, res) => {
 
 // --- Agent REST API (MCP-free path for Claude Code agents) ---
 
-/** Helper: get agent's room by name binding (with optional pid/paneId disambiguation) */
-function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number) {
+/** The Orca handle a callback names (query for GETs, body for POSTs), used
+ *  only to pick among bindings; never a credential on its own. */
+function orcaOf(req: express.Request): string | undefined {
+  const q = req.query?.orcaTerminal;
+  if (typeof q === "string" && q.trim()) return q.trim();
+  const b = (req.body as { orcaTerminal?: unknown } | undefined)?.orcaTerminal;
+  return typeof b === "string" && b.trim() ? b.trim() : undefined;
+}
+
+/** Helper: get agent's room by name binding (with optional pid/paneId/orcaTerminal disambiguation) */
+function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number, orcaTerminal?: string) {
   // Security gate: an existing binding is the credential. getAgentBinding is a
   // pure lookup and never creates one; bindings exist only after a join flow
   // (MCP chat_join, /api/agent/join, or the UI invite /api/join). A local HTTP
   // client claiming an unbound name gets nothing.
-  const convId = manager.getAgentBinding(name, pid, paneId);
+  const convId = manager.getAgentBinding(name, pid, paneId, orcaTerminal);
   if (convId) {
     const room = manager.getRoom(convId);
     if (room) {
@@ -1549,7 +1558,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
 app.post("/api/agent/heartbeat", express.json(), (req, res) => {
   const { name, pid, paneId } = (req.body ?? {}) as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId);
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   ctx.room.touch(name);
   res.json({ ok: true, at: Date.now() });
@@ -1560,7 +1569,7 @@ app.get("/api/agent/listen", async (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId);
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   const since = req.query.since != null ? Number(req.query.since) : undefined;
   const timeoutMs = clampListenTimeout(
@@ -1588,7 +1597,7 @@ app.get("/api/agent/read", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId);
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   const since = req.query.since != null ? Number(req.query.since) : undefined;
   const limit = Number(req.query.limit ?? 50);
@@ -1617,7 +1626,7 @@ app.post("/api/agent/send", express.json(), (req, res) => {
     recipients = [...new Set((to as string[]).map((t) => t.trim()).filter((t) => t !== sender))];
     if (recipients.length === 0) { res.status(400).json({ error: "to must name someone other than the sender" }); return; }
   }
-  const ctx = agentRoom(sender, res, pid, paneId);
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   ctx.room.touch(sender);
   ctx.room.setTyping(sender, false);
@@ -1636,7 +1645,7 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
   const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
   manager.supersedeJoins(name);
-  const convId = manager.getAgentBinding(name, pid, paneId);
+  const convId = manager.getAgentBinding(name, pid, paneId, orcaOf(req));
   const room = convId ? manager.getRoom(convId) : undefined;
   if (room) room.leave(name);
   if (convId) {
@@ -1650,7 +1659,7 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
 app.post("/api/agent/typing", express.json(), (req, res) => {
   const { name, typing, pid, paneId } = req.body as { name?: string; typing?: boolean; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId);
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   ctx.room.setTyping(name, typing ?? true);
   res.json({ ok: true });
@@ -1659,7 +1668,7 @@ app.post("/api/agent/typing", express.json(), (req, res) => {
 app.post("/api/agent/heartbeat", express.json(), (req, res) => {
   const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId);
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   ctx.room.touch(name);
   res.json({ ok: true });
@@ -1668,7 +1677,7 @@ app.post("/api/agent/heartbeat", express.json(), (req, res) => {
 app.post("/api/agent/status", express.json(), (req, res) => {
   const { name, status, pid, paneId } = req.body as { name?: string; status?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId);
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
   if (!ctx) return;
   const agent = ctx.room.setStatus(name, status ?? "");
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }

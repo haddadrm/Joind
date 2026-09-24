@@ -151,13 +151,25 @@ export function parseOrcaTerminalList(json: OrcaEnvelope | null): Map<string, Or
  * terminal incarnation, so the re-issue can never type twice) before it is
  * reported as transient.
  */
-export async function injectOrca(handle: string, text: string, run: typeof runOrca = runOrca): Promise<void> {
+export interface InjectOrcaOptions {
+  /** Process runner, injectable for tests. */
+  run?: typeof runOrca;
+  /** Asked before the internal retry: the first send took time, and the
+   *  target may have left, been replaced, or now need locks this wake does
+   *  not hold. It throws (the caller's WakeFallbackAborted) to stop the
+   *  retry; a retry can deliver input the first request never did. */
+  beforeRetry?: () => void;
+}
+
+export async function injectOrca(handle: string, text: string, opts: InjectOrcaOptions = {}): Promise<void> {
+  const run = opts.run ?? runOrca;
   if (!ORCA_HANDLE.test(handle)) throw new Error(`orca terminal ${JSON.stringify(handle).slice(0, 80)} unavailable (malformed_handle)`);
   console.log(`  [inject:orca] terminal=${handle} len=${text.length}`);
   const base = ["terminal", "send", "--terminal", handle, "--text", text, "--enter", "--json"];
   let r = await run(base, 15000);
   let failure = orcaSendFailure(handle, r);
   if (failure && failure.retryId && !failure.permanent) {
+    opts.beforeRetry?.();
     console.log(`  [inject:orca] ${failure.message}; re-issuing once with --retry-request ${failure.retryId}`);
     r = await run([...base, "--retry-request", failure.retryId, "--wait-submit", "2"], 15000);
     failure = orcaSendFailure(handle, r);

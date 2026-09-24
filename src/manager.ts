@@ -263,14 +263,14 @@ export class ConversationManager extends EventEmitter {
     return this.getOrCreateRoom(id);
   }
 
-  getRoomForAgent(agentName: string, pid?: number, paneId?: number): ChatRoom | undefined {
-    const convId = this.getAgentBinding(agentName, pid, paneId);
+  getRoomForAgent(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string): ChatRoom | undefined {
+    const convId = this.getAgentBinding(agentName, pid, paneId, orcaTerminal);
     if (!convId) return undefined;
     return this.conversations.get(convId);
   }
 
-  getAgentConversationId(agentName: string, pid?: number, paneId?: number): string | undefined {
-    return this.getAgentBinding(agentName, pid, paneId);
+  getAgentConversationId(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string): string | undefined {
+    return this.getAgentBinding(agentName, pid, paneId, orcaTerminal);
   }
 
   // -----------------------------------------------------------------------
@@ -419,10 +419,16 @@ export class ConversationManager extends EventEmitter {
     }
   }
 
-  /** True when any binding of this name holds an Orca handle (a rejoin may
-   *  have to clear it). */
+  /** True when any binding of this name, or any room's registration of it,
+   *  holds an Orca handle (a rejoin may have to clear it). Rooms count on
+   *  their own: a binding that moved to another room leaves the old room's
+   *  registration, and its handle, behind. */
   holdsOrcaTerminal(agentName: string): boolean {
-    return (this.agentBindings.get(agentName) ?? []).some(e => e.orcaTerminal != null);
+    if ((this.agentBindings.get(agentName) ?? []).some(e => e.orcaTerminal != null)) return true;
+    for (const room of this.conversations.values()) {
+      if (room.getAgent(agentName)?.orcaTerminal != null) return true;
+    }
+    return false;
   }
 
   unbindAgent(agentName: string, conversationId?: string): void {
@@ -446,9 +452,14 @@ export class ConversationManager extends EventEmitter {
    * UI invite /api/join). REST routes that return message content treat a
    * resolved binding as the agent's credential.
    */
-  getAgentBinding(agentName: string, pid?: number, paneId?: number): string | undefined {
+  getAgentBinding(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string): string | undefined {
     const entries = this.agentBindings.get(agentName);
     if (!entries || entries.length === 0) return undefined;
+    // Exact match by Orca handle (a handle-only registration has no pid or pane)
+    if (orcaTerminal) {
+      const match = entries.find(e => e.orcaTerminal === orcaTerminal);
+      if (match) return match.conversationId;
+    }
     // Exact match by paneId (most specific)
     if (paneId != null) {
       const match = entries.find(e => e.paneId === paneId);

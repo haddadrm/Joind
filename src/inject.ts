@@ -130,7 +130,7 @@ export interface InjectOptions {
 /** Backends, injectable for tests. */
 export interface InjectBackends {
   /** Optional so callers that predate Orca keep compiling; defaults to injectOrca. */
-  orca?: (handle: string, text: string) => Promise<void>;
+  orca?: (handle: string, text: string, opts?: { beforeRetry?: () => void }) => Promise<void>;
   wezterm: typeof injectWezTerm;
   windows: (pid: number, text: string, delayMs: number, doubleEnter: boolean) => Promise<void>;
   unix: (pid: number, text: string, guard?: () => void) => Promise<void>;
@@ -157,7 +157,8 @@ export async function inject(
     const handle = options.orcaTerminal;
     const orca = backends.orca ?? injectOrca;
     via = `orca terminal ${handle}`;
-    attempt = () => orca(handle, text);
+    // Orca's own retry is re-checked by the same guard as the console fallback.
+    attempt = () => orca(handle, text, { beforeRetry: () => assertStillTarget(options) });
   } else if (weztermPaneId != null) {
     via = `wezterm pane ${weztermPaneId}`;
     attempt = () => backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv);
@@ -166,6 +167,7 @@ export async function inject(
     try {
       return await attempt();
     } catch (err) {
+      if (err instanceof WakeFallbackAborted) throw err; // the guard stopped the backend's own retry
       if (!(pid > 0)) throw err;
       primary = err;
       const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
