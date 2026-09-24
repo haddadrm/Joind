@@ -1,8 +1,18 @@
 # Injection matrix
 
-A repeatable probe of which Windows terminal hosts Joind's wake-up injector (`src/inject.ts`) can type into. It uses the real injector from `dist/inject.js`, not a copy.
+A repeatable probe of which Windows terminal hosts Joind's wake-up injector (`src/inject.ts`) can type into, and whether the text it types actually gets submitted. It uses the real injector from `dist/inject.js`, not a copy.
 
-## What it does
+`matrix.ps1` has three modes, and each answers a different question.
+
+| mode | payload in the host | question it answers |
+|---|---|---|
+| `line` (default) | `receiver.ps1`, a cooked-mode `ReadLine` | did a whole line arrive? |
+| `keys` | `rawkey.py`, one `msvcrt.getwch` at a time | which code points did the route deliver, a carriage return or a line feed? |
+| `agent` | a real Claude Code or Codex CLI | did the prompt submit, and did the agent answer? |
+
+Agent mode matters because a line reader and an Ink TUI treat the end of a line differently. A route can deliver every byte and still never submit.
+
+## Line mode
 
 For each host, `matrix.ps1`:
 
@@ -13,9 +23,41 @@ For each host, `matrix.ps1`:
 5. Tests the host's own input API where one exists: WezTerm (the project's `injectWezTerm` path, `wezterm cli --no-auto-start send-text`), `orca terminal send` and `wmux send`.
 6. Tells every receiver to quit, closes what it opened and stops any terminal process it started that is still running. It then checks that no receiver process from the run is left.
 
-Warp is the exception to step 1. Warp has no CLI way to run a command in a new tab, so the probe opens a tab (`warp://action/new_tab`) and injects a command into the tab's own pwsh. That command appends the marker to the log.
+Warp is the exception to step 1. Warp has no CLI way to run a command in a new tab, so the probe opens a tab (`warp://action/new_tab`). In line mode it injects a command into the tab's own pwsh, and that command appends the marker to the log. In keys and agent mode it types the payload's launch script into the tab with the console route, and the payload then reports its own pid exactly as in every other host.
 
 Everything goes to `results/<run-id>/`, which is gitignored: `run.log`, `matrix.json`, `matrix.md` and each host's `.pid`, `.meta.json` and `.log` files.
+
+## Keys mode
+
+`rawkey.py` reads one character at a time, the way an Ink TUI does, and logs every code point with a timestamp to `<host>.keys.log`. Each route sends one marker, and the probe reports what ended it. This is how the line feed in the WezTerm backend was found.
+
+## Agent mode
+
+The payload is a real agent, started in `tools/inject-matrix/scratch` so it carries no project of its own. The prompt is always:
+
+```
+reply with exactly the word PONG and nothing else
+```
+
+Success is the agent's own reply on screen, read back with `read-screen.py`. Two facts are recorded separately: **submitted** (the prompt left the input box for the transcript) and **replied** (a line that is just PONG appeared). A route that did not submit then gets one extra Enter through `send-key.py`, which tells "the text arrived but nothing submitted it" apart from "the text never arrived".
+
+Each route gets a fresh agent session. The payload shell runs the agent in a loop, so the probe ends a session after its route and the next one starts clean, with no inherited transcript and no turn still running.
+
+Three helpers exist only for the probe, never as routes under test:
+
+- `read-screen.py <pid>` attaches to the console that owns a process and reads the visible screen with `ReadConsoleOutputCharacterW`. It works for a classic conhost and a ConPTY alike, so the same reader covers hosts with no screen-reading CLI (conhost, Windows Terminal, Warp). It reads the visible window, not the scrollback.
+- `send-key.py <pid> <key>` writes single key events (Down, Enter, Ctrl+C). The injector types text and one Enter, which cannot answer a menu or end a session.
+- Both agents gate their first run. Claude Code asks whether the folder is trusted, defaulting to "No, exit", so the probe answers Down then Enter. Codex offers to update itself, with "Update now" selected, which would run `npm install -g @openai/codex`; the probe answers Down then Enter to take "Skip" and never presses a bare Enter there.
+
+Agent mode uses the user's real agent accounts and spends quota: a full Claude run is 11 prompts plus 11 session starts. Run it deliberately.
+
+```powershell
+pwsh -NoProfile -Command "& ./tools/inject-matrix/matrix.ps1 -Mode keys"
+pwsh -NoProfile -Command "& ./tools/inject-matrix/matrix.ps1 -Mode agent -Agent claude -ReplyTimeoutSec 150"
+pwsh -NoProfile -Command "& ./tools/inject-matrix/matrix.ps1 -Hosts conhost,wezterm -Mode agent -Agent codex"
+```
+
+Use `-Command` rather than `-File` when passing a comma-separated `-Hosts` list, because `-File` binds it as one string.
 
 ## Running it
 
@@ -39,7 +81,7 @@ Host notes:
 - **wmux:** starts the app if it is not running. It then creates a workspace, starts the receiver with `wmux send --submit --pane <ptyId>`, and closes the workspace. If the probe started the app, it stops it and its daemon at the end, plus any pane shell that outlived the daemon.
 - **Warp:** starts the app if needed, opens one tab and stops that tab's shell afterwards. If the probe started Warp, it stops Warp and the sessions Warp restored.
 
-## Results (Windows 11 Pro 10.0.26200, 24 Sep 2026, harness not elevated)
+## Results, line mode (Windows 11 Pro 10.0.26200, 24 Sep 2026, harness not elevated)
 
 Run `20260924-202755`. The wmux row was repeated in two later runs (`20260924-203130`, `20260924-203229`) with the same outcome.
 
@@ -55,6 +97,59 @@ Run `20260924-202755`. The wmux row was repeated in two later runs (`20260924-20
 
 Every host took the console injection on the first attempt, so no retries ran. Most of the roughly one-second latency is the injector's own overhead: a PowerShell CIM lookup of the process name, then Python startup.
 
+
+## Results, keys mode: what each route delivers
+
+Run `20260924-210638`. The marker is 28 to 34 characters; the column is what ended it.
+
+| host | route | delivered? | terminator |
+|---|---|---|---|
+| conhost | console | yes | U+000D (carriage return) |
+| Windows Terminal, pwsh 7 | console | yes | U+000D |
+| Windows Terminal, PowerShell 5 | console | yes | U+000D |
+| WezTerm | console | yes | U+000D |
+| WezTerm | `injectWezTerm` as shipped | yes | U+000A (line feed) |
+| WezTerm | same call, text ending in a carriage return | yes | U+000D |
+| Orca | console | yes | U+000D |
+| Orca | `orca terminal send --enter` | yes | U+000D |
+| wmux | console | yes | U+000D |
+| wmux | `wmux send --submit` | yes | U+000D |
+| wmux | `wmux send` then `send-key Enter` | yes | U+000D |
+| Warp | console | yes | U+000D |
+
+Every route delivers a carriage return except the WezTerm backend as shipped, which ends its text with a line feed. Nothing else in the codebase does.
+
+## Results, agent mode: does the prompt submit?
+
+Claude Code 2.1.281 and 2.1.282 (it updated itself mid-run), run `20260924-231452`, with the WezTerm carriage-return row and the Windows Terminal row from `20260924-233552`, which repeated them after the readiness fix described below. Codex CLI 0.154.0 as an npm install, run `20260924-223855`.
+
+| host | route | Claude Code submitted? | Claude reply | Codex submitted? | Codex reply |
+|---|---|---|---|---|---|
+| conhost | console | yes | 30.2 s | no | one extra Enter submitted it |
+| Windows Terminal, pwsh 7 | console | yes | 5.6 s | not run | |
+| Windows Terminal, PowerShell 5 | console | yes | 40.3 s | not run | |
+| WezTerm | console | yes | 38.4 s | no | one extra Enter submitted it |
+| WezTerm | `injectWezTerm` as shipped | **no** | text sat in the input box; one extra Enter submitted it | no | one extra Enter submitted it |
+| WezTerm | same call, carriage return | yes | 6.3 s | no | one extra Enter submitted it |
+| Orca | console | yes | 48.7 s | no | one extra Enter submitted it |
+| Orca | `orca terminal send --enter` | yes | 49.5 s | yes | 25.0 s |
+| wmux | console | yes | 57.5 s | no | one extra Enter submitted it |
+| wmux | `wmux send --submit` | yes | 25.1 s | no | one extra Enter submitted it |
+| wmux | `wmux send` then `send-key Enter` | yes | 6.2 s | yes | 19.9 s |
+| Warp | console | yes | 7.7 s | not run | |
+
+Reply times are a model answering, not transport, and they vary from 6 s to 60 s for the same route.
+
+Three findings come out of this.
+
+**One Enter is not enough for Codex.** Every single-Enter route failed to submit to the Codex TUI and succeeded once a second Enter arrived. `inject.ts` knows about this: it sets `doubleEnter` when the target process is named `codex.exe`. An npm-installed Codex runs as `node.exe` running `codex.js`, so the check never matches and the double Enter never fires. Only the two routes that press Enter separately from the text, `orca terminal send --enter` and `wmux send-key Enter`, got through on their own. A wake to a Codex agent on this machine would leave the prompt sitting in the input box, with the injector reporting success.
+
+**The WezTerm backend's line feed does not submit.** With a real Claude Code, the prompt arrived in full and stayed in the input box; one Enter afterwards submitted it and the reply came. The same text ending in a carriage return submitted in 6.3 s. The backend does not throw, so `inject()` never falls back to the console path, and the wake is silently lost. This is the same result as the line-mode receiver, now confirmed against a raw-mode TUI.
+
+**A freshly started Claude Code can look ready and still swallow input.** Its status bar appears while SessionStart hooks are still running (13 hooks and 6 MCP servers on this machine, up to about 90 s). A prompt typed in that window sat unsubmitted past a 150 s wait, and even a direct Enter did not submit it. The probe now waits for the hook indicator to clear as well as for the status bar. For Joind, this means a wake sent to an agent that has just started can fail while every route reports success.
+
+For Orca with a real agent, the JSON becomes more informative than it was for a plain shell: `provider` is `claude` or `codex` instead of `unsupported`, and `observation` is `supported`. It still warned "input was accepted but no turn start was observed, so the Enter may have been swallowed" and offered a `--retry-request` id, on runs where the agent did in fact answer. The warning is conservative rather than wrong, but a caller that treats it as failure would double-send.
+
 ### Why the console path works on ConPTY hosts
 
 `AttachConsole(pid)` attaches to the console server that owns the target's input buffer. On a classic console that is the visible `conhost.exe`. Under ConPTY it is the headless `conhost.exe` or `OpenConsole.exe` that the terminal started. The terminal emulator's own input path is not involved, which is why Windows Terminal, WezTerm, Orca, wmux and Warp all behave like conhost here. What the path does need:
@@ -65,9 +160,9 @@ Every host took the console injection on the first attempt, so no retries ran. M
 
 ### Native routes
 
-- **WezTerm (`injectWezTerm`, `wezterm cli --no-auto-start send-text --no-paste`):** the call exits 0, but the marker never reaches a cooked-mode `ReadLine`. The backend ends the text with LF (`\n`). Under ConPTY on Windows, LF does not submit a line: the text sat unsubmitted in the input line. A lone CR (`\r`) sent afterwards submitted it, and the marker then arrived. A standalone check showed the same thing: text plus LF did not arrive, a following CR delivered it, and text plus CR arrived at once. `inject()` falls back to the console path only when the WezTerm call throws, and here it did not throw. The result is a silent miss whenever a pane is known and the reader wants CR.
-- **Orca (`orca terminal send --text --enter --json`):** landed. The JSON reported `ok: true`, `accepted: true`, `stages: ["input_accepted"]`, `provider: "unsupported"` and `observation: "unsupported"`, with the warning "input was accepted, but this provider cannot report delivery". For a plain shell, Orca confirms acceptance, not submission. Submission tracking (`--wait-submit`) applies to agent providers Orca recognises, which this probe did not start.
-- **wmux (`wmux send <text> --submit --pane <ptyId> --json`):** landed. The JSON reported `submitted: true`, `accepted: false`, `receiptSignal: "none"` and `enterRetried: true`. With no agent receipt signal, wmux pressed Enter a second time, and the receiver logged one extra empty line. An agent TUI could see that as an empty submission.
+- **WezTerm (`injectWezTerm`, `wezterm cli --no-auto-start send-text --no-paste`):** the call exits 0, but nothing is submitted. The backend ends its text with a line feed, which keys mode confirms byte for byte, and a line feed does not submit under ConPTY on Windows. The text sits in the input line; a carriage return sent afterwards submits it. This holds for a cooked-mode reader and for a real Claude Code alike. `inject()` falls back to the console path only when the WezTerm call throws, and it does not throw, so the wake is lost silently whenever a pane id is known.
+- **Orca (`orca terminal send --text --enter --json`):** landed, and submitted for both agents. For a plain shell the JSON reported `provider: "unsupported"` and `observation: "unsupported"`, with the warning "input was accepted, but this provider cannot report delivery". With a real agent in the terminal, `provider` became `claude` or `codex` and `observation` became `supported`, but the warning changed to "input was accepted but no turn start was observed", with a `--retry-request` id, on runs where the agent did answer. Treat that warning as "unconfirmed", not as failure.
+- **wmux (`wmux send <text> --submit --pane <ptyId> --json`):** landed, and submitted for Claude Code but not for Codex. Its JSON varies with what it can observe: against a line receiver it reported `receiptSignal: "none"` with `enterRetried: true`, and the extra Enter showed up as a blank line; against Claude Code it reported `receiptSignal: "composer_cleared"` or `"turn_start"` with no retry. Sending the text and then `send-key Enter` as two calls avoids the retry entirely and was the only wmux route that submitted to Codex.
 
 ### wmux automation surface
 
@@ -90,6 +185,9 @@ Every host took the console injection on the first attempt, so no retries ran. M
 
 ## Limits
 
-- The receiver reads with `[Console]::ReadLine()`, which is cooked mode. Claude Code and Codex are raw-mode TUIs, and their handling of LF versus CR may differ, so the WezTerm result shows that LF does not submit for a line-mode reader only. The comment in `injectWezTerm` says LF was chosen because it works "more reliably across TUIs". Changing it needs a check against the real agents.
+- Agent mode reads the visible screen, not the scrollback, so a reply that scrolls away is missed. Each route therefore runs in a fresh session, and submission is judged by the prompt leaving the input box rather than by counting replies. An earlier version counted replies and produced two false negatives.
+- The agent results are one machine's agents with that machine's configuration. The Claude Code sessions here inherit 13 hooks, 6 MCP servers and a CLAUDE.md, which is what made the readiness problem visible; a bare install would start faster.
+- Codex was tested as an npm install (`node.exe` running `codex.js`). A native `codex.exe` build would match the injector's double-Enter check and may behave differently.
+- The line-mode receiver reads with `[Console]::ReadLine()`, which is cooked mode. Agent mode covers the raw-mode case for Claude Code and Codex, but not for other TUIs.
 - Receivers run at the same integrity level as the harness. Injecting from a non-elevated server into an elevated agent, or the reverse, is not covered.
 - The console-host column lists every console server under the host process. Terminals that host many sessions, such as Orca, wmux and Warp, show all of them, not only the probe's own.

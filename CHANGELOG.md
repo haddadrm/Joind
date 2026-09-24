@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-09-24: Injection Matrix, Keys and Agent Modes
+
+Line mode only proved that a whole line reaches a `ReadLine`. Claude Code and Codex are raw-mode TUIs, so the question that matters for a wake-up is whether the prompt SUBMITS. Two new modes answer that, and both found real defects. Full tables in `tools/inject-matrix/README.md`.
+
+### Added
+- `-Mode keys`: `rawkey.py` reads one `msvcrt.getwch` at a time and logs every code point, so each route's terminator is evidence rather than inference.
+- `-Mode agent`: a real Claude Code or Codex CLI runs in each host, in a scratch folder with no project of its own, and the probe types `reply with exactly the word PONG and nothing else` through every route that applies. Submission and reply are recorded separately, and a route that did not submit gets one extra Enter to tell "arrived but unsubmitted" from "never arrived". Each route runs in a fresh session.
+- `read-screen.py` attaches to a process's console and reads the visible screen, so one reader covers hosts with no screen-reading CLI. `send-key.py` writes single key events for probe setup and teardown only, never as a route under test.
+- Warp now runs the same payloads as every other host: the launch script is typed into a new tab with the console route, and the payload reports its own pid.
+
+### Findings
+- Every route delivers a carriage return except `injectWezTerm`, which ends its text with a line feed. Against a real Claude Code the prompt arrived in full and stayed in the input box; one Enter afterwards submitted it, and the same text ending in a carriage return submitted in 6.3 s. The call does not throw, so `inject()` never falls back to the console path and the wake is lost silently.
+- One Enter never submitted to the Codex TUI, on any host or route. `inject.ts` sets `doubleEnter` only when the process is named `codex.exe`, and an npm-installed Codex runs as `node.exe` running `codex.js`, so the check never matches. Only routes that press Enter separately from the text got through: `orca terminal send --enter` and `wmux send-key Enter`.
+- A freshly started Claude Code shows its status bar while SessionStart hooks are still running. A prompt typed in that window sat unsubmitted past 150 s and a direct Enter did not rescue it. A wake sent to an agent that has just started can fail while every route reports success.
+- `orca terminal send` reports `provider: claude|codex` and `observation: supported` once a real agent is in the terminal, but still warns "no turn start was observed" on runs where the agent answered. It is unconfirmed, not failed. `wmux send --submit` retries Enter only when it sees no receipt; with Claude Code it saw `composer_cleared` or `turn_start` and did not retry.
+
 ## 2026-09-24: Injection Matrix Harness
 
 A repeatable probe, `tools/inject-matrix/`, that shows with evidence which terminal hosts on a Windows machine the wake-up injector can type into. It drives the real `dist/inject.js`, and a marker only counts as landed when the receiver logs it. See `tools/inject-matrix/README.md` for how to run it and for the full matrix.
