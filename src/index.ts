@@ -739,8 +739,11 @@ app.post("/api/conversations/import", express.json({ limit: "50mb" }), (req, res
 });
 
 app.post("/api/join", express.json(), async (req, res) => {
-  const room = activeRoom(res);
-  if (!room) return;
+  // Capture the conversation with the room BEFORE any await: the active
+  // conversation can change while pane resolution runs, and membership and
+  // routing must land in the same room.
+  const convId = manager.getActiveId();
+  if (!convId || !activeRoom(res)) return;
   const { name, pid, wtSession, weztermPaneId: requestedPane } = req.body as {
     name?: string; pid?: number; wtSession?: string; weztermPaneId?: number;
   };
@@ -748,9 +751,10 @@ app.post("/api/join", express.json(), async (req, res) => {
   // Same invariant as the agent joins: a pane is bound only when it is live and this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager));
   const weztermPaneId = paneResolution.paneId;
+  const room = manager.getRoom(convId);
+  if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
   const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
-  const activeId = manager.getActiveId();
-  if (activeId) manager.bindAgent(name, activeId, pid, weztermPaneId);
+  manager.bindAgent(name, convId, pid, weztermPaneId);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
   res.json({

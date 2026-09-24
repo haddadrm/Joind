@@ -478,7 +478,14 @@ export async function listWezTermPaneIds(): Promise<Set<number>> {
   }
 }
 
-export interface ProcessEntry { ppid: number; name: string; /** epoch ms, when known */ started?: number; }
+export interface ProcessEntry {
+  ppid: number;
+  name: string;
+  /** epoch ms, when known */
+  started?: number;
+  /** resolution of `started` in ms: 1 for WMI CIM_DATETIME, 1000 for ps etime */
+  startedPrecisionMs?: number;
+}
 
 /** WMI CIM_DATETIME (yyyymmddHHMMSS.ffffff+zzz) to epoch ms; undefined when unparsable. */
 export function parseCimDate(v: string | undefined): number | undefined {
@@ -489,40 +496,69 @@ export function parseCimDate(v: string | undefined): number | undefined {
   return utc - (+tz) * 60_000;
 }
 
+/** ps etime ([[dd-]hh:]mm:ss) to elapsed seconds; undefined when unparsable.
+ *  (etime is portable across macOS, Linux and BSD; etimes is Linux-only.) */
+export function parseEtime(v: string | undefined): number | undefined {
+  const m = (v ?? "").trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+  if (!m) return undefined;
+  const [, dd, hh, mm, ss] = m;
+  return (+(dd ?? 0)) * 86400 + (+(hh ?? 0)) * 3600 + (+mm) * 60 + (+ss);
+}
+
+/** Parse `wmic ... /format:list` output: records of Key=Value lines separated
+ *  by blank lines. Unlike the csv format, a value containing commas is safe. */
+export function parseWmicList(stdout: string): Map<number, ProcessEntry> {
+  const out = new Map<number, ProcessEntry>();
+  for (const block of stdout.replace(/\r/g, "").split(/\n\s*\n/)) {
+    const rec: Record<string, string> = {};
+    for (const line of block.split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq > 0) rec[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+    }
+    const pid = parseInt(rec.ProcessId ?? "", 10);
+    if (!Number.isFinite(pid) || pid === 0) continue;
+    const ppid = parseInt(rec.ParentProcessId ?? "", 10);
+    out.set(pid, {
+      ppid: Number.isFinite(ppid) ? ppid : 0,
+      name: rec.Name ?? "",
+      started: parseCimDate(rec.CreationDate),
+      startedPrecisionMs: 1,
+    });
+  }
+  return out;
+}
+
 /**
  * Parent pid, name and start time for every process on this host, or null
  * when the enumeration itself is unavailable (unknown is not "elsewhere").
- * wmic /format:csv orders columns alphabetically: CreationDate, Name,
- * ParentProcessId, ProcessId (after the Node column).
  */
 export async function listParentPids(): Promise<Map<number, ProcessEntry> | null> {
-  const out = new Map<number, ProcessEntry>();
   try {
     if (process.platform === "win32") {
       const { stdout } = await execFileAsync(
-        "wmic", ["process", "get", "processid,parentprocessid,name,creationdate", "/format:csv"], { timeout: 10000 }
+        "wmic", ["process", "get", "processid,parentprocessid,name,creationdate", "/format:list"], { timeout: 10000 }
       );
-      for (const line of stdout.trim().split("\n")) {
-        const parts = line.split(",").map((x) => x.trim());
-        if (parts.length < 5) continue;
-        const name = parts[parts.length - 3] ?? "";
-        const ppid = parseInt(parts[parts.length - 2] ?? "", 10);
-        const pid = parseInt(parts[parts.length - 1] ?? "", 10);
-        if (!Number.isFinite(pid) || pid === 0) continue;
-        out.set(pid, { ppid: Number.isFinite(ppid) ? ppid : 0, name, started: parseCimDate(parts[parts.length - 4]) });
-      }
-    } else {
-      const now = Date.now();
-      const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,etimes,comm"], { timeout: 5000 });
-      for (const line of stdout.trim().split("\n").slice(1)) {
-        const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/);
-        if (m) out.set(parseInt(m[1], 10), { ppid: parseInt(m[2], 10), name: m[4].trim(), started: now - parseInt(m[3], 10) * 1000 });
-      }
+      const out = parseWmicList(stdout);
+      return out.size > 0 ? out : null;
     }
+    const out = new Map<number, ProcessEntry>();
+    const now = Date.now();
+    const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,etime,comm"], { timeout: 5000 });
+    for (const line of stdout.trim().split("\n").slice(1)) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
+      if (!m) continue;
+      const elapsed = parseEtime(m[3]);
+      out.set(parseInt(m[1], 10), {
+        ppid: parseInt(m[2], 10),
+        name: m[4].trim(),
+        started: elapsed != null ? now - elapsed * 1000 : undefined,
+        startedPrecisionMs: 1000,
+      });
+    }
+    return out.size > 0 ? out : null;
   } catch {
     return null;
   }
-  return out.size > 0 ? out : null;
 }
 
 const WEZTERM_PROCESS = /^wezterm(-gui|-mux-server)?(\.exe)?$/i;
@@ -533,27 +569,37 @@ function processBasename(name: string): string {
 /**
  * Does `pid` run inside WezTerm on this host (a WezTerm process among its
  * ancestors)? False for a pid that does not exist here, which is what a
- * remote agent's pid looks like. A parent that started AFTER its child is a
- * recycled pid, not an ancestor, and ends the walk. `tree` is injectable
- * for tests; names may be full paths (macOS ps prints them).
+ * remote agent's pid looks like. A parent that started after its child is
+ * a recycled pid, not an ancestor: false. Ordering that the clock cannot
+ * settle (missing start times, or a gap inside the clock's precision) is
+ * "unknown", never a silent yes. `tree` is injectable for tests; names may
+ * be full paths (macOS ps prints them).
  */
-export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>): boolean {
+export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>): boolean | "unknown" {
   let cur = pid;
-  let childStart: number | undefined = tree.get(pid)?.started;
+  let child = tree.get(pid);
   for (let depth = 0; depth < 64 && cur > 0; depth++) {
     const entry = tree.get(cur);
     if (!entry) return false;
     if (WEZTERM_PROCESS.test(processBasename(entry.name))) return true;
-    if (entry.ppid === cur) return false;
+    if (entry.ppid === cur || entry.ppid <= 0) return false;
     const parent = tree.get(entry.ppid);
-    if (parent?.started != null && childStart != null && parent.started > childStart + 1000) return false; // pid reuse
-    childStart = parent?.started ?? childStart;
+    if (!parent) return false;
+    if (child?.started == null || parent.started == null) return "unknown";
+    const precision = Math.max(child.startedPrecisionMs ?? 1, parent.startedPrecisionMs ?? 1);
+    const gap = parent.started - child.started; // positive: parent "younger" than child
+    if (gap > 0) {
+      if (gap >= precision) return false; // provably recycled
+      return "unknown";                   // inside the clock's resolution
+    }
+    child = parent;
     cur = entry.ppid;
   }
   return false;
 }
 
-/** true / false, or "unknown" when the host cannot enumerate processes. */
+/** true / false, or "unknown" when the host cannot enumerate processes or
+ *  cannot order the chain by start time. */
 export async function isInsideWezTerm(pid: number): Promise<boolean | "unknown"> {
   if (!(pid > 0)) return false;
   const tree = await listParentPids();
