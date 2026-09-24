@@ -28,9 +28,10 @@ export interface ConversationMeta {
 export interface JoinToken {
   agentName: string;
   conversationId: string;
-  /** one generation per terminal alias the join carries (pid and pane) */
-  terminalGens: Record<string, number>;
-  roomGen: number;
+  /** position of this join in the global order of joins and departures */
+  seq: number;
+  /** the aliases known when the join began (request plus merge target) */
+  aliases: string[];
 }
 
 export class ConversationManager extends EventEmitter {
@@ -285,22 +286,22 @@ export class ConversationManager extends EventEmitter {
   // Agent binding
   // -----------------------------------------------------------------------
 
-  // ---- Join generations -------------------------------------------------
-  // A join that awaits validation takes a token first and applies only if
-  // BOTH of its records are still the latest afterwards:
-  //   - name + terminal, across rooms: a newer join for the same terminal
-  //     into any other room supersedes it (routing must follow the newest);
-  //   - room + name: a newer join for the same name into the same room from
-  //     any terminal supersedes it (the room holds one agent per name, and
-  //     it must be the newest session).
-  // A departure for the name ends every pending join for it, even before a
-  // first binding exists. Different terminals of one name in different
-  // rooms stay independent registrations.
-  private joinTerminalGens = new Map<string, number>();
-  private joinRoomGens = new Map<string, number>();
+  // ---- Join ordering ------------------------------------------------------
+  // A join that awaits validation takes its place in a global order first
+  // (beginJoin) and applies only if, at completion, nothing NEWER has touched
+  // any alias it ends up holding or the room it targets (joinIsCurrent).
+  // "Ends up holding" includes aliases discovered during validation (an
+  // auto-detected pane) and aliases an existing binding would keep through
+  // the merge, judged by the join's ORIGINAL position, so a late discovery
+  // never promotes an older request over a newer one. A departure for the
+  // name outranks every join begun before it. Different terminals of one
+  // name in different rooms stay independent registrations.
+  private joinCounter = 0;
+  private aliasTouchedAt = new Map<string, number>();   // `${name}|${alias}` -> latest seq
+  private roomTouchedAt = new Map<string, number>();    // `${conversationId}|${name}` -> latest seq
+  private departedAt = new Map<string, number>();       // name -> seq of the latest departure
 
-  /** Every alias a binding can match on (bindAgent merges by pid OR pane),
-   *  so a newer join sharing either one supersedes the older. */
+  /** Every alias a binding can match on (bindAgent merges by pid OR pane). */
   static joinTerminalKeys(pid: number | undefined, paneId: number | undefined): string[] {
     const keys: string[] = [];
     if (pid && pid > 0) keys.push(`pid:${pid}`);
@@ -323,8 +324,7 @@ export class ConversationManager extends EventEmitter {
   /**
    * The aliases a join will effectively hold once bound: the request's own,
    * plus those of the existing binding bindAgent would merge it with (it
-   * keeps the aliases the request omitted). Freshness has to cover all of
-   * them, over-approximating when validation later drops a pane.
+   * keeps the aliases the request omitted).
    */
   effectiveJoinAliases(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined): string[] {
     const keys = new Set(ConversationManager.joinTerminalKeys(pid, paneId));
@@ -336,37 +336,35 @@ export class ConversationManager extends EventEmitter {
     return [...keys];
   }
 
-  beginJoin(agentName: string, terminals: string[], conversationId: string): JoinToken {
-    const terminalGens: Record<string, number> = {};
-    for (const terminal of new Set(terminals)) {
-      const tKey = `${agentName}|${terminal}`;
-      const t = (this.joinTerminalGens.get(tKey) ?? 0) + 1;
-      this.joinTerminalGens.set(tKey, t);
-      terminalGens[terminal] = t;
-    }
-    const rKey = `${conversationId}|${agentName}`;
-    const r = (this.joinRoomGens.get(rKey) ?? 0) + 1;
-    this.joinRoomGens.set(rKey, r);
-    return { agentName, conversationId, terminalGens, roomGen: r };
+  beginJoin(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined): JoinToken {
+    const seq = ++this.joinCounter;
+    const aliases = this.effectiveJoinAliases(agentName, conversationId, pid, paneId);
+    for (const alias of aliases) this.aliasTouchedAt.set(`${agentName}|${alias}`, seq);
+    this.roomTouchedAt.set(`${conversationId}|${agentName}`, seq);
+    return { agentName, conversationId, seq, aliases };
   }
 
-  joinIsCurrent(token: JoinToken): boolean {
-    for (const [terminal, gen] of Object.entries(token.terminalGens)) {
-      if (this.joinTerminalGens.get(`${token.agentName}|${terminal}`) !== gen) return false;
+  /**
+   * Decide at completion, with the pid and pane the join will actually bind
+   * (a pane dropped by validation is passed as undefined). When current, the
+   * join claims every alias it ends up with at its own position, so an older
+   * join completing later and discovering one of them is superseded.
+   */
+  joinIsCurrent(token: JoinToken, finalPid: number | undefined, finalPaneId: number | undefined): boolean {
+    const { agentName, conversationId, seq } = token;
+    if ((this.departedAt.get(agentName) ?? 0) > seq) return false;
+    if ((this.roomTouchedAt.get(`${conversationId}|${agentName}`) ?? 0) > seq) return false;
+    const finalAliases = new Set([...token.aliases, ...this.effectiveJoinAliases(agentName, conversationId, finalPid, finalPaneId)]);
+    for (const alias of finalAliases) {
+      if ((this.aliasTouchedAt.get(`${agentName}|${alias}`) ?? 0) > seq) return false;
     }
-    return this.joinRoomGens.get(`${token.conversationId}|${token.agentName}`) === token.roomGen;
+    for (const alias of finalAliases) this.aliasTouchedAt.set(`${agentName}|${alias}`, seq);
+    return true;
   }
 
-  /** A departure for this name, from any terminal and room, ends every pending join for it. */
+  /** A departure for this name, from any terminal and room, outranks every join begun before it. */
   supersedeJoins(agentName: string): void {
-    const prefix = `${agentName}|`;
-    for (const [key, gen] of this.joinTerminalGens) {
-      if (key.startsWith(prefix)) this.joinTerminalGens.set(key, gen + 1);
-    }
-    const suffix = `|${agentName}`;
-    for (const [key, gen] of this.joinRoomGens) {
-      if (key.endsWith(suffix)) this.joinRoomGens.set(key, gen + 1);
-    }
+    this.departedAt.set(agentName, ++this.joinCounter);
   }
 
   /** `paneId` null clears a previously bound pane (proved stale on rejoin); undefined keeps it. */

@@ -749,13 +749,13 @@ app.post("/api/join", express.json(), async (req, res) => {
   };
   if (!name || (!pid && requestedPane == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, convId, pid, requestedPane), convId);
+  const joinToken = manager.beginJoin(name, convId, pid, requestedPane);
   // Same invariant as the agent joins: a pane is bound only when it is live and this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager));
   const weztermPaneId = paneResolution.paneId;
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
-  if (!manager.joinIsCurrent(joinToken)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+  if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
   const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
   manager.bindAgent(name, convId, pid, weztermPaneId);
   if (pid) renameTabTitle(pid, name).catch(() => {});
@@ -1485,7 +1485,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   }
 
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, convId, pid, weztermPaneId), convId);
+  const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId);
 
   // Bind a WezTerm pane only when it is live and really this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager));
@@ -1496,7 +1496,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   // departure for this name meanwhile wins over this one.
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
-  if (!manager.joinIsCurrent(joinToken)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+  if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
 
   const agent = room.join(name, pid || 0, boundPane, agentRoles[name]);
   manager.bindAgent(name, convId, pid, boundPane);

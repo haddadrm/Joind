@@ -60,8 +60,8 @@ describe("resolvePaneForJoin", () => {
   });
 });
 
-describe("join generations (manager-level: name+terminal across rooms, room+name across terminals)", () => {
-  it("refuses a waited join after a newer one for the same terminal anywhere, or the same room from any terminal, or a departure", () => {
+describe("join ordering (manager-level: aliases and rooms remember the newest join that touched them)", () => {
+  it("refuses a waited join whenever a newer join or a departure touched any alias it ends up with, or its room", () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-gen-"));
     const manager = new ConversationManager(dir);
     try {
@@ -70,62 +70,60 @@ describe("join generations (manager-level: name+terminal across rooms, room+name
       expect(ConversationManager.joinTerminalKeys(100, 7)).toEqual(["pid:100", "pane:7"]);
       expect(ConversationManager.joinTerminalKeys(0, 7)).toEqual(["pane:7"]);
       expect(ConversationManager.joinTerminalKeys(undefined, undefined)).toEqual(["pid:0"]);
-      // Older join into X, newer join for the same terminal into Y: X is stale.
-      const intoX = manager.beginJoin("Claude", ["pid:100"], x.id);
-      const intoY = manager.beginJoin("Claude", ["pid:100"], y.id);
-      expect(manager.joinIsCurrent(intoY)).toBe(true);
-      expect(manager.joinIsCurrent(intoX)).toBe(false);
-      // Round-9 case: a different terminal joining the SAME room supersedes the older one there.
-      const oldTerm = manager.beginJoin("Claude", ["pid:100"], x.id);
-      const newTerm = manager.beginJoin("Claude", ["pid:200"], x.id);
-      expect(manager.joinIsCurrent(newTerm)).toBe(true);
-      expect(manager.joinIsCurrent(oldTerm)).toBe(false);
-      // Control: a different terminal joining a DIFFERENT room leaves a pending join alone.
-      const pendingX = manager.beginJoin("Claude", ["pid:300"], x.id);
-      const otherY = manager.beginJoin("Claude", ["pid:400"], y.id);
-      expect(manager.joinIsCurrent(pendingX)).toBe(true);
-      expect(manager.joinIsCurrent(otherY)).toBe(true);
-      // Round-10 case: a join carrying pid AND pane is superseded by a newer join sharing only the pane.
-      const withBoth = manager.beginJoin("Claude", ["pid:500", "pane:7"], x.id);
-      const paneOnlyY = manager.beginJoin("Claude", ["pane:7"], y.id);
-      expect(manager.joinIsCurrent(paneOnlyY)).toBe(true);
-      expect(manager.joinIsCurrent(withBoth)).toBe(false);
-      const withBoth2 = manager.beginJoin("Claude", ["pid:600", "pane:8"], x.id);
-      const otherPidSamePane = manager.beginJoin("Claude", ["pid:700", "pane:8"], y.id);
-      expect(manager.joinIsCurrent(otherPidSamePane)).toBe(true);
-      expect(manager.joinIsCurrent(withBoth2)).toBe(false);
-      // Round-11 case: aliases retained by an existing binding count. Claude is bound
-      // {pid 100, pane 7} in X; a pane-only join into X is held; a newer pid-only join
-      // into Y (which keeps pane 7 through the binding merge) must supersede it.
+      // Same terminal, newer into another room: the older is stale.
+      const intoX = manager.beginJoin("Claude", x.id, 100, undefined);
+      const intoY = manager.beginJoin("Claude", y.id, 100, undefined);
+      expect(manager.joinIsCurrent(intoY, 100, undefined)).toBe(true);
+      expect(manager.joinIsCurrent(intoX, 100, undefined)).toBe(false);
+      // Different terminal, newer into the same room: the older is stale.
+      const oldTerm = manager.beginJoin("Claude", x.id, 100, undefined);
+      const newTerm = manager.beginJoin("Claude", x.id, 200, undefined);
+      expect(manager.joinIsCurrent(newTerm, 200, undefined)).toBe(true);
+      expect(manager.joinIsCurrent(oldTerm, 100, undefined)).toBe(false);
+      // Control: different terminal into a different room leaves a pending join alone.
+      const pendingX = manager.beginJoin("Claude", x.id, 300, undefined);
+      const otherY = manager.beginJoin("Claude", y.id, 400, undefined);
+      expect(manager.joinIsCurrent(otherY, 400, undefined)).toBe(true);
+      expect(manager.joinIsCurrent(pendingX, 300, undefined)).toBe(true);
+      // Shared pane with different or no pid.
+      const withBoth = manager.beginJoin("Claude", x.id, 500, 7);
+      const paneOnlyY = manager.beginJoin("Claude", y.id, 0, 7);
+      expect(manager.joinIsCurrent(paneOnlyY, 0, 7)).toBe(true);
+      expect(manager.joinIsCurrent(withBoth, 500, 7)).toBe(false);
+      // Round-13 case: the newer join discovers pane 7 only during validation (auto-detect).
+      const heldPaneOnly = manager.beginJoin("Claude", x.id, 0, 7);
+      const newerPidOnly = manager.beginJoin("Claude", y.id, 200, undefined);
+      expect(manager.joinIsCurrent(newerPidOnly, 200, 7)).toBe(true);   // claims pane 7 at its position
+      expect(manager.joinIsCurrent(heldPaneOnly, 0, 7)).toBe(false);
+      // The reverse: an OLDER join discovering a pane late never promotes itself over a newer one.
+      const olderPidOnly = manager.beginJoin("Claude", x.id, 600, undefined);
+      const newerPaneOnly = manager.beginJoin("Claude", y.id, 0, 9);
+      expect(manager.joinIsCurrent(newerPaneOnly, 0, 9)).toBe(true);
+      expect(manager.joinIsCurrent(olderPidOnly, 600, 9)).toBe(false);
+      // Aliases retained through the binding merge count, on both merge branches.
       manager.bindAgent("Claude", x.id, 100, 7);
       expect(manager.effectiveJoinAliases("Claude", x.id, 0, 7).sort()).toEqual(["pane:7", "pid:100"]);
       expect(manager.effectiveJoinAliases("Claude", y.id, 100, undefined).sort()).toEqual(["pane:7", "pid:100"]);
-      // Unrelated terminal into a room where the name has no binding: its own alias only.
       expect(manager.effectiveJoinAliases("Claude", y.id, 900, undefined)).toEqual(["pid:900"]);
-      // Unrelated terminal into the SAME room: the merge falls back to the room's entry (round-12 case).
       expect(manager.effectiveJoinAliases("Claude", x.id, 200, undefined).sort()).toEqual(["pane:7", "pid:100", "pid:200"]);
-      const heldPaneOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", x.id, 0, 7), x.id);
-      const newerPidOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", y.id, 100, undefined), y.id);
-      expect(manager.joinIsCurrent(newerPidOnly)).toBe(true);
-      expect(manager.joinIsCurrent(heldPaneOnly)).toBe(false);
-      // Round-12 sequence: hold a pane-only 7 join into Y; a newer pid-only 200 join into X
-      // inherits pane 7 through the same-conversation merge and must supersede it.
-      const heldIntoY = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", y.id, 0, 7), y.id);
-      const newerIntoX = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", x.id, 200, undefined), x.id);
-      expect(manager.joinIsCurrent(newerIntoX)).toBe(true);
-      expect(manager.joinIsCurrent(heldIntoY)).toBe(false);
+      const heldIntoY = manager.beginJoin("Claude", y.id, 0, 7);
+      const newerIntoX = manager.beginJoin("Claude", x.id, 200, undefined);
+      expect(manager.joinIsCurrent(newerIntoX, 200, undefined)).toBe(true);
+      expect(manager.joinIsCurrent(heldIntoY, 0, 7)).toBe(false);
       manager.unbindAgent("Claude");
-      // A departure for the name (even with no binding yet) ends every pending join for it.
+      // A departure for the name (even with no binding yet) outranks every join begun before it.
+      const before = manager.beginJoin("Claude", x.id, 300, undefined);
       manager.supersedeJoins("Claude");
-      expect(manager.joinIsCurrent(pendingX)).toBe(false);
-      expect(manager.joinIsCurrent(otherY)).toBe(false);
+      expect(manager.joinIsCurrent(before, 300, undefined)).toBe(false);
+      const after = manager.beginJoin("Claude", x.id, 300, undefined);
+      expect(manager.joinIsCurrent(after, 300, undefined)).toBe(true);
       // A room-level leave reaches the manager through the room event; applying a join does not supersede itself.
-      const tok = manager.beginJoin("Claude", ["pid:100", "pane:7"], x.id);
+      const tok = manager.beginJoin("Claude", x.id, 100, 7);
       const room = manager.getRoom(x.id)!;
       room.join("Claude", 100, 7);
-      expect(manager.joinIsCurrent(tok)).toBe(true);
+      expect(manager.joinIsCurrent(tok, 100, 7)).toBe(true);
       room.leave("Claude");
-      expect(manager.joinIsCurrent(tok)).toBe(false);
+      expect(manager.joinIsCurrent(tok, 100, 7)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
