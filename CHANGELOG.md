@@ -85,6 +85,37 @@ Agents living in Orca terminals could not be woken: Orca's terminals are not Wez
 - 31 in `tests/orca-honesty.test.ts` (handle resolution accepted, dropped for not live, not writable, no Orca, pid outside Orca, malformed and non-string values, unknown ancestry kept with a note, the no-handle rules; Orca ancestry through `hasAncestor` with the field chain, recycled pids, broken chains and macOS paths; `orca:<handle>` in keys, locks, aliases and freshness; null clears and undefined keeps in room and manager; Orca preferred over WezTerm, console fallback through the guard, abort, error precedence; the observed envelopes, retry-request re-issue, argv without a shell, listing cache, CLI resolution; a source guard that only `src/orca.ts` starts Orca, once, through `resolveOrcaCli`) plus 3 in `tests/orca-wake-room.test.ts` (the room wakes through Orca, falls back to the pid on a stale handle without warning, and warns once for an Orca-only agent). Six of the 31 cover the root rule: the WMI chain and the Windows Terminal chain are false, a pwsh whose parent wrapper exited is unknown, the Orca chain is true, a launchd-rooted macOS chain is false, a root with an undated parent is still a root, and both resolvers now drop a requested handle or pane from the WMI and Windows Terminal chains. Suite 173. Gate round 1 added 8 more, each failing on the previous commit and passing now: 7 in `tests/orca-gate1.test.ts` (the moved-binding rejoin, room registrations counted as holding a handle, the retry stopped for a target that left or moved and allowed for the same session, handle-first binding lookup with pid lookup unchanged, every agent route passing the handle) and 1 in `tests/orca-wake-room.test.ts` (the prompt names the handle). Suite 181.
 - Verified live against Orca 1.4.209 in a scratch terminal: a REST join bound the handle for a pid inside Orca and dropped it for a pid absent from the host; a mention was typed and submitted through `orca terminal send`; after `orca terminal close` the next mention failed with `terminal_not_writable`, fell back to the pid, and the room got one warning.
 
+## 2026-09-24: Injection Matrix, Keys and Agent Modes
+
+Line mode only proved that a whole line reaches a `ReadLine`. Claude Code and Codex are raw-mode TUIs, so the question that matters for a wake-up is whether the prompt SUBMITS. Two new modes answer that, and both found real defects. Full tables in `tools/inject-matrix/README.md`.
+
+### Added
+- `-Mode keys`: `rawkey.py` reads one `msvcrt.getwch` at a time and logs every code point, so each route's terminator is evidence rather than inference.
+- `-Mode agent`: a real Claude Code or Codex CLI runs in each host, in a scratch folder with no project of its own, and the probe types `reply with exactly the word PONG and nothing else` through every route that applies. Submission and reply are recorded separately, and a route that did not submit gets one extra Enter to tell "arrived but unsubmitted" from "never arrived". Each route runs in a fresh session.
+- `read-screen.py` attaches to a process's console and reads the visible screen, so one reader covers hosts with no screen-reading CLI. `send-key.py` writes single key events for probe setup and teardown only, never as a route under test.
+- Warp now runs the same payloads as every other host: the launch script is typed into a new tab with the console route, and the payload reports its own pid.
+
+### Findings
+- Every route delivers a carriage return except `injectWezTerm`, which ends its text with a line feed. Against a real Claude Code the prompt arrived in full and stayed in the input box; one Enter afterwards submitted it, and the same text ending in a carriage return submitted in 6.3 s. The call does not throw, so `inject()` never falls back to the console path and the wake is lost silently.
+- One Enter never submitted to the Codex TUI, on any host or route. `inject.ts` sets `doubleEnter` only when the process is named `codex.exe`, and an npm-installed Codex runs as `node.exe` running `codex.js`, so the check never matches. Only routes that press Enter separately from the text got through: `orca terminal send --enter` and `wmux send-key Enter`.
+- A freshly started Claude Code shows its status bar while SessionStart hooks are still running. A prompt typed in that window sat unsubmitted past 150 s and a direct Enter did not rescue it. A wake sent to an agent that has just started can fail while every route reports success.
+- `orca terminal send` reports `provider: claude|codex` and `observation: supported` once a real agent is in the terminal, but still warns "no turn start was observed" on runs where the agent answered. It is unconfirmed, not failed. `wmux send --submit` retries Enter only when it sees no receipt; with Claude Code it saw `composer_cleared` or `turn_start` and did not retry.
+
+## 2026-09-24: Injection Matrix Harness
+
+A repeatable probe, `tools/inject-matrix/`, that shows with evidence which terminal hosts on a Windows machine the wake-up injector can type into. It drives the real `dist/inject.js`, and a marker only counts as landed when the receiver logs it. See `tools/inject-matrix/README.md` for how to run it and for the full matrix.
+
+### Added
+- `receiver.ps1`: a line receiver run inside each host. It writes its pid and terminal variables, logs each console line with a timestamp, and exits on `QUIT`, on a quit file or after a time limit, so no shell is left behind.
+- `inject-once.mjs`: one call to `inject()`, reported as JSON. Whether the injector resolved is kept separate from whether the text arrived.
+- `matrix.ps1`: launches conhost, Windows Terminal (pwsh 7 and PowerShell 5), WezTerm, Orca, wmux and Warp. It records each receiver's parent chain and console servers, injects with retries plus one warm attempt, and tests each host's own input route (WezTerm backend, `orca terminal send`, `wmux send`). It then cleans up and checks for strays. Results go to the gitignored `results/`.
+
+### Findings (Windows 11 10.0.26200, not elevated)
+- The console backend landed on the first attempt in all seven hosts, ConPTY ones included, in about one second. The time is mostly the process-name lookup and Python startup. Warp was slowest: 8.6 s into a fresh tab, 2.2 s warm.
+- The WezTerm backend reports success, but a line-mode reader never receives the text. It ends with LF, which does not submit under ConPTY, and a later CR does. Because the call does not throw, `inject()` does not fall back to the console path. This was not checked against raw-mode agent TUIs.
+- `orca terminal send` delivers but, for a plain shell, reports only `input_accepted` with provider `unsupported`. `wmux send --submit` delivers, finds no receipt signal, retries Enter and so sends one extra blank line.
+- Warp has a hidden `warp.exe --warpctrl` local-control CLI. It is off by default, and its `input insert` does not submit.
+
 ## 2026-09-24: WezTerm Honesty
 
 From the first live wakes after the Honest Wake-Ups deploy: an agent started outside any terminal (WMI-spawned, no console) joined with WezTerm pane 0, which was someone else's shell; every mention was typed at the wrong pane and the honest failure line blamed a transient error. Underneath it, a process leak: every `wezterm cli` call ran without `--no-auto-start`, so whenever no GUI socket answered it spawned a headless mux server, one per call, forever (579 orphans on one host after three days of joins and 30-second checks).
