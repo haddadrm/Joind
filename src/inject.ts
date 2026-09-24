@@ -58,13 +58,6 @@ export async function spawnWeztermPane(opts: {
   return paneId;
 }
 
-/** A submit plan, or a request to send only the Enter that a delivered
- *  prompt is still missing (after a wake was interrupted between its text
- *  and its Enter). */
-export interface SendPlan extends SubmitPlan {
-  enterOnly?: boolean;
-}
-
 /** The slice of a child process that `wezterm cli send-text` needs. */
 export interface SendTextProcess {
   stdin: { write(chunk: string): unknown; end(): unknown } | null;
@@ -78,13 +71,12 @@ const realSpawn: SpawnSendText = (exe, args, opts) => spawn(exe, args, opts);
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export interface WezTermSendOptions {
-  /** How to submit: a second carriage return after delayMs for Codex and
-   *  Copilot; enterOnly sends one carriage return and no text. */
-  plan?: SendPlan;
-  /** Re-asked immediately before each send that follows a wait (the second
-   *  Enter and its one recovery). It throws (the caller's
-   *  WakeFallbackAborted) when the target left, moved, or needs locks this
-   *  wake does not hold. */
+  /** How to submit: a second carriage return after delayMs for Codex and Copilot. */
+  plan?: SubmitPlan;
+  /** The post-text guard: re-asked immediately before each send that
+   *  follows a wait once the text is in the pane (the second Enter and its
+   *  one recovery). It throws (the caller's WakeFallbackAborted) when the
+   *  target left or its terminal changed. */
   guard?: () => void;
   /** Injectable for tests. */
   spawn?: SpawnSendText;
@@ -147,38 +139,25 @@ export class PartialDeliveryError extends Error {
  */
 export async function injectWezTerm(paneId: number, text: string, weztermExe?: string, extraEnv?: Record<string, string>, opts: WezTermSendOptions = {}): Promise<void> {
   const exe = weztermExe || "wezterm";
-  const plan: SendPlan = opts.plan ?? DEFAULT_PLAN;
+  const plan = opts.plan ?? DEFAULT_PLAN;
   const spawnFn = opts.spawn ?? realSpawn;
   const sleep = opts.sleep ?? realSleep;
   console.log(`  [inject:wezterm] pane=${paneId} len=${text.length} doubleEnter=${plan.doubleEnter}`);
   const env = extraEnv && Object.keys(extraEnv).length > 0 ? { ...process.env, ...extraEnv } : undefined;
-  const afterText = guardAfterText(opts.guard);
-  if (plan.enterOnly) {
-    // The text is already in the pane from an earlier, interrupted wake.
-    afterText();
-    try {
-      await weztermSendText(spawnFn, exe, paneId, "\r", env);
-    } catch (err) {
-      const why = err instanceof Error ? err.message.split("\n")[0] : String(err);
-      throw new PartialDeliveryError(`wezterm pane ${paneId}: text delivered earlier, but the Enter that submits it failed (${why.slice(0, 120)})`);
-    }
-    return;
-  }
   // A failure here is ambiguous (the text may or may not have arrived), so it
   // stays an ordinary error and the caller may fall back.
   await weztermSendText(spawnFn, exe, paneId, text + "\r", env);
   if (plan.doubleEnter) {
     // From here the text is in the pane. Only the missing Enter may be sent
-    // again, and every send after a wait re-asks the guard first; an abort
-    // from here on carries delivered: "text".
+    // again, and every send after a wait re-asks the guard first.
     await sleep(plan.delayMs);
-    afterText();
+    opts.guard?.();
     try {
       await weztermSendText(spawnFn, exe, paneId, "\r", env);
     } catch (first) {
       const why = first instanceof Error ? first.message.split("\n")[0] : String(first);
       console.log(`  [inject:wezterm] second Enter failed (${why.slice(0, 120)}); sending the Enter once more`);
-      afterText();
+      opts.guard?.();
       try {
         await weztermSendText(spawnFn, exe, paneId, "\r", env);
       } catch (second) {
@@ -192,35 +171,25 @@ export async function injectWezTerm(paneId: number, text: string, weztermExe?: s
 /** Thrown by inject() when the caller's guard refused the console fallback:
  *  the target left ("skip") or is a different session now ("moved"). */
 export class WakeFallbackAborted extends Error {
-  /** `delivered: "text"`: the abort came after the prompt's text reached the
-   *  terminal. The caller must not type the prompt again into that terminal;
-   *  at most the missing Enter may follow (inject with submitOnly). */
-  constructor(public readonly result: "skip" | "moved", public readonly delivered?: "text") {
-    super(`console fallback aborted: target ${result === "skip" ? "left" : "moved"}${delivered ? " after the text was delivered" : ""}`);
+  constructor(public readonly result: "skip" | "moved") {
+    super(`console fallback aborted: target ${result === "skip" ? "left" : "moved"}`);
   }
-}
-
-/** The guard as asked once the text is in the terminal: an abort from here on
- *  says so, so no caller mistakes it for "nothing was typed". */
-function guardAfterText(guard: (() => void) | undefined): () => void {
-  return () => {
-    try {
-      guard?.();
-    } catch (err) {
-      if (err instanceof WakeFallbackAborted && err.delivered === undefined) throw new WakeFallbackAborted(err.result, "text");
-      throw err;
-    }
-  };
 }
 
 export interface InjectOptions {
   /** Orca terminal handle: when set, Orca's own input path is tried first
    *  (before WezTerm and the console). */
   orcaTerminal?: string;
-  /** Send only the Enter a previously delivered prompt is missing: no text,
-   *  no Orca, no fallback to another route. Any failure is a
-   *  PartialDeliveryError and every abort carries delivered: "text". */
-  submitOnly?: boolean;
+  /**
+   * Asked instead of fallbackGuard once the prompt's text is in the terminal,
+   * before the delayed second Enter and its one recovery (WezTerm, tmux).
+   * Finish in place: the attempt that typed the text sends its Enter too,
+   * over the same route, under the locks it already holds. So this guard is
+   * meant to stop only for the agent having left ("skip") or its terminal
+   * identity having changed ("moved"), and to ignore lock growth; see the
+   * room's afterTextGuard. Absent, fallbackGuard is asked.
+   */
+  afterTextGuard?: () => "proceed" | "skip" | "moved";
   /** Called after an Orca or WezTerm failure and before the console fallback: the
    *  caller re-checks that the target is still the same live session.
    *  Anything but "proceed" aborts the fallback with WakeFallbackAborted. */
@@ -233,7 +202,9 @@ export interface InjectBackends {
   orca?: (handle: string, text: string, opts?: { beforeRetry?: () => void }) => Promise<void>;
   wezterm: typeof injectWezTerm;
   windows: (pid: number, text: string, delayMs: number, doubleEnter: boolean) => Promise<void>;
-  unix: (pid: number, text: string, guard?: () => void, plan?: SendPlan) => Promise<void>;
+  /** `guard` is asked before any text is typed; `afterText`, once the text
+   *  is in the pane, before the delayed second Enter and its recovery. */
+  unix: (pid: number, text: string, guard?: () => void, plan?: SubmitPlan, afterText?: () => void) => Promise<void>;
   platform?: NodeJS.Platform;
   /** How to submit to the target (a second Enter for Codex and Copilot);
    *  defaults to classifyTarget, which reads the process command line. */
@@ -263,7 +234,14 @@ export async function inject(
       throw err;
     }
   };
-  if (options.submitOnly) return submitOnlyWake(pid, weztermPaneId, weztermExe, weztermEnv, platform, backends, guard);
+  // Once the text is in: the post-text guard (see InjectOptions.afterTextGuard).
+  const afterText = (): void => {
+    const verdict = (options.afterTextGuard ?? options.fallbackGuard)?.() ?? "proceed";
+    if (verdict !== "proceed") {
+      if (pid > 0) forgetTarget(pid);
+      throw new WakeFallbackAborted(verdict);
+    }
+  };
   // How to submit, worked out at most once per wake and only when a backend
   // that presses Enter itself needs it (the Orca path does not).
   let planPromise: Promise<SubmitPlan> | null = null;
@@ -289,7 +267,7 @@ export async function inject(
     attempt = async () => {
       const p = await plan();
       guard(); // the classification awaited: is this still the session to type into?
-      await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv, { plan: p, guard });
+      await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv, { plan: p, guard: afterText });
     };
   }
   if (attempt) {
@@ -316,7 +294,7 @@ export async function inject(
   }
 
   try {
-    await injectConsole(pid, text, platform, backends, guard, plan);
+    await injectConsole(pid, text, platform, backends, guard, afterText, plan);
   } catch (err) {
     if (primary === undefined || err instanceof WakeFallbackAborted || err instanceof PartialDeliveryError) throw err;
     // Both paths failed: the first backend's error stays the reported one,
@@ -335,32 +313,6 @@ function assertStillTarget(options: InjectOptions): void {
   if (verdict !== "proceed") throw new WakeFallbackAborted(verdict);
 }
 
-/**
- * The Enter-only resume of a wake interrupted between its text and its Enter
- * (the room re-queues it under the full lock set). Same route as the text:
- * the WezTerm pane when there is one, else the console. The Orca path never
- * gets here: it sends text and Enter in one call and is never interrupted
- * between them.
- */
-async function submitOnlyWake(
-  pid: number, paneId: number | undefined, weztermExe: string | undefined, weztermEnv: Record<string, string> | undefined,
-  platform: NodeJS.Platform, backends: InjectBackends, guard: () => void
-): Promise<void> {
-  const afterText = guardAfterText(guard);
-  const enterOnly: SendPlan = { ...DEFAULT_PLAN, enterOnly: true };
-  console.log(`  [inject] resuming a delivered prompt: Enter only (${paneId != null ? `pane ${paneId}` : `pid ${pid}`})`);
-  afterText();
-  try {
-    if (paneId != null) await backends.wezterm(paneId, "", weztermExe, weztermEnv, { plan: enterOnly, guard: afterText });
-    else if (platform === "win32") await backends.windows(pid, "", DEFAULT_PLAN.delayMs, false);
-    else await backends.unix(pid, "", afterText, enterOnly);
-  } catch (err) {
-    if (err instanceof WakeFallbackAborted || err instanceof PartialDeliveryError) throw err;
-    const why = err instanceof Error ? err.message.split("\n")[0] : String(err);
-    throw new PartialDeliveryError(`text delivered earlier, but the Enter that submits it failed (${why.slice(0, 160)})`);
-  }
-}
-
 /** The target's submit plan; a classifier that fails or throws is the
  *  single-Enter default, never a failed wake. */
 async function resolvePlan(pid: number, platform: NodeJS.Platform, backends: InjectBackends): Promise<SubmitPlan> {
@@ -373,7 +325,7 @@ async function resolvePlan(pid: number, platform: NodeJS.Platform, backends: Inj
   }
 }
 
-async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends, guard: () => void, plan: () => Promise<SubmitPlan>): Promise<void> {
+async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends, guard: () => void, afterText: () => void, plan: () => Promise<SubmitPlan>): Promise<void> {
   const p = await plan();
   if (platform === "win32") {
     guard();
@@ -381,7 +333,7 @@ async function injectConsole(pid: number, text: string, platform: NodeJS.Platfor
   } else {
     guard();
     // tmux discovery inside the backend awaits too; it re-asks before typing.
-    await backends.unix(pid, text, guard, p);
+    await backends.unix(pid, text, guard, p, afterText);
   }
 }
 
@@ -534,7 +486,8 @@ export interface UnixSendDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export async function injectUnix(pid: number, text: string, guard?: () => void, plan: SendPlan = DEFAULT_PLAN, deps: UnixSendDeps = {}): Promise<void> {
+export async function injectUnix(pid: number, text: string, guard?: () => void, plan: SubmitPlan = DEFAULT_PLAN, afterText?: () => void, deps: UnixSendDeps = {}): Promise<void> {
+  const postText = afterText ?? guard;
   const execFileAsync = deps.exec ?? realUnixExec;
   const sleep = deps.sleep ?? realSleep;
   try {
@@ -584,18 +537,6 @@ export async function injectUnix(pid: number, text: string, guard?: () => void, 
       throw new Error(`PID ${pid} not found in any tmux pane`);
     }
 
-    const afterText = guardAfterText(guard);
-    if (plan.enterOnly) {
-      // The text is already in the pane from an earlier, interrupted wake.
-      afterText();
-      try {
-        await execFileAsync("tmux", ["send-keys", "-t", target, "Enter"], { timeout: 5000 });
-      } catch (err) {
-        const why = err instanceof Error ? err.message.split("\n")[0] : String(err);
-        throw new PartialDeliveryError(`tmux pane ${target}: text delivered earlier, but the Enter that submits it failed (${why.slice(0, 120)})`);
-      }
-      return;
-    }
     guard?.(); // discovery took time: is this still the session we were asked to wake?
     await execFileAsync("tmux", ["send-keys", "-t", target, "-l", text], {
       timeout: 5000,
@@ -605,16 +546,16 @@ export async function injectUnix(pid: number, text: string, guard?: () => void, 
     });
     if (plan.doubleEnter) {
       // Codex and Copilot submit on the second Enter (see target.ts). The
-      // text is in the pane now: only the Enter may be sent again, and the
-      // guard is re-asked before each send that follows a wait; an abort
-      // from here on carries delivered: "text".
+      // text is in the pane now: finish in place, only the Enter may be sent
+      // again, and the post-text guard is re-asked before each send that
+      // follows a wait.
       await sleep(plan.delayMs);
-      afterText();
+      postText?.();
       try {
         await execFileAsync("tmux", ["send-keys", "-t", target, "Enter"], { timeout: 5000 });
       } catch (first) {
         if (first instanceof WakeFallbackAborted) throw first;
-        afterText();
+        postText?.();
         try {
           await execFileAsync("tmux", ["send-keys", "-t", target, "Enter"], { timeout: 5000 });
         } catch (second) {

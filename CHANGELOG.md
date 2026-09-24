@@ -29,14 +29,12 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
 
 - tmux pane discovery split `list-panes` and `pgrep` output on the two characters backslash and n instead of a newline, so on a host with more than one pane the whole listing was one line and only a pid on the first line could ever be found. Both splits use a real newline now.
 
-- Codex gate round 2 (1 Medium, closed): a guard abort after the text reached the terminal lost that fact, so the room's "moved" re-queue typed the whole prompt a second time into the same pane (reproduced: another registration linked the terminal to an Orca handle during the delay, the required locks grew, and two identical payloads were sent). Now:
-  - Every abort raised after the text is delivered (the delayed second Enter and its recovery, in WezTerm and tmux) carries `delivered: "text"` on `WakeFallbackAborted`.
-  - The room re-reads the agent and decides:
-    - If the agent left, nothing more is typed, with a log line.
-    - If its identity is unchanged and only the locks grew, the wake is re-queued under the full lock set as an Enter-only resume.
-    - If the new registration may be the same terminal (any shared pid, pane or handle), nothing is typed again and the room says "Could not submit the prompt to X; the text is in their input box."
-    - If it moved to a disjoint terminal, the new one gets a fresh wake and the log says the old terminal keeps the unsent text.
-  - `inject(..., { submitOnly: true })` sends just the missing Enter on the route that carried the text (the WezTerm pane, else the console), never Orca and never a fallback. Every abort in that mode carries `delivered: "text"`, and any failure is a `PartialDeliveryError`.
+- Codex gate round 2 (1 Medium): a guard abort after the text reached the terminal lost that fact, so the room's "moved" re-queue typed the whole prompt a second time into the same pane. Round 2 answered with an Enter-only resume; round 3 found three holes in it and it was replaced, below.
+- Codex gate round 3 (3 Medium, closed by a change of design): the Enter-only resume released its coordinator slot before resuming, so another wake could type and submit into the pane in between (A text, B text, B Enter, A Enter). It rebuilt its route from the registration, so it could send the Enter through WezTerm when tmux had delivered the text. And it judged "same terminal" by direct overlap while the locks follow transitive equivalence. The resume is gone (no submitOnly mode, no re-queue, no delivered flag through the room), replaced by finish in place:
+  - Before any text is typed, the guard is unchanged: the agent leaving, its identity changing, and its lock set growing all abort with nothing typed.
+  - Once the text is in, the same attempt sends the delayed second Enter and its one recovery over the route that typed it, still holding every lock it took. `inject()` asks the new `afterTextGuard` there (falling back to `fallbackGuard` for callers that give none). The room's version stops only when the agent left (the log says unsent text remains in that terminal) or its terminal identity changed. It ignores lock growth on purpose: the attempt still holds its locks, so no other wake of ours can type into that terminal until it releases, and a half-typed prompt is the worse outcome.
+  - An identity change after the text is judged with the lock equivalence (`sameTerminal`: the delivered terminal's held lock set, or `lockKeysFor` through the live registrations now). The same terminal gets the partial-delivery line and no replay. A different terminal keeps its unsent text (logged) and the new one gets a fresh wake after this attempt releases.
+  - `PartialDeliveryError` and the `partial` kind remain for a recovery Enter that fails.
 
 ### Verified after the fix (real agents, same harness, fresh session per route)
 
@@ -48,7 +46,15 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
 
 ### Tests
 - 30 in `tests/submit-plan.test.ts`: classification of the native Codex build, the npm Codex under node (the field command line), `@openai/codex` on Unix, a `codex-cli` checkout, Copilot in four forms, and six negatives including Claude resuming a session named after Codex; the 60 second cache, a shared lookup in flight, failures neither cached nor fatal, no lookup without a pid; the WezTerm terminator and argv (`--no-auto-start`, `--no-paste`) and the Codex sequence (text and CR, the delay, a lone CR) with a fake spawn, and no second Enter after a failed first send; one lookup per wake shared with the console fallback, the plan reaching WezTerm, the Windows console and tmux, no lookup on the Orca path, and a throwing classifier giving a single-Enter wake.
-- `tests/wake-fallback.test.ts` and `tests/orca-wake-room.test.ts` pass a fixed plan: the Linux console path now looks up the command line too, and these tests settle on microtasks alone. Suite 211. Gate round 1 added 34 in `tests/inject-fixes-gate1.test.ts` (27 of them fail on 92603bb; the other 7 pin cases that were already right) and 1 in `tests/partial-delivery-room.test.ts` (the room types a partially delivered prompt once, never through the console or a retry, and says so). The per-pid cache test now asserts a read on every wake. Suite 245. The tmux split fix adds 2 (a two-pane host: a pane on the second line, and a pane found through the second of two child pids), both failing before it. Suite 247. Gate round 2 added 4 in `tests/delivered-abort-room.test.ts`: the gate's sequence (text once, then exactly one carriage return, no second payload) and the same-terminal rejoin (no replay, the partial line) fail on 43836a5; the disjoint move and the departure pin behaviour that was already right. It also added 7 in `tests/inject-fixes-gate1.test.ts`: the delivered flag in WezTerm and tmux, none before any text, and Enter-only over WezTerm and tmux with its failure and abort cases. Suite 258.
+- `tests/wake-fallback.test.ts` and `tests/orca-wake-room.test.ts` pass a fixed plan: the Linux console path now looks up the command line too, and these tests settle on microtasks alone. Suite 211. Gate round 1 added 34 in `tests/inject-fixes-gate1.test.ts` (27 of them fail on 92603bb; the other 7 pin cases that were already right) and 1 in `tests/partial-delivery-room.test.ts` (the room types a partially delivered prompt once, never through the console or a retry, and says so). The per-pid cache test now asserts a read on every wake. Suite 245. The tmux split fix adds 2 (a two-pane host: a pane on the second line, and a pane found through the second of two child pids), both failing before it. Suite 247. Gate round 3 rewrote `tests/delivered-abort-room.test.ts` to 7 room-level cases on the real room, coordinator and injectors:
+  - lock growth after the text: the text, then its Enter, nothing in between;
+  - A and B on one pane, with B mentioned during A's delay: A, A's Enter, B, B's Enter (the gate's interleave, reproduced on 1190a63 as A, B, Enter, Enter);
+  - a direct and a transitive same-terminal rejoin: a warning and no replay;
+  - a move to a disjoint terminal;
+  - a departure;
+  - tmux delivering after a WezTerm failure: the Enter goes through tmux.
+
+  In `tests/inject-fixes-gate1.test.ts`, the 7 round-2 tests of the delivered flag and Enter-only mode are deleted and 4 finish-in-place tests take their place. Suite 258.
 
 ## 2026-09-24: Orca Wake-Ups
 

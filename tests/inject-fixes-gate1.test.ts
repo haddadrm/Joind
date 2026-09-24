@@ -104,7 +104,7 @@ describe("finding 2: the delayed second Enter re-asks the guard", () => {
     let left = false;
     const sleep = async (): Promise<void> => { left = true; };
     const guard = (): void => { if (left) throw new WakeFallbackAborted("skip"); };
-    await expect(injectUnix(100, "hello", guard, CODEX_PLAN, { exec, sleep })).rejects.toBeInstanceOf(WakeFallbackAborted);
+    await expect(injectUnix(100, "hello", guard, CODEX_PLAN, undefined, { exec, sleep })).rejects.toBeInstanceOf(WakeFallbackAborted);
     const enters = calls.filter((c) => c[0] === "tmux" && c[1] === "send-keys" && c[c.length - 1] === "Enter");
     expect(enters).toHaveLength(1);
   });
@@ -155,7 +155,7 @@ describe("finding 3: a failed second Enter recovers only the Enter, never the pr
       if (args[args.length - 1] === "Enter" && ++enters > 1) throw new Error("tmux: server exited");
       return { stdout: "" };
     };
-    const err = await injectUnix(100, "hello", undefined, CODEX_PLAN, { exec, sleep: noSleep }).catch((e: unknown) => e);
+    const err = await injectUnix(100, "hello", undefined, CODEX_PLAN, undefined, { exec, sleep: noSleep }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PartialDeliveryError);
     expect(enters).toBe(3);
   });
@@ -274,98 +274,79 @@ describe("tmux pane discovery splits on real newlines (addendum)", () => {
 
   it("finds a pane whose own pid is not on the first line", async () => {
     const sent: string[][] = [];
-    await injectUnix(12, "hello", undefined, DEFAULT_PLAN, { exec: twoPaneExec(sent), sleep: noSleep });
+    await injectUnix(12, "hello", undefined, DEFAULT_PLAN, undefined, { exec: twoPaneExec(sent), sleep: noSleep });
     expect(sent.map((a) => a[2])).toEqual(["main:0.1", "main:0.1"]);
   });
 
   it("finds a pane through a child pid when pgrep lists several children", async () => {
     const sent: string[][] = [];
-    await injectUnix(300, "hello", undefined, DEFAULT_PLAN, { exec: twoPaneExec(sent, { "12": "299\n300\n" }), sleep: noSleep });
+    await injectUnix(300, "hello", undefined, DEFAULT_PLAN, undefined, { exec: twoPaneExec(sent, { "12": "299\n300\n" }), sleep: noSleep });
     expect(sent.map((a) => a[2])).toEqual(["main:0.1", "main:0.1"]);
   });
 });
 
-describe("gate round 2: an abort after the text says so, and Enter-only sends only the Enter", () => {
-  it("WezTerm: a guard abort after the text carries delivered: text", async () => {
+describe("gate round 3: once the text is in, the same attempt finishes in place", () => {
+  it("WezTerm through inject(): lock growth after the text (fallbackGuard says moved) does not stop the Enter", async () => {
     const log: string[] = [];
-    let left = false;
-    const sleep = async (): Promise<void> => { left = true; };
-    const guard = (): void => { if (left) throw new WakeFallbackAborted("moved"); };
-    const err = await injectWezTerm(3, "hello", "wezterm", undefined, { spawn: fakeSpawn(log), sleep, plan: CODEX_PLAN, guard }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(WakeFallbackAborted);
-    expect((err as WakeFallbackAborted).result).toBe("moved");
-    expect((err as WakeFallbackAborted).delivered).toBe("text");
-  });
-
-  it("the guard after classification (nothing typed yet) carries no delivered flag", async () => {
-    let verdict: "proceed" | "moved" = "proceed";
+    let grown = false;
     const backends: InjectBackends = {
-      wezterm: async () => {},
-      windows: async () => {},
-      unix: async () => {},
-      platform: "win32",
-      classify: async (): Promise<SubmitPlan> => { verdict = "moved"; return CODEX_PLAN; },
-    };
-    const err = await inject(100, "ping", 7, undefined, undefined, backends, { fallbackGuard: () => verdict }).catch((e: unknown) => e);
-    expect((err as WakeFallbackAborted).delivered).toBeUndefined();
-  });
-
-  it("tmux: a guard abort after the text carries delivered: text", async () => {
-    const exec: UnixExec = async (_cmd, args) => (args[0] === "list-panes" ? { stdout: "100 main:0.0" } : { stdout: "" });
-    let left = false;
-    const sleep = async (): Promise<void> => { left = true; };
-    const guard = (): void => { if (left) throw new WakeFallbackAborted("skip"); };
-    const err = await injectUnix(100, "hello", guard, CODEX_PLAN, { exec, sleep }).catch((e: unknown) => e);
-    expect((err as WakeFallbackAborted).delivered).toBe("text");
-  });
-
-  it("submitOnly through WezTerm sends one lone carriage return and no text", async () => {
-    const log: string[] = [];
-    const backends: InjectBackends = {
-      wezterm: (pane, text, exe, env, opts) => injectWezTerm(pane, text, exe, env, { ...opts, spawn: fakeSpawn(log), sleep: noSleep }),
+      wezterm: (pane, text, exe, env, opts) => injectWezTerm(pane, text, exe, env, { ...opts, spawn: fakeSpawn(log), sleep: async () => { grown = true; } }),
       windows: async () => { throw new Error("console must not be tried"); },
       unix: async () => { throw new Error("console must not be tried"); },
       platform: "win32",
       classify: async () => CODEX_PLAN,
     };
-    await inject(100, "", 7, undefined, undefined, backends, { submitOnly: true, fallbackGuard: () => "proceed" });
-    expect(log).toEqual([CR]);
+    await inject(100, "hello", 7, undefined, undefined, backends, {
+      fallbackGuard: () => (grown ? "moved" : "proceed"),
+      afterTextGuard: () => "proceed",
+    });
+    expect(log).toEqual([JSON.stringify("hello\r"), CR]);
   });
 
-  it("submitOnly: a failed Enter is a partial delivery, never a fallback", async () => {
-    const consoleCalls: number[] = [];
+  it("WezTerm through inject(): the post-text guard saying the agent left stops the Enter, nothing more is sent", async () => {
     const log: string[] = [];
+    let left = false;
     const backends: InjectBackends = {
-      wezterm: (pane, text, exe, env, opts) => injectWezTerm(pane, text, exe, env, { ...opts, spawn: fakeSpawn(log, [1]), sleep: noSleep }),
-      windows: async (pid) => { consoleCalls.push(pid); },
-      unix: async (pid) => { consoleCalls.push(pid); },
+      wezterm: (pane, text, exe, env, opts) => injectWezTerm(pane, text, exe, env, { ...opts, spawn: fakeSpawn(log), sleep: async () => { left = true; } }),
+      windows: async () => { throw new Error("console must not be tried"); },
+      unix: async () => { throw new Error("console must not be tried"); },
       platform: "win32",
+      classify: async () => CODEX_PLAN,
     };
-    await expect(inject(100, "", 7, undefined, undefined, backends, { submitOnly: true })).rejects.toBeInstanceOf(PartialDeliveryError);
-    expect(consoleCalls).toEqual([]);
-    expect(log).toEqual([CR]);
+    const err = await inject(100, "hello", 7, undefined, undefined, backends, {
+      fallbackGuard: () => "proceed",
+      afterTextGuard: () => (left ? "skip" : "proceed"),
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WakeFallbackAborted);
+    expect(log).toEqual([JSON.stringify("hello\r")]);
   });
 
-  it("submitOnly: an abort before the Enter carries delivered: text", async () => {
+  it("tmux: the second Enter asks the post-text guard, not the pre-text one", async () => {
+    const enters: string[] = [];
+    const exec: UnixExec = async (_cmd, args) => {
+      if (args[0] === "list-panes") return { stdout: "100 main:0.0" };
+      if (args[args.length - 1] === "Enter") enters.push(args[2]);
+      return { stdout: "" };
+    };
+    let grown = false;
+    const before = (): void => { if (grown) throw new WakeFallbackAborted("moved"); };
+    const afterText = (): void => {};
+    await injectUnix(100, "hello", before, CODEX_PLAN, afterText, { exec, sleep: async () => { grown = true; } });
+    expect(enters).toEqual(["main:0.0", "main:0.0"]);
+  });
+
+  it("without an afterTextGuard, inject() keeps asking fallbackGuard after the text (callers outside the room)", async () => {
+    const log: string[] = [];
+    let left = false;
     const backends: InjectBackends = {
-      wezterm: async () => { throw new Error("must not send"); },
+      wezterm: (pane, text, exe, env, opts) => injectWezTerm(pane, text, exe, env, { ...opts, spawn: fakeSpawn(log), sleep: async () => { left = true; } }),
       windows: async () => {},
       unix: async () => {},
       platform: "win32",
+      classify: async () => CODEX_PLAN,
     };
-    const err = await inject(100, "", 7, undefined, undefined, backends, { submitOnly: true, fallbackGuard: () => "skip" }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(WakeFallbackAborted);
-    expect((err as WakeFallbackAborted).delivered).toBe("text");
-  });
-
-  it("submitOnly through tmux sends Enter and never the text", async () => {
-    const sent: string[][] = [];
-    const exec: UnixExec = async (_cmd, args) => {
-      if (args[0] === "list-panes") return { stdout: "100 main:0.0" };
-      sent.push(args);
-      return { stdout: "" };
-    };
-    await injectUnix(100, "", undefined, { ...DEFAULT_PLAN, enterOnly: true }, { exec, sleep: noSleep });
-    expect(sent).toEqual([["send-keys", "-t", "main:0.0", "Enter"]]);
+    await expect(inject(100, "hello", 7, undefined, undefined, backends, { fallbackGuard: () => (left ? "skip" : "proceed") }))
+      .rejects.toBeInstanceOf(WakeFallbackAborted);
+    expect(log).toEqual([JSON.stringify("hello\r")]);
   });
 });
