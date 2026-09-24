@@ -41,6 +41,7 @@ Diagnosed from the Y530 server log: a local Claude Code session missed about one
 - Tests: 21 in `tests/wake.test.ts` (classification, base URL, serialization by terminal, skip and moved results, retry and attempt accounting, warn-once per room until forget, transient rate limit, presence event and lastPostAt on the room, stale outcomes, proof-of-life reset, shared-key serialization, execution-time generations, release and reclaim, composite identity, live-registration equivalence, per-attempt generations, pane replacement, destroy) plus 2 room-level injector tests. Suite 117.
 
 ### Backlog
+- Remote wake-ups through Orca (docs/BACKLOG.md): an environment or host selector on the Orca terminal handle, queued behind the local Orca backend. Rami: worth the shot.
 - Join-time reachability stamp (docs/BACKLOG.md): probe the pid on the bound host at join and tell the room then, not at the first missed mention. From the first live wake on the Y530 after deploy: the honest line fired correctly, and the target was a stale pid.
 
 ### Fixed
