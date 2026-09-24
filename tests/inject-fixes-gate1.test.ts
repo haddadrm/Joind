@@ -234,6 +234,7 @@ describe("finding 5: node options that take a value are not the entry script", (
     ["a boolean option directly before a script path", "node --trace-warnings /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
     ["a boolean option before a relative script with an extension", "node --trace-warnings codex.js", CODEX_PLAN],
     ["a boolean option before a bare script name reads as a value (documented limit)", "node --trace-warnings server", DEFAULT_PLAN],
+    ["a Windows path with backslashes is a script even without an extension", "node --disable-warning ExperimentalWarning C:\\tools\\node_modules\\@openai\\codex\\bin\\codex", CODEX_PLAN],
     ["--env-file and --localstorage-file with separate values", "node --env-file .env --localstorage-file /tmp/ls.db /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
     ["--import", "node --import ./otel.mjs /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
     ["--loader and --experimental-loader", "node --loader ts-node/esm --experimental-loader ./l.mjs /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],

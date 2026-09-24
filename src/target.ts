@@ -100,7 +100,7 @@ function normalizeOption(flag: string): string {
  *  separator) or a file with a script extension? A bare word such as
  *  `ExperimentalWarning`, `5000` or `.env` does not. */
 export function looksLikeScript(token: string): boolean {
-  if (/[\/]/.test(token)) return true;
+  if (token.includes("/") || token.includes("\\")) return true;
   return /\.(c|m)?[jt]sx?$/i.test(token);
 }
 
@@ -149,10 +149,11 @@ const PACKAGES: Array<[string, AgentKind]> = [
 /** The package a path runs from: the LAST `node_modules/<pkg>` in it, so a
  *  package nested in another package's tree is the one that counts. */
 function packageOf(path: string): string | null {
+  // Windows command lines carry backslashes; match on one separator form.
   const re = /node_modules\/((?:@[^/]+\/)?[^/]+)/g;
   let last: string | null = null;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(path)) !== null) last = m[1];
+  while ((m = re.exec(path.replace(/\\/g, "/"))) !== null) last = m[1];
   return last;
 }
 
