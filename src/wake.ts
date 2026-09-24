@@ -20,7 +20,10 @@
  * its own right to one warning.
  */
 
-export type WakeFailureKind = "no-console" | "transient";
+/** "partial": the text reached the terminal but the Enter that submits it
+ *  could not be sent (PartialDeliveryError). Never retried: a retry would
+ *  type the whole prompt again behind the one already in the input box. */
+export type WakeFailureKind = "no-console" | "transient" | "partial";
 
 /** What an attempt did. "skip": the target was gone by the time its turn
  *  came; "moved": the target now lives in a different terminal (the caller
@@ -48,9 +51,17 @@ const NO_CONSOLE_PATTERNS = [
   /PID 0\b/,
   /not found in any tmux pane/i, // Unix: the pid is not under any tmux pane
   /no console/i,
+  // Orca (src/orca.ts wording): the handle names no live, writable terminal
+  // ("terminal_handle_stale" observed for unknown and closed handles), or
+  // there is no Orca CLI on this host. "orca send failed" stays transient.
+  /orca terminal \S+ unavailable \(/i,
+  /\bterminal_handle_stale\b/i,
+  /orca cli unavailable/i,
 ];
 
 export function classifyWakeFailure(err: unknown): WakeFailureKind {
+  // By name, so this module needs no import from inject.ts.
+  if (err instanceof Error && err.name === "PartialDeliveryError") return "partial";
   const text = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
   return NO_CONSOLE_PATTERNS.some((re) => re.test(text)) ? "no-console" : "transient";
 }
@@ -147,7 +158,9 @@ export class WakeCoordinator {
           return { ok: true, result, attempts: i, warn: false };
         } catch (err) {
           lastErr = err;
-          if (classifyWakeFailure(err) === "no-console") break; // retrying cannot help
+          // Retrying cannot help a missing console, and would duplicate a
+          // prompt whose text was already delivered.
+          if (classifyWakeFailure(err) !== "transient") break;
           if (i === 1) await this.sleep(retryDelay);
         }
       }
@@ -167,6 +180,9 @@ export class WakeCoordinator {
   }
 
   private shouldWarn(warnKey: string, kind: WakeFailureKind): boolean {
+    // Each partial delivery is its own prompt left unsent in an input box:
+    // always worth a line, never folded into a cooldown.
+    if (kind === "partial") return true;
     if (kind === "no-console") {
       if (this.permanentWarned.has(warnKey)) return false;
       this.permanentWarned.add(warnKey);

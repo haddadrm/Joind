@@ -20,29 +20,33 @@ export function setInjectBaseUrl(url: string): void {
 }
 const wakes = new WakeCoordinator();
 let roomSeq = 0;
+/** What a terminal registration carries: the pid, and when known the
+ *  WezTerm pane and the Orca terminal handle. */
+export interface TerminalRef { pid: number; weztermPaneId?: number; orcaTerminal?: string }
 /** Every identity known for a terminal. A wake holds all of them, so a room
  *  that registered the session pid-only and a room that registered it with
- *  its pane still serialize on the shared pid. */
-export function terminalKeys(agent: { pid: number; weztermPaneId?: number }): string[] {
+ *  its pane (or Orca handle) still serialize on the shared pid. */
+export function terminalKeys(agent: TerminalRef): string[] {
   const keys: string[] = [];
   if (agent.pid > 0) keys.push(`pid:${agent.pid}`);
   if (agent.weztermPaneId != null) keys.push(`pane:${agent.weztermPaneId}`);
+  if (agent.orcaTerminal) keys.push(`orca:${agent.orcaTerminal}`);
   return keys.length > 0 ? keys : ["pid:0"];
 }
-/** Session identity: any change of pid or pane is a different terminal. */
-export function terminalIdentity(agent: { pid: number; weztermPaneId?: number }): string {
+/** Session identity: any change of pid, pane or Orca handle is a different terminal. */
+export function terminalIdentity(agent: TerminalRef): string {
   return terminalKeys(agent).join("|");
 }
 /** Every live registration across every room, keyed by room scope and name.
  *  It is the only source of terminal equivalence: a pid-only registration in
  *  one room and a pane-only one in another are the same terminal when some
  *  live registration carries both, and the knowledge leaves with them. */
-const liveTerminals = new Map<string, { pid: number; weztermPaneId?: number }>();
+const liveTerminals = new Map<string, TerminalRef>();
 /** The keys a wake must hold for `agent`: its own, plus those of every live
  *  registration reachable through a shared key (transitively). */
 export function lockKeysFor(
-  agent: { pid: number; weztermPaneId?: number },
-  registry: Iterable<{ pid: number; weztermPaneId?: number }> = liveTerminals.values()
+  agent: TerminalRef,
+  registry: Iterable<TerminalRef> = liveTerminals.values()
 ): string[] {
   const keys = new Set(terminalKeys(agent));
   const others = [...registry].map(terminalKeys);
@@ -55,6 +59,24 @@ export function lockKeysFor(
     }
   }
   return [...keys];
+}
+/** The terminal part of an agent, copied (the registry must not alias it). */
+function terminalRefOf(agent: TerminalRef): TerminalRef {
+  return { pid: agent.pid, weztermPaneId: agent.weztermPaneId, orcaTerminal: agent.orcaTerminal };
+}
+/**
+ * Is `live` still the terminal an attempt typed into? True when the closure
+ * of `live` through the live registrations now (the same equivalence
+ * lockKeysFor() uses for locking) shares any key with the COMPLETE lock set
+ * the attempt holds, not only the delivered agent's own keys. The held set
+ * already contains every key the delivered terminal was reachable through,
+ * so a terminal linked to it only through a registration that has since
+ * left and rejoined elsewhere (sharing, say, just an Orca handle) is still
+ * recognised. The two narrower checks this replaces (a key of `live` in the
+ * held set; a delivered key in the current closure) are both special cases.
+ */
+function sameTerminal(held: ReadonlySet<string>, live: TerminalRef): boolean {
+  return lockKeysFor(live).some((k) => held.has(k));
 }
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
@@ -100,6 +122,8 @@ export interface Agent {
    *  (a hung resident heartbeats forever), a post is proof of life. */
   lastPostAt?: number;
   weztermPaneId?: number;
+  /** Orca terminal handle (term_<uuid>), bound only after the join checked it. */
+  orcaTerminal?: string;
 }
 
 export interface RoomEvent {
@@ -196,8 +220,10 @@ export class ChatRoom extends EventEmitter {
   }
 
   /** `weztermPaneId`: a number binds that pane, null clears any pane held
-   *  before (the join proved it stale), undefined leaves it as it was. */
-  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string): Agent {
+   *  before (the join proved it stale), undefined leaves it as it was.
+   *  `orcaTerminal` follows the same rule: a handle binds, null clears,
+   *  undefined keeps. */
+  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null): Agent {
     const existing = this.agents.get(name);
     if (existing) {
       const now = Date.now();
@@ -209,7 +235,9 @@ export class ChatRoom extends EventEmitter {
       // new session.
       const paneReplaced =
         existing.weztermPaneId != null && weztermPaneId != null && existing.weztermPaneId !== weztermPaneId;
-      if (existing.pid !== pid || paneReplaced) {
+      const orcaReplaced =
+        existing.orcaTerminal != null && orcaTerminal != null && existing.orcaTerminal !== orcaTerminal;
+      if (existing.pid !== pid || paneReplaced || orcaReplaced) {
         this.addSystem(`${name} rejoined (new session)`);
         existing.joinedAt = now;
         existing.lastPostAt = undefined;
@@ -218,10 +246,12 @@ export class ChatRoom extends EventEmitter {
       existing.pid = pid;
       if (weztermPaneId === null) existing.weztermPaneId = undefined;
       else if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
+      if (orcaTerminal === null) existing.orcaTerminal = undefined;
+      else if (orcaTerminal != null) existing.orcaTerminal = orcaTerminal;
       if (!existing.role && persistedRole) existing.role = persistedRole;
       existing.lastSeen = now;
-      liveTerminals.set(this.warnKey(name), { pid: existing.pid, weztermPaneId: existing.weztermPaneId });
-      // Any change of terminal identity (pid or pane) is a fresh wake path:
+      liveTerminals.set(this.warnKey(name), terminalRefOf(existing));
+      // Any change of terminal identity (pid, pane or Orca handle) is a fresh wake path:
       // it earns its own warning if it fails too.
       if (terminalIdentity(existing) !== previousIdentity) wakes.forget(this.warnKey(name));
       this.emit("room", { type: "join", data: existing } as RoomEvent);
@@ -236,9 +266,10 @@ export class ChatRoom extends EventEmitter {
       role: persistedRole,
       lastSeen: Date.now(),
       weztermPaneId: weztermPaneId ?? undefined,
+      orcaTerminal: orcaTerminal ?? undefined,
     };
     this.agents.set(name, agent);
-    liveTerminals.set(this.warnKey(name), { pid, weztermPaneId: agent.weztermPaneId });
+    liveTerminals.set(this.warnKey(name), terminalRefOf(agent));
     wakes.forget(this.warnKey(name)); // a new session starts with a clean wake record
     this.addSystem(`${name} joined the chat`);
     this.emit("room", { type: "join", data: agent } as RoomEvent);
@@ -380,11 +411,14 @@ export class ChatRoom extends EventEmitter {
     const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
     const pidParam = agent.pid ? `&pid=${agent.pid}` : "";
     const paneParam = agent.weztermPaneId != null ? `&paneId=${agent.weztermPaneId}` : "";
-    const pidBody = agent.pid ? `,"pid":${agent.pid}` : "";
+    // A handle-only registration is found by its handle (the read and send
+    // routes match it before pid and pane); handles are term_<id>, URL-safe.
+    const orcaParam = agent.orcaTerminal ? `&orcaTerminal=${encodeURIComponent(agent.orcaTerminal)}` : "";
+    const pidBody = (agent.pid ? `,"pid":${agent.pid}` : "") + (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "");
     const since = this.getCursor(agent.name);
     return (
       `[joind] @${agent.name} mentioned by ${sender}.${roleHint} ` +
-      `Read: curl -s "${INJECT_BASE_URL}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}" then ` +
+      `Read: curl -s "${INJECT_BASE_URL}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}" then ` +
       `Reply: curl -s -X POST ${INJECT_BASE_URL}/api/agent/send -H "Content-Type: application/json" ` +
       `-d '{"sender":"${agent.name}","text":"YOUR_REPLY"${pidBody}}'`
     );
@@ -404,6 +438,9 @@ export class ChatRoom extends EventEmitter {
     const held = new Set(lockKeysFor(queued));
     this.wakesInFlight.add(name);
     let moved = false;
+    // Set by the post-text guard: the text is in the terminal and the agent's
+    // registration changed to what is still that terminal. Never replay; say so.
+    let partialLine = false;
     try {
       const outcome = await wakes.run([...held], this.warnKey(name), async () => {
         const agent = this.agents.get(name);
@@ -415,19 +452,53 @@ export class ChatRoom extends EventEmitter {
         // the full set instead.
         if (lockKeysFor(agent).some((k) => !held.has(k))) return "moved";
         const prompt = this.buildWakePrompt(sender, agent);
+        partialLine = false;
         console.log(`  → Injecting into ${name} (${identity})...`);
         try {
           await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv(), undefined, {
-            // Between the WezTerm failure and the console fallback the target
+            // Orca's own input path first when the join bound a handle.
+            orcaTerminal: agent.orcaTerminal,
+            // Between the Orca or WezTerm failure and the console fallback the target
             // must still be this session; otherwise skip or re-queue.
             fallbackGuard: () => {
               const live = this.agents.get(name);
               if (this.destroyed || !live?.active) return "skip";
               if (terminalIdentity(live) !== identity) return "moved";
-              // Same rule as before the WezTerm attempt: if the terminal now
+              // Same rule as before the first attempt: if the terminal now
               // needs locks this wake does not hold, queue again under the full set.
               if (lockKeysFor(live).some((k) => !held.has(k))) return "moved";
               return "proceed";
+            },
+            // Once the text is in the terminal the same attempt finishes the
+            // submission (the delayed second Enter and its one recovery), over
+            // the route that typed it, under the locks it already holds.
+            //
+            // Lock growth is ignored here on purpose. This attempt still holds
+            // every lock it took, so no other wake of ours can type into the
+            // terminal it typed into until it releases them; a registration
+            // that joined meanwhile can only add keys that lead to that same
+            // terminal. Stopping now would leave a prompt half-typed, and a
+            // later wake for this or another agent would type behind it: the
+            // worse outcome. Only two things stop it:
+            afterTextGuard: () => {
+              const live = this.agents.get(name);
+              if (this.destroyed || !live?.active) {
+                // The agent left: nobody to submit for. The text stays.
+                console.log(`  [wake] ${name} left after the prompt reached ${identity}; the unsent text remains in that terminal`);
+                return "skip";
+              }
+              if (terminalIdentity(live) === identity) return "proceed";
+              // The registration changed. Same terminal (by lock equivalence,
+              // transitively through live registrations): never replay, warn.
+              if (sameTerminal(held, live)) {
+                console.log(`  [wake] ${name}'s registration changed (${identity} -> ${terminalIdentity(live)}) but it is the terminal holding the prompt; not typing it again`);
+                partialLine = true;
+                return "skip";
+              }
+              // A different terminal: the old one keeps the unsent text; the
+              // new one gets a fresh wake once this attempt releases its locks.
+              console.log(`  [wake] ${name} moved to a different terminal (${terminalIdentity(live)}) after the prompt reached ${identity}; that terminal keeps the unsent text; waking the new one`);
+              return "moved";
             },
           });
         } catch (err) {
@@ -442,13 +513,20 @@ export class ChatRoom extends EventEmitter {
       });
       if (outcome.ok) {
         moved = outcome.result === "moved";
+        if (partialLine && !this.destroyed && this.agents.has(name)) {
+          this.addSystem(`Could not submit the prompt to ${name}; the text is in their input box.`);
+        }
       } else {
         console.error(`  ✗ Injection failed for ${name} (${outcome.kind}, ${outcome.attempts} attempt(s)): ${outcome.reason}`);
         // Tell the room: a mention that did not land must not look landed.
         // (Not after teardown: a late line would recreate the deleted log.)
         if (outcome.warn && !this.destroyed && this.agents.has(name)) {
           this.addSystem(
-            outcome.kind === "no-console"
+            outcome.kind === "partial"
+              ? `Could not submit the prompt to ${name}; the text is in their input box.`
+              : outcome.kind === "no-console" && /^orca /i.test(outcome.reason ?? "")
+              ? `Could not wake ${name}: their Orca terminal is not reachable from this server (${outcome.reason}). They will see mentions only when they read on their own schedule, or after rejoining with a live orcaTerminal.`
+              : outcome.kind === "no-console"
               ? `Could not wake ${name}: no console reachable from this server (remote session, or joined without its real terminal pid). They will see mentions only when they read on their own schedule.`
               : `Could not wake ${name} just now (terminal injection failed after a retry). They will see this on their next read.`
           );
@@ -584,7 +662,7 @@ export class ChatRoom extends EventEmitter {
     // one starts clean under the same terminal.
     liveTerminals.delete(this.warnKey(oldName));
     wakes.release(this.warnKey(oldName));
-    liveTerminals.set(this.warnKey(newName), { pid: agent.pid, weztermPaneId: agent.weztermPaneId });
+    liveTerminals.set(this.warnKey(newName), terminalRefOf(agent));
     wakes.forget(this.warnKey(newName));
     this.addSystem(`${oldName} is now ${newName}`);
     this.emit("room", { type: "rename", data: { oldName, newName, agent } });
