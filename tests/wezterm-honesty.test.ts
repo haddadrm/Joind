@@ -60,36 +60,42 @@ describe("resolvePaneForJoin", () => {
   });
 });
 
-describe("join generations (manager-level, per name and terminal)", () => {
-  it("a join that waited is refused after a newer join for the same name and terminal, in any room, or a departure", () => {
+describe("join generations (manager-level: name+terminal across rooms, room+name across terminals)", () => {
+  it("refuses a waited join after a newer one for the same terminal anywhere, or the same room from any terminal, or a departure", () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-gen-"));
     const manager = new ConversationManager(dir);
     try {
       const x = manager.createConversation("x");
-      const term = ConversationManager.joinTerminalKey(100, 7);
-      expect(term).toBe("pid:100");
+      const y = manager.createConversation("y");
+      expect(ConversationManager.joinTerminalKey(100, 7)).toBe("pid:100");
       expect(ConversationManager.joinTerminalKey(0, 7)).toBe("pane:7");
       expect(ConversationManager.joinTerminalKey(undefined, undefined)).toBe("pid:0");
       // Older join into X, newer join for the same terminal into Y: X is stale.
-      const intoX = manager.beginJoin("Claude", term);
-      const intoY = manager.beginJoin("Claude", term);
-      expect(manager.joinIsCurrent("Claude", term, intoY)).toBe(true);
-      expect(manager.joinIsCurrent("Claude", term, intoX)).toBe(false);
-      // A different terminal of the same name is an independent registration.
-      const other = manager.beginJoin("Claude", "pid:200");
-      expect(manager.joinIsCurrent("Claude", term, intoY)).toBe(true);
-      expect(manager.joinIsCurrent("Claude", "pid:200", other)).toBe(true);
+      const intoX = manager.beginJoin("Claude", "pid:100", x.id);
+      const intoY = manager.beginJoin("Claude", "pid:100", y.id);
+      expect(manager.joinIsCurrent(intoY)).toBe(true);
+      expect(manager.joinIsCurrent(intoX)).toBe(false);
+      // Round-9 case: a different terminal joining the SAME room supersedes the older one there.
+      const oldTerm = manager.beginJoin("Claude", "pid:100", x.id);
+      const newTerm = manager.beginJoin("Claude", "pid:200", x.id);
+      expect(manager.joinIsCurrent(newTerm)).toBe(true);
+      expect(manager.joinIsCurrent(oldTerm)).toBe(false);
+      // Control: a different terminal joining a DIFFERENT room leaves a pending join alone.
+      const pendingX = manager.beginJoin("Claude", "pid:300", x.id);
+      const otherY = manager.beginJoin("Claude", "pid:400", y.id);
+      expect(manager.joinIsCurrent(pendingX)).toBe(true);
+      expect(manager.joinIsCurrent(otherY)).toBe(true);
       // A departure for the name (even with no binding yet) ends every pending join for it.
       manager.supersedeJoins("Claude");
-      expect(manager.joinIsCurrent("Claude", term, intoY)).toBe(false);
-      expect(manager.joinIsCurrent("Claude", "pid:200", other)).toBe(false);
-      // A room-level leave reaches the manager through the room event.
-      const gen = manager.beginJoin("Claude", term);
+      expect(manager.joinIsCurrent(pendingX)).toBe(false);
+      expect(manager.joinIsCurrent(otherY)).toBe(false);
+      // A room-level leave reaches the manager through the room event; applying a join does not supersede itself.
+      const tok = manager.beginJoin("Claude", "pid:100", x.id);
       const room = manager.getRoom(x.id)!;
       room.join("Claude", 100, 7);
-      expect(manager.joinIsCurrent("Claude", term, gen)).toBe(true); // applying a join does not supersede itself
+      expect(manager.joinIsCurrent(tok)).toBe(true);
       room.leave("Claude");
-      expect(manager.joinIsCurrent("Claude", term, gen)).toBe(false);
+      expect(manager.joinIsCurrent(tok)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

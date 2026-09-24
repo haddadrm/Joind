@@ -24,6 +24,15 @@ export interface ConversationMeta {
   starred: boolean;
 }
 
+/** Handle for a join that is awaiting validation; see beginJoin. */
+export interface JoinToken {
+  agentName: string;
+  terminal: string;
+  conversationId: string;
+  terminalGen: number;
+  roomGen: number;
+}
+
 export class ConversationManager extends EventEmitter {
   private conversations = new Map<string, ChatRoom>();
   private meta = new Map<string, ConversationMeta>();
@@ -277,33 +286,47 @@ export class ConversationManager extends EventEmitter {
   // -----------------------------------------------------------------------
 
   // ---- Join generations -------------------------------------------------
-  // A join that awaits validation takes a generation first and applies only
-  // if it is still the latest for that name and terminal afterwards. The
-  // record lives here, not in a room: a newer join into ANOTHER room, or a
-  // departure before the first join ever landed, must supersede it too.
-  // Different terminals of one name stay independent registrations.
-  private joinGenerations = new Map<string, number>();
+  // A join that awaits validation takes a token first and applies only if
+  // BOTH of its records are still the latest afterwards:
+  //   - name + terminal, across rooms: a newer join for the same terminal
+  //     into any other room supersedes it (routing must follow the newest);
+  //   - room + name: a newer join for the same name into the same room from
+  //     any terminal supersedes it (the room holds one agent per name, and
+  //     it must be the newest session).
+  // A departure for the name ends every pending join for it, even before a
+  // first binding exists. Different terminals of one name in different
+  // rooms stay independent registrations.
+  private joinTerminalGens = new Map<string, number>();
+  private joinRoomGens = new Map<string, number>();
 
   static joinTerminalKey(pid: number | undefined, paneId: number | undefined): string {
     return pid && pid > 0 ? `pid:${pid}` : paneId != null ? `pane:${paneId}` : "pid:0";
   }
 
-  beginJoin(agentName: string, terminal: string): number {
-    const key = `${agentName}|${terminal}`;
-    const gen = (this.joinGenerations.get(key) ?? 0) + 1;
-    this.joinGenerations.set(key, gen);
-    return gen;
+  beginJoin(agentName: string, terminal: string, conversationId: string): JoinToken {
+    const tKey = `${agentName}|${terminal}`;
+    const rKey = `${conversationId}|${agentName}`;
+    const t = (this.joinTerminalGens.get(tKey) ?? 0) + 1;
+    const r = (this.joinRoomGens.get(rKey) ?? 0) + 1;
+    this.joinTerminalGens.set(tKey, t);
+    this.joinRoomGens.set(rKey, r);
+    return { agentName, terminal, conversationId, terminalGen: t, roomGen: r };
   }
 
-  joinIsCurrent(agentName: string, terminal: string, generation: number): boolean {
-    return this.joinGenerations.get(`${agentName}|${terminal}`) === generation;
+  joinIsCurrent(token: JoinToken): boolean {
+    return this.joinTerminalGens.get(`${token.agentName}|${token.terminal}`) === token.terminalGen &&
+      this.joinRoomGens.get(`${token.conversationId}|${token.agentName}`) === token.roomGen;
   }
 
-  /** A departure for this name, from any terminal, ends every pending join for it. */
+  /** A departure for this name, from any terminal and room, ends every pending join for it. */
   supersedeJoins(agentName: string): void {
     const prefix = `${agentName}|`;
-    for (const [key, gen] of this.joinGenerations) {
-      if (key.startsWith(prefix)) this.joinGenerations.set(key, gen + 1);
+    for (const [key, gen] of this.joinTerminalGens) {
+      if (key.startsWith(prefix)) this.joinTerminalGens.set(key, gen + 1);
+    }
+    const suffix = `|${agentName}`;
+    for (const [key, gen] of this.joinRoomGens) {
+      if (key.endsWith(suffix)) this.joinRoomGens.set(key, gen + 1);
     }
   }
 

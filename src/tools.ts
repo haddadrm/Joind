@@ -197,8 +197,7 @@ export function registerTools(
       if (!manager.getRoom(convId)) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      const joinTerminal = ConversationManager.joinTerminalKey(pid, weztermPaneId);
-      const joinGen = manager.beginJoin(name, joinTerminal);
+      const joinToken = manager.beginJoin(name, ConversationManager.joinTerminalKey(pid, weztermPaneId), convId);
 
       // Bind a WezTerm pane only when it is live and really this process's.
       const { paneId: resolvedPaneId, note: paneNote } = await resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager));
@@ -210,7 +209,7 @@ export function registerTools(
       if (!room) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      if (!manager.joinIsCurrent(name, joinTerminal, joinGen)) {
+      if (!manager.joinIsCurrent(joinToken)) {
         return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
