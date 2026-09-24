@@ -57,6 +57,7 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
 
   In `tests/inject-fixes-gate1.test.ts`, the 7 round-2 tests of the delivered flag and Enter-only mode are deleted and 4 finish-in-place tests take their place. Suite 258. Gate round 4 adds the bridge departure-and-rejoin sequence as an eighth room-level case (one prompt, no Enter, the partial line), failing on 1f1a070. Suite 259.
 - Codex gate round 5 (1 finding, closed): `--env-file-if-exists` and the other value-taking Node options that were missing (`--localstorage-file`, `--run`, the test and profiling options) no longer hide the entry script; both the separate-value and the `=` form are tested.
+- Codex gate round 6 (1 finding, closed): enumerating Node's value-taking options cannot keep up with Node, so the entry-script parser now also treats a bare word (no path separator, no script extension) after any unknown option as that option's value, and normalizes `_` to `-` in long option names as Node does. Documented limit: a boolean option followed by an extension-less script name reads as a value and yields the default plan.
 
 ## 2026-09-24: Orca Wake-Ups
 

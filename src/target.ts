@@ -89,9 +89,31 @@ const INLINE_PROGRAM = new Set(["-e", "--eval", "-p", "--print"]);
 const RUN_SUBCOMMAND_RUNTIMES = new Set(["bun", "deno"]);
 
 /**
+ * Node accepts `_` for `-` inside long option names; compare the hyphen form.
+ * Short options keep their case (node's -C takes a value, -c does not).
+ */
+function normalizeOption(flag: string): string {
+  return flag.startsWith("--") ? flag.replace(/_/g, "-") : flag;
+}
+
+/** Does a token look like a script a runtime would execute: a path (has a
+ *  separator) or a file with a script extension? A bare word such as
+ *  `ExperimentalWarning`, `5000` or `.env` does not. */
+export function looksLikeScript(token: string): boolean {
+  if (/[\/]/.test(token)) return true;
+  return /\.(c|m)?[jt]sx?$/i.test(token);
+}
+
+/**
  * The entry script a runtime runs, or null when there is none (an inline
  * `-e` program, a bare REPL). Options and their values are skipped, `--`
- * ends the options, and a `run` subcommand is stepped over.
+ * ends the options, and a `run` subcommand is stepped over. Node's list of
+ * value-taking options is long and grows with every release, so the known
+ * ones are skipped by name and, for any OTHER option, a following bare word
+ * (no path separator, no script extension) is taken as its value rather
+ * than as the entry script. The one thing this cannot tell apart is a
+ * boolean option followed by an extension-less script name; node itself
+ * would run that file, and this classifier then reports the default plan.
  */
 export function entryScript(args: string[], runtime = "node"): string | null {
   let i = 0;
@@ -99,11 +121,15 @@ export function entryScript(args: string[], runtime = "node"): string | null {
   while (i < args.length) {
     const a = args[i];
     if (a === "--") return args[i + 1] ?? null;
-    // Case matters: node's -C takes a value, its -c does not.
-    const flag = a.split("=")[0];
+    const flag = normalizeOption(a.split("=")[0]);
     if (INLINE_PROGRAM.has(flag)) return null;
     if (a.startsWith("-")) {
-      i += OPTIONS_WITH_VALUE.has(flag) && !a.includes("=") ? 2 : 1;
+      if (a.includes("=")) { i += 1; continue; }
+      if (OPTIONS_WITH_VALUE.has(flag)) { i += 2; continue; }
+      const next = args[i + 1];
+      // Unknown option: a bare word after it is its value, a script is the entry.
+      if (next != null && !next.startsWith("-") && !looksLikeScript(next) && !(!sawSubcommand && next === "run")) { i += 2; continue; }
+      i += 1;
       continue;
     }
     if (!sawSubcommand && a === "run") { sawSubcommand = true; i++; continue; }
