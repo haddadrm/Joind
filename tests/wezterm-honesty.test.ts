@@ -67,30 +67,39 @@ describe("join generations (manager-level: name+terminal across rooms, room+name
     try {
       const x = manager.createConversation("x");
       const y = manager.createConversation("y");
-      expect(ConversationManager.joinTerminalKey(100, 7)).toBe("pid:100");
-      expect(ConversationManager.joinTerminalKey(0, 7)).toBe("pane:7");
-      expect(ConversationManager.joinTerminalKey(undefined, undefined)).toBe("pid:0");
+      expect(ConversationManager.joinTerminalKeys(100, 7)).toEqual(["pid:100", "pane:7"]);
+      expect(ConversationManager.joinTerminalKeys(0, 7)).toEqual(["pane:7"]);
+      expect(ConversationManager.joinTerminalKeys(undefined, undefined)).toEqual(["pid:0"]);
       // Older join into X, newer join for the same terminal into Y: X is stale.
-      const intoX = manager.beginJoin("Claude", "pid:100", x.id);
-      const intoY = manager.beginJoin("Claude", "pid:100", y.id);
+      const intoX = manager.beginJoin("Claude", ["pid:100"], x.id);
+      const intoY = manager.beginJoin("Claude", ["pid:100"], y.id);
       expect(manager.joinIsCurrent(intoY)).toBe(true);
       expect(manager.joinIsCurrent(intoX)).toBe(false);
       // Round-9 case: a different terminal joining the SAME room supersedes the older one there.
-      const oldTerm = manager.beginJoin("Claude", "pid:100", x.id);
-      const newTerm = manager.beginJoin("Claude", "pid:200", x.id);
+      const oldTerm = manager.beginJoin("Claude", ["pid:100"], x.id);
+      const newTerm = manager.beginJoin("Claude", ["pid:200"], x.id);
       expect(manager.joinIsCurrent(newTerm)).toBe(true);
       expect(manager.joinIsCurrent(oldTerm)).toBe(false);
       // Control: a different terminal joining a DIFFERENT room leaves a pending join alone.
-      const pendingX = manager.beginJoin("Claude", "pid:300", x.id);
-      const otherY = manager.beginJoin("Claude", "pid:400", y.id);
+      const pendingX = manager.beginJoin("Claude", ["pid:300"], x.id);
+      const otherY = manager.beginJoin("Claude", ["pid:400"], y.id);
       expect(manager.joinIsCurrent(pendingX)).toBe(true);
       expect(manager.joinIsCurrent(otherY)).toBe(true);
+      // Round-10 case: a join carrying pid AND pane is superseded by a newer join sharing only the pane.
+      const withBoth = manager.beginJoin("Claude", ["pid:500", "pane:7"], x.id);
+      const paneOnlyY = manager.beginJoin("Claude", ["pane:7"], y.id);
+      expect(manager.joinIsCurrent(paneOnlyY)).toBe(true);
+      expect(manager.joinIsCurrent(withBoth)).toBe(false);
+      const withBoth2 = manager.beginJoin("Claude", ["pid:600", "pane:8"], x.id);
+      const otherPidSamePane = manager.beginJoin("Claude", ["pid:700", "pane:8"], y.id);
+      expect(manager.joinIsCurrent(otherPidSamePane)).toBe(true);
+      expect(manager.joinIsCurrent(withBoth2)).toBe(false);
       // A departure for the name (even with no binding yet) ends every pending join for it.
       manager.supersedeJoins("Claude");
       expect(manager.joinIsCurrent(pendingX)).toBe(false);
       expect(manager.joinIsCurrent(otherY)).toBe(false);
       // A room-level leave reaches the manager through the room event; applying a join does not supersede itself.
-      const tok = manager.beginJoin("Claude", "pid:100", x.id);
+      const tok = manager.beginJoin("Claude", ["pid:100", "pane:7"], x.id);
       const room = manager.getRoom(x.id)!;
       room.join("Claude", 100, 7);
       expect(manager.joinIsCurrent(tok)).toBe(true);

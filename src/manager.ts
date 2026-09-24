@@ -27,9 +27,9 @@ export interface ConversationMeta {
 /** Handle for a join that is awaiting validation; see beginJoin. */
 export interface JoinToken {
   agentName: string;
-  terminal: string;
   conversationId: string;
-  terminalGen: number;
+  /** one generation per terminal alias the join carries (pid and pane) */
+  terminalGens: Record<string, number>;
   roomGen: number;
 }
 
@@ -299,23 +299,34 @@ export class ConversationManager extends EventEmitter {
   private joinTerminalGens = new Map<string, number>();
   private joinRoomGens = new Map<string, number>();
 
-  static joinTerminalKey(pid: number | undefined, paneId: number | undefined): string {
-    return pid && pid > 0 ? `pid:${pid}` : paneId != null ? `pane:${paneId}` : "pid:0";
+  /** Every alias a binding can match on (bindAgent merges by pid OR pane),
+   *  so a newer join sharing either one supersedes the older. */
+  static joinTerminalKeys(pid: number | undefined, paneId: number | undefined): string[] {
+    const keys: string[] = [];
+    if (pid && pid > 0) keys.push(`pid:${pid}`);
+    if (paneId != null) keys.push(`pane:${paneId}`);
+    return keys.length > 0 ? keys : ["pid:0"];
   }
 
-  beginJoin(agentName: string, terminal: string, conversationId: string): JoinToken {
-    const tKey = `${agentName}|${terminal}`;
+  beginJoin(agentName: string, terminals: string[], conversationId: string): JoinToken {
+    const terminalGens: Record<string, number> = {};
+    for (const terminal of new Set(terminals)) {
+      const tKey = `${agentName}|${terminal}`;
+      const t = (this.joinTerminalGens.get(tKey) ?? 0) + 1;
+      this.joinTerminalGens.set(tKey, t);
+      terminalGens[terminal] = t;
+    }
     const rKey = `${conversationId}|${agentName}`;
-    const t = (this.joinTerminalGens.get(tKey) ?? 0) + 1;
     const r = (this.joinRoomGens.get(rKey) ?? 0) + 1;
-    this.joinTerminalGens.set(tKey, t);
     this.joinRoomGens.set(rKey, r);
-    return { agentName, terminal, conversationId, terminalGen: t, roomGen: r };
+    return { agentName, conversationId, terminalGens, roomGen: r };
   }
 
   joinIsCurrent(token: JoinToken): boolean {
-    return this.joinTerminalGens.get(`${token.agentName}|${token.terminal}`) === token.terminalGen &&
-      this.joinRoomGens.get(`${token.conversationId}|${token.agentName}`) === token.roomGen;
+    for (const [terminal, gen] of Object.entries(token.terminalGens)) {
+      if (this.joinTerminalGens.get(`${token.agentName}|${terminal}`) !== gen) return false;
+    }
+    return this.joinRoomGens.get(`${token.conversationId}|${token.agentName}`) === token.roomGen;
   }
 
   /** A departure for this name, from any terminal and room, ends every pending join for it. */
