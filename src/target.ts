@@ -23,6 +23,8 @@
  */
 
 import { execFile } from "child_process";
+import { realpath as fsRealpath } from "fs/promises";
+import { isAbsolute } from "path";
 
 export type AgentKind = "codex" | "copilot" | "default";
 
@@ -76,9 +78,21 @@ function stem(token: string): string {
  *      claude, claude-code; .exe and similar stripped), in which case the
  *      arguments are never read: `claude.exe --resume codex-notes` is Claude;
  *   2. `gh copilot`;
- *   3. for a runtime (node, bun, deno, tsx, ts-node), the FIRST argument,
- *      left to right, whose path contains node_modules/<known package>;
- *   4. anything else: the default plan.
+ *   3. for a runtime (node, bun, deno, tsx, ts-node) whose first argument
+ *      is a script (does not start with "-"), that argument alone, never a
+ *      later one: its own name if it is a known application name (a global
+ *      bin link such as /usr/local/bin/copilot), else a node_modules/<known
+ *      package> in its path, else (in the async lookup only, see
+ *      classifyTarget) the same two checks on its realpath, since a global
+ *      bin symlink resolves into node_modules/<package>/bin/...; nothing
+ *      found is the default plan (gate round 8: scanning later arguments
+ *      made `node /usr/local/bin/claude --add-dir .../node_modules/@openai/codex`
+ *      read as Codex);
+ *   4. for a runtime whose first argument is an option, the weaker fallback:
+ *      the first argument anywhere whose path contains node_modules/<known
+ *      package> (so `node --require x .../@openai/codex/bin/codex.js` is
+ *      Codex and `node --trace-warnings server codex.js` is not);
+ *   5. anything else: the default plan.
  * Known losses, accepted: a Codex source checkout run as
  * `node codex-cli/dist/cli.js` has no package path and gets the single-Enter
  * default; and an absurd `node --require /x/node_modules/@openai/codex/y.js
@@ -122,26 +136,90 @@ function planFor(kind: AgentKind): SubmitPlan {
   return kind === "codex" ? CODEX_PLAN : kind === "copilot" ? COPILOT_PLAN : DEFAULT_PLAN;
 }
 
-/** Classify a process command line. Pure; null or empty is the default plan. */
-export function classifyCommandLine(commandLine: string | null | undefined): SubmitPlan {
-  if (!commandLine || !commandLine.trim()) return DEFAULT_PLAN;
+/** A script path's own identity: its name, else a known package in it. */
+function kindOfScript(path: string): AgentKind | null {
+  return kindOfName(stem(path)) ?? knownPackageIn(path);
+}
+
+interface Identification {
+  plan: SubmitPlan;
+  /** A runtime's first-argument script that neither its name nor its path
+   *  identified: the async lookup may resolve it (symlinks) and look again. */
+  unresolvedScript?: string;
+}
+
+function identify(commandLine: string | null | undefined): Identification {
+  if (!commandLine || !commandLine.trim()) return { plan: DEFAULT_PLAN };
   const t = tokens(commandLine);
-  if (t.length === 0) return DEFAULT_PLAN;
+  if (t.length === 0) return { plan: DEFAULT_PLAN };
   const exeStem = stem(t[0]);
   // 1. The executable names the application: its arguments are never read.
   const own = kindOfName(exeStem);
-  if (own !== null) return planFor(own);
+  if (own !== null) return { plan: planFor(own) };
   // 2. `gh copilot ...`: the extension runs under gh with "copilot" as its verb.
-  if (exeStem === "gh" && t[1]?.toLowerCase() === "copilot") return COPILOT_PLAN;
-  // 3. A runtime: the first argument carrying a known package path decides.
+  if (exeStem === "gh" && t[1]?.toLowerCase() === "copilot") return { plan: COPILOT_PLAN };
   if (RUNTIMES.has(exeStem)) {
-    for (const arg of t.slice(1)) {
+    // Bun and Deno put a fixed `run` subcommand before their arguments; that
+    // one word is stepped over (a subcommand, not an option to parse).
+    const args = (exeStem === "bun" || exeStem === "deno") && t[1] === "run" ? t.slice(2) : t.slice(1);
+    const first = args[0];
+    if (first !== undefined && !first.startsWith("-")) {
+      // 3. The first argument is the script: it alone decides; later
+      //    arguments belong to the application and are never read.
+      const kind = kindOfScript(first);
+      if (kind !== null) return { plan: planFor(kind) };
+      return { plan: DEFAULT_PLAN, unresolvedScript: first };
+    }
+    // 4. Options first: the weaker fallback, the first known package path
+    //    anywhere on the line.
+    for (const arg of args) {
       const kind = knownPackageIn(arg);
-      if (kind !== null) return planFor(kind);
+      if (kind !== null) return { plan: planFor(kind) };
     }
   }
-  // 4. Nothing we can identify without guessing.
-  return DEFAULT_PLAN;
+  // 5. Nothing we can identify without guessing.
+  return { plan: DEFAULT_PLAN };
+}
+
+/** Classify a process command line. Pure, no I/O: a script that only a
+ *  symlink would identify is the default plan here (classifyTarget resolves
+ *  it). Null or empty is the default plan. */
+export function classifyCommandLine(commandLine: string | null | undefined): SubmitPlan {
+  return identify(commandLine).plan;
+}
+
+export type Realpath = (path: string) => Promise<string>;
+
+/**
+ * classifyCommandLine plus the one filesystem step: a runtime's first-argument
+ * script that its name and path did not identify is resolved with realpath
+ * (only when absolute: a relative path is relative to the target's working
+ * directory, which is not ours), and the resolved path gets the same two
+ * checks. Bounded by `deadlineMs`; an error or timeout is the default plan.
+ */
+export async function classifyCommandLineResolved(
+  commandLine: string | null | undefined,
+  opts: { realpath?: Realpath; deadlineMs?: number } = {}
+): Promise<SubmitPlan> {
+  const found = identify(commandLine);
+  const script = found.unresolvedScript;
+  if (script === undefined || !(isAbsolute(script) || script.startsWith("/"))) return found.plan;
+  const realpath = opts.realpath ?? ((p: string) => fsRealpath(p));
+  const remaining = Math.max(0, opts.deadlineMs ?? LOOKUP_TIMEOUT_MS);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const resolved = await Promise.race([
+      realpath(script),
+      new Promise<null>((r) => { timer = setTimeout(() => r(null), remaining); }),
+    ]);
+    if (resolved === null) return DEFAULT_PLAN;
+    const kind = kindOfScript(resolved);
+    return kind === null ? DEFAULT_PLAN : planFor(kind);
+  } catch {
+    return DEFAULT_PLAN;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export type CommandLineReader = (pid: number, platform: NodeJS.Platform) => Promise<string | null>;
@@ -170,6 +248,9 @@ const inFlight = new Map<number, Promise<SubmitPlan>>();
 
 export interface ClassifyDeps {
   read?: CommandLineReader;
+  /** Injectable for tests; defaults to fs.promises.realpath. */
+  realpath?: Realpath;
+  now?: () => number;
 }
 
 /**
@@ -181,8 +262,12 @@ export function classifyTarget(pid: number, platform: NodeJS.Platform = process.
   const shared = inFlight.get(pid);
   if (shared) return shared;
   const read = deps.read ?? readCommandLine;
+  const now = deps.now ?? Date.now;
+  // One budget for the whole lookup: reading the command line and, when
+  // needed, resolving the script it runs.
+  const started = now();
   const plan: Promise<SubmitPlan> = read(pid, platform).then(
-    (line) => classifyCommandLine(line),
+    (line) => classifyCommandLineResolved(line, { realpath: deps.realpath, deadlineMs: LOOKUP_TIMEOUT_MS - (now() - started) }),
     () => DEFAULT_PLAN
   ).finally(() => {
     if (inFlight.get(pid) === plan) inFlight.delete(pid);

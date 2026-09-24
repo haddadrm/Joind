@@ -3,7 +3,10 @@ import {
   inject, injectWezTerm, injectUnix, PartialDeliveryError, WakeFallbackAborted,
   type InjectBackends, type SendTextProcess, type SpawnSendText, type UnixExec,
 } from "../src/inject.js";
-import { classifyCommandLine, classifyTarget, forgetTarget, resetTargetCache, CODEX_PLAN, COPILOT_PLAN, DEFAULT_PLAN, type SubmitPlan } from "../src/target.js";
+import { classifyCommandLine, classifyCommandLineResolved, classifyTarget, forgetTarget, resetTargetCache, CODEX_PLAN, COPILOT_PLAN, DEFAULT_PLAN, type SubmitPlan } from "../src/target.js";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { classifyWakeFailure, WakeCoordinator } from "../src/wake.js";
 
 // Codex gate round 1 on feat/inject-fixes (92603bb): one test (or group) per
@@ -349,5 +352,81 @@ describe("gate round 3: once the text is in, the same attempt finishes in place"
     await expect(inject(100, "hello", 7, undefined, undefined, backends, { fallbackGuard: () => (left ? "skip" : "proceed") }))
       .rejects.toBeInstanceOf(WakeFallbackAborted);
     expect(log).toEqual([JSON.stringify("hello\r")]);
+  });
+});
+
+describe("gate round 8: a runtime's first-argument script alone decides, through its symlink when needed", () => {
+  const pure: Array<[string, string, SubmitPlan]> = [
+    ["a global bin link named copilot", "node /usr/local/bin/copilot", COPILOT_PLAN],
+    ["a bun global bin link named copilot", "node /home/u/.bun/bin/copilot", COPILOT_PLAN],
+    ["a project node_modules/.bin link named copilot", "node /p/node_modules/.bin/copilot", COPILOT_PLAN],
+    ["claude as the script, a codex package path later in its arguments (the gate's false positive)", "node /usr/local/bin/claude --add-dir /project/node_modules/@openai/codex", DEFAULT_PLAN],
+    ["claude as the script", "node /usr/local/bin/claude", DEFAULT_PLAN],
+    ["a bin link under another name is not resolved by the pure classifier", "node /usr/local/bin/cx", DEFAULT_PLAN],
+  ];
+  for (const [label, line, plan] of pure) {
+    it(`pure: ${label}`, () => { expect(classifyCommandLine(line)).toEqual(plan); });
+  }
+
+  const links: Record<string, string> = {
+    "/usr/local/bin/cx": "/usr/lib/node_modules/@openai/codex/bin/codex.js",
+    "/home/u/.bun/bin/ghcp": "/home/u/.bun/install/global/node_modules/@github/copilot/index.js",
+    "/p/node_modules/.bin/agent": "/p/node_modules/@openai/codex/bin/codex.js",
+  };
+  const fakeRealpath = async (path: string): Promise<string> => {
+    const target = links[path];
+    if (target === undefined) throw new Error(`ENOENT: ${path}`);
+    return target;
+  };
+  const resolved: Array<[string, string, SubmitPlan]> = [
+    ["a global bin symlink into @openai/codex", "node /usr/local/bin/cx", CODEX_PLAN],
+    ["a bun global bin symlink into @github/copilot", "node /home/u/.bun/bin/ghcp", COPILOT_PLAN],
+    ["a node_modules/.bin symlink into @openai/codex", "node /p/node_modules/.bin/agent", CODEX_PLAN],
+    ["a script realpath cannot resolve", "node /usr/local/bin/missing", DEFAULT_PLAN],
+  ];
+  for (const [label, line, plan] of resolved) {
+    it(`resolved: ${label}`, async () => { expect(await classifyCommandLineResolved(line, { realpath: fakeRealpath })).toEqual(plan); });
+  }
+
+  it("a realpath that never answers is the default plan once the deadline passes", async () => {
+    const never = (): Promise<string> => new Promise<string>(() => {});
+    expect(await classifyCommandLineResolved("node /usr/local/bin/cx", { realpath: never, deadlineMs: 20 })).toEqual(DEFAULT_PLAN);
+  });
+
+  it("realpath is never asked for a relative script, a script already identified, or an options-first line", async () => {
+    const asked: string[] = [];
+    const spy = async (path: string): Promise<string> => { asked.push(path); return path; };
+    await classifyCommandLineResolved("node bin/cx", { realpath: spy });
+    await classifyCommandLineResolved("node /usr/local/bin/copilot", { realpath: spy });
+    await classifyCommandLineResolved("node --trace-warnings server codex.js", { realpath: spy });
+    expect(asked).toEqual([]);
+  });
+
+  it("classifyTarget resolves the script on the per-wake read", async () => {
+    resetTargetCache();
+    const read = async (): Promise<string | null> => "node /usr/local/bin/cx";
+    expect(await classifyTarget(4242, "linux", { read, realpath: fakeRealpath })).toEqual(CODEX_PLAN);
+  });
+
+  it("a real symlink into node_modules/@openai/codex resolves to Codex (skipped where symlinks need privilege)", async (ctx) => {
+    const root = mkdtempSync(join(tmpdir(), "joind-symlink-"));
+    try {
+      const pkgBin = join(root, "lib", "node_modules", "@openai", "codex", "bin");
+      mkdirSync(pkgBin, { recursive: true });
+      const target = join(pkgBin, "codex.js");
+      writeFileSync(target, "");
+      mkdirSync(join(root, "bin"));
+      const link = join(root, "bin", "cx");
+      try {
+        symlinkSync(target, link, "file");
+      } catch {
+        ctx.skip();
+        return;
+      }
+      expect(classifyCommandLine(`node "${link}"`)).toEqual(DEFAULT_PLAN);
+      expect(await classifyCommandLineResolved(`node "${link}"`)).toEqual(CODEX_PLAN);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
