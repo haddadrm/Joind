@@ -2,8 +2,12 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { resolvePaneForJoin, type PaneResolverDeps } from "../src/tools.js";
-import { isInsideWezTermTree } from "../src/terminals.js";
+import { isInsideWezTermTree, parseCimDate, type ProcessEntry } from "../src/terminals.js";
 import { inject } from "../src/inject.js";
+import { ChatRoom } from "../src/room.js";
+import { ConversationManager } from "../src/manager.js";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
 
 function deps(over: Partial<PaneResolverDeps> = {}): PaneResolverDeps & { lines: string[] } {
   const lines: string[] = [];
@@ -25,43 +29,106 @@ describe("resolvePaneForJoin", () => {
     expect(d.lines).toEqual([]);
   });
 
-  it("drops a pane the joining process does not own (field case: pane 0 from a WMI-started agent)", async () => {
+  it("rejects (null, so the stores clear it) a pane the joining process does not own: pane 0 from a WMI-started agent", async () => {
     const d = deps();
     const r = await resolvePaneForJoin("Claude", 32512, 0, d);
-    expect(r.paneId).toBeUndefined();
+    expect(r.paneId).toBeNull();
     expect(r.note).toMatch(/pid 32512 does not run inside WezTerm/);
     expect(d.lines).toHaveLength(1);
   });
 
-  it("drops a pane that is not live and one offered when no WezTerm is reachable", async () => {
-    expect((await resolvePaneForJoin("A", 100, 9, deps())).note).toMatch(/not a live WezTerm pane/);
-    expect((await resolvePaneForJoin("A", 100, 3, deps({ checkWezTerm: async () => false }))).note).toMatch(/no WezTerm reachable/);
+  it("rejects a pane that is not live and one offered when no WezTerm is reachable", async () => {
+    const a = await resolvePaneForJoin("A", 100, 9, deps());
+    expect(a.paneId).toBeNull(); expect(a.note).toMatch(/not a live WezTerm pane/);
+    const b = await resolvePaneForJoin("A", 100, 3, deps({ checkWezTerm: async () => false }));
+    expect(b.paneId).toBeNull(); expect(b.note).toMatch(/no WezTerm reachable/);
+    // Nothing requested and nothing reachable: nothing learned, keep whatever was held.
+    expect((await resolvePaneForJoin("A", 100, undefined, deps({ checkWezTerm: async () => false }))).paneId).toBeUndefined();
   });
 
-  it("auto-detects only for a process inside WezTerm or an unknown one, never for a pid that is elsewhere", async () => {
+  it("auto-detects only for a process inside WezTerm or pid-less; a pid provably elsewhere clears any old pane", async () => {
     expect((await resolvePaneForJoin("A", 100, undefined, deps())).paneId).toBe(3);
     expect((await resolvePaneForJoin("A", 0, undefined, deps())).paneId).toBe(3);
-    expect((await resolvePaneForJoin("A", 555, undefined, deps())).paneId).toBeUndefined();
+    expect((await resolvePaneForJoin("A", 555, undefined, deps())).paneId).toBeNull();
+  });
+
+  it("treats unverifiable ancestry as unknown: a requested live pane is kept with a note, nothing is auto-detected", async () => {
+    const d = deps({ isInsideWezTerm: async () => "unknown" });
+    expect((await resolvePaneForJoin("A", 100, 3, d)).paneId).toBe(3);
+    expect(d.lines[0]).toMatch(/unverified/);
+    expect((await resolvePaneForJoin("A", 100, undefined, d)).paneId).toBeUndefined();
+  });
+});
+
+describe("a rejected pane does not survive a rejoin", () => {
+  it("ChatRoom.join clears the pane on null and keeps it on undefined", () => {
+    const room = new ChatRoom();
+    try {
+      room.join("Claude", 100, 7);
+      expect(room.getAgent("Claude")!.weztermPaneId).toBe(7);
+      room.join("Claude", 100, undefined);
+      expect(room.getAgent("Claude")!.weztermPaneId).toBe(7);
+      room.join("Claude", 200, null);
+      expect(room.getAgent("Claude")!.weztermPaneId).toBeUndefined();
+    } finally {
+      room.destroy();
+    }
+  });
+
+  it("ConversationManager.bindAgent clears the pane on null and keeps it on undefined", () => {
+    const dir = mkdtempSync(join(tmpdir(), "joind-wez-"));
+    const manager = new ConversationManager(dir);
+    try {
+      const a = manager.createConversation("a");
+      const b = manager.createConversation("b");
+      manager.bindAgent("Claude", a.id, 100, 7);
+      manager.bindAgent("Claude", b.id, 300);
+      expect(manager.getAgentBinding("Claude", undefined, 7)).toBe(a.id);
+      manager.bindAgent("Claude", a.id, 100, undefined);
+      expect(manager.getAgentBinding("Claude", undefined, 7)).toBe(a.id);
+      manager.bindAgent("Claude", a.id, 200, null);
+      expect(manager.getAgentBinding("Claude", undefined, 7)).toBeUndefined();
+      expect(manager.getAgentBinding("Claude", 200)).toBe(a.id);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
 describe("isInsideWezTermTree", () => {
-  const tree = new Map<number, { ppid: number; name: string }>([
-    [17280, { ppid: 11324, name: "wezterm-gui.exe" }],
-    [11324, { ppid: 1, name: "explorer.exe" }],
-    [5000, { ppid: 17280, name: "pwsh.exe" }],
-    [5001, { ppid: 5000, name: "claude.exe" }],
-    [32512, { ppid: 71580, name: "claude.exe" }],
-    [71580, { ppid: 7368, name: "claude.exe" }],
-    [7368, { ppid: 1552, name: "WmiPrvSE.exe" }],
-    [1552, { ppid: 1368, name: "svchost.exe" }],
-    [1368, { ppid: 1368, name: "services.exe" }],
+  const t0 = Date.UTC(2026, 8, 24, 4, 0, 0);
+  const tree = new Map<number, ProcessEntry>([
+    [17280, { ppid: 11324, name: "wezterm-gui.exe", started: t0 }],
+    [11324, { ppid: 1, name: "explorer.exe", started: t0 - 60_000 }],
+    [5000, { ppid: 17280, name: "pwsh.exe", started: t0 + 1000 }],
+    [5001, { ppid: 5000, name: "claude.exe", started: t0 + 2000 }],
+    [32512, { ppid: 71580, name: "claude.exe", started: t0 + 5000 }],
+    [71580, { ppid: 7368, name: "claude.exe", started: t0 + 5000 }],
+    [7368, { ppid: 1552, name: "WmiPrvSE.exe", started: t0 - 100_000 }],
+    [1552, { ppid: 1368, name: "svchost.exe", started: t0 - 200_000 }],
+    [1368, { ppid: 1368, name: "services.exe", started: t0 - 300_000 }],
+    // macOS: ps prints the full executable path for comm
+    [9000, { ppid: 1, name: "/Applications/WezTerm.app/Contents/MacOS/wezterm-gui", started: t0 }],
+    [9001, { ppid: 9000, name: "/bin/zsh", started: t0 + 1000 }],
+    [9002, { ppid: 9001, name: "claude", started: t0 + 2000 }],
+    // pid reuse: the recorded parent 4000 is a WezTerm that started AFTER the child
+    [4000, { ppid: 1, name: "wezterm-gui.exe", started: t0 + 50_000 }],
+    [4001, { ppid: 4000, name: "claude.exe", started: t0 + 3000 }],
   ]);
   it("finds a WezTerm ancestor and rejects processes started elsewhere or unknown here", () => {
     expect(isInsideWezTermTree(5001, tree)).toBe(true);
     expect(isInsideWezTermTree(32512, tree)).toBe(false); // WMI-started, no terminal
     expect(isInsideWezTermTree(424242, tree)).toBe(false); // remote agent's pid
     expect(isInsideWezTermTree(0, tree)).toBe(false);
+  });
+  it("matches WezTerm by executable basename (macOS full paths) and refuses a recycled parent pid", () => {
+    expect(isInsideWezTermTree(9002, tree)).toBe(true);
+    expect(isInsideWezTermTree(4001, tree)).toBe(false);
+  });
+  it("parses WMI creation dates", () => {
+    expect(parseCimDate("20260924085113.123456+240")).toBe(Date.UTC(2026, 8, 24, 8, 51, 13, 123) - 240 * 60_000);
+    expect(parseCimDate("garbage")).toBeUndefined();
+    expect(parseCimDate(undefined)).toBeUndefined();
   });
 });
 
@@ -75,6 +142,15 @@ describe("inject fallback", () => {
       platform: "win32",
     });
     expect(calls).toEqual(["wezterm", "windows:4242"]);
+  });
+
+  it("reports the WezTerm error, not the fallback's, when both paths fail (keeps the retry decision honest)", async () => {
+    await expect(inject(4242, "hello", 0, undefined, undefined, {
+      wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
+      windows: async () => {},
+      unix: async () => { throw new Error("Unix injection failed: PID 4242 not found in any tmux pane"); },
+      platform: "linux",
+    })).rejects.toThrow(/failed to connect to Socket/);
   });
 
   it("surfaces the WezTerm failure when there is no pid to fall back to", async () => {

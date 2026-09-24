@@ -195,7 +195,9 @@ export class ChatRoom extends EventEmitter {
     }
   }
 
-  join(name: string, pid: number, weztermPaneId?: number, persistedRole?: string): Agent {
+  /** `weztermPaneId`: a number binds that pane, null clears any pane held
+   *  before (the join proved it stale), undefined leaves it as it was. */
+  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string): Agent {
     const existing = this.agents.get(name);
     if (existing) {
       const now = Date.now();
@@ -214,7 +216,8 @@ export class ChatRoom extends EventEmitter {
       }
       existing.active = true;
       existing.pid = pid;
-      if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
+      if (weztermPaneId === null) existing.weztermPaneId = undefined;
+      else if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
       if (!existing.role && persistedRole) existing.role = persistedRole;
       existing.lastSeen = now;
       liveTerminals.set(this.warnKey(name), { pid: existing.pid, weztermPaneId: existing.weztermPaneId });
@@ -232,10 +235,10 @@ export class ChatRoom extends EventEmitter {
       active: true,
       role: persistedRole,
       lastSeen: Date.now(),
-      weztermPaneId,
+      weztermPaneId: weztermPaneId ?? undefined,
     };
     this.agents.set(name, agent);
-    liveTerminals.set(this.warnKey(name), { pid, weztermPaneId });
+    liveTerminals.set(this.warnKey(name), { pid, weztermPaneId: agent.weztermPaneId });
     wakes.forget(this.warnKey(name)); // a new session starts with a clean wake record
     this.addSystem(`${name} joined the chat`);
     this.emit("room", { type: "join", data: agent } as RoomEvent);

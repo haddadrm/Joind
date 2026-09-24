@@ -126,16 +126,32 @@ export async function inject(
   backends: InjectBackends = { wezterm: injectWezTerm, windows: injectWindows, unix: injectUnix }
 ): Promise<void> {
   const platform = backends.platform ?? process.platform;
+  let primary: unknown;
   if (weztermPaneId != null) {
     try {
       return await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv);
     } catch (err) {
       if (!(pid > 0)) throw err;
+      primary = err;
       const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
       console.log(`  [inject] wezterm pane ${weztermPaneId} failed (${msg.slice(0, 120)}); falling back to pid ${pid}`);
     }
   }
 
+  try {
+    await injectConsole(pid, text, platform, backends);
+  } catch (err) {
+    if (primary === undefined) throw err;
+    // Both paths failed: the WezTerm error stays the reported one, so a
+    // transient socket failure is still retried rather than being reclassed
+    // as "no console" by the fallback's own complaint.
+    const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    console.log(`  [inject] console fallback for pid ${pid} failed too (${msg.slice(0, 120)})`);
+    throw primary;
+  }
+}
+
+async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends): Promise<void> {
   if (platform === "win32") {
     const procName = await getProcessName(pid);
     const isCodex = procName === "codex.exe";

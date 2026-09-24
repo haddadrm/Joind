@@ -24,10 +24,15 @@ const execFileAsync = promisify(execFile);
 export interface PaneResolverDeps {
   checkWezTerm: () => Promise<boolean>;
   listPaneIds: () => Promise<Set<number>>;
-  isInsideWezTerm: (pid: number) => Promise<boolean>;
+  isInsideWezTerm: (pid: number) => Promise<boolean | "unknown">;
   autoDetect: () => Promise<number | undefined>;
   log?: (line: string) => void;
 }
+
+/** Outcome of pane resolution. `paneId` null means: clear any pane this
+ *  agent held before (the rejoin proved it stale); undefined means: leave
+ *  whatever it had (nothing learned either way). */
+export interface PaneResolution { paneId: number | null | undefined; note?: string; }
 
 /**
  * Decide which WezTerm pane, if any, a joining agent is bound to. A pane is
@@ -40,13 +45,13 @@ export interface PaneResolverDeps {
  */
 export async function resolvePaneForJoin(
   name: string, pid: number, requested: number | undefined, deps: PaneResolverDeps
-): Promise<{ paneId: number | undefined; note?: string }> {
+): Promise<PaneResolution> {
   const log = deps.log ?? ((line: string) => console.log(`  [wezterm] ${line}`));
   if (!(await deps.checkWezTerm())) {
     if (requested != null) {
       const note = `pane ${requested} ignored for ${name}: no WezTerm reachable from this server`;
       log(note);
-      return { paneId: undefined, note };
+      return { paneId: null, note };
     }
     return { paneId: undefined };
   }
@@ -55,18 +60,27 @@ export async function resolvePaneForJoin(
     if (!live.has(requested)) {
       const note = `pane ${requested} ignored for ${name}: not a live WezTerm pane`;
       log(note);
-      return { paneId: undefined, note };
+      return { paneId: null, note };
     }
-    if (pid > 0 && !(await deps.isInsideWezTerm(pid))) {
-      const note = `pane ${requested} ignored for ${name}: pid ${pid} does not run inside WezTerm on this host`;
-      log(note);
-      return { paneId: undefined, note };
+    if (pid > 0) {
+      const inside = await deps.isInsideWezTerm(pid);
+      if (inside === false) {
+        const note = `pane ${requested} ignored for ${name}: pid ${pid} does not run inside WezTerm on this host`;
+        log(note);
+        return { paneId: null, note };
+      }
+      if (inside === "unknown") log(`pane ${requested} accepted for ${name} unverified: this host cannot enumerate processes`);
     }
     return { paneId: requested };
   }
   // No pane requested: auto-detect only for a process that is inside WezTerm
-  // (or an unknown one), never for a pid that is provably elsewhere.
-  if (pid > 0 && !(await deps.isInsideWezTerm(pid))) return { paneId: undefined };
+  // (or an unknown one). A pid that provably runs elsewhere clears any pane
+  // it held before: its previous session's pane is stale.
+  if (pid > 0) {
+    const inside = await deps.isInsideWezTerm(pid);
+    if (inside === false) return { paneId: null };
+    if (inside === "unknown") return { paneId: undefined };
+  }
   return { paneId: await deps.autoDetect() };
 }
 

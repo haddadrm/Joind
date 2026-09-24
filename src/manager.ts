@@ -273,7 +273,8 @@ export class ConversationManager extends EventEmitter {
   // Agent binding
   // -----------------------------------------------------------------------
 
-  bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number): void {
+  /** `paneId` null clears a previously bound pane (proved stale on rejoin); undefined keeps it. */
+  bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number | null): void {
     let entries = this.agentBindings.get(agentName);
     if (!entries) {
       entries = [];
@@ -291,17 +292,17 @@ export class ConversationManager extends EventEmitter {
       entries[idx] = {
         conversationId,
         pid: (pid && pid !== 0) ? pid : old.pid,
-        paneId: paneId != null ? paneId : old.paneId,
+        paneId: paneId === null ? undefined : (paneId != null ? paneId : old.paneId),
       };
     } else if (convIdx >= 0) {
       const old = entries[convIdx];
       entries[convIdx] = {
         conversationId,
         pid: (pid && pid !== 0) ? pid : old.pid,
-        paneId: paneId != null ? paneId : old.paneId,
+        paneId: paneId === null ? undefined : (paneId != null ? paneId : old.paneId),
       };
     } else {
-      entries.push({ conversationId, pid, paneId });
+      entries.push({ conversationId, pid, paneId: paneId ?? undefined });
     }
   }
 

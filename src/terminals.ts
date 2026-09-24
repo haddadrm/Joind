@@ -478,56 +478,87 @@ export async function listWezTermPaneIds(): Promise<Set<number>> {
   }
 }
 
-/** Parent pid for every process on this host (empty when unavailable). */
-export async function listParentPids(): Promise<Map<number, { ppid: number; name: string }>> {
-  const out = new Map<number, { ppid: number; name: string }>();
+export interface ProcessEntry { ppid: number; name: string; /** epoch ms, when known */ started?: number; }
+
+/** WMI CIM_DATETIME (yyyymmddHHMMSS.ffffff+zzz) to epoch ms; undefined when unparsable. */
+export function parseCimDate(v: string | undefined): number | undefined {
+  const m = (v ?? "").match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-]\d{3})$/);
+  if (!m) return undefined;
+  const [, y, mo, d, h, mi, se, us, tz] = m;
+  const utc = Date.UTC(+y, +mo - 1, +d, +h, +mi, +se, Math.floor(+us / 1000));
+  return utc - (+tz) * 60_000;
+}
+
+/**
+ * Parent pid, name and start time for every process on this host, or null
+ * when the enumeration itself is unavailable (unknown is not "elsewhere").
+ * wmic /format:csv orders columns alphabetically: CreationDate, Name,
+ * ParentProcessId, ProcessId (after the Node column).
+ */
+export async function listParentPids(): Promise<Map<number, ProcessEntry> | null> {
+  const out = new Map<number, ProcessEntry>();
   try {
     if (process.platform === "win32") {
       const { stdout } = await execFileAsync(
-        "wmic", ["process", "get", "processid,parentprocessid,name", "/format:csv"], { timeout: 10000 }
+        "wmic", ["process", "get", "processid,parentprocessid,name,creationdate", "/format:csv"], { timeout: 10000 }
       );
       for (const line of stdout.trim().split("\n")) {
         const parts = line.split(",").map((x) => x.trim());
-        if (parts.length < 4) continue;
+        if (parts.length < 5) continue;
         const name = parts[parts.length - 3] ?? "";
         const ppid = parseInt(parts[parts.length - 2] ?? "", 10);
         const pid = parseInt(parts[parts.length - 1] ?? "", 10);
         if (!Number.isFinite(pid) || pid === 0) continue;
-        out.set(pid, { ppid: Number.isFinite(ppid) ? ppid : 0, name });
+        out.set(pid, { ppid: Number.isFinite(ppid) ? ppid : 0, name, started: parseCimDate(parts[parts.length - 4]) });
       }
     } else {
-      const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,comm"], { timeout: 5000 });
+      const now = Date.now();
+      const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,etimes,comm"], { timeout: 5000 });
       for (const line of stdout.trim().split("\n").slice(1)) {
-        const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-        if (m) out.set(parseInt(m[1], 10), { ppid: parseInt(m[2], 10), name: m[3].trim() });
+        const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/);
+        if (m) out.set(parseInt(m[1], 10), { ppid: parseInt(m[2], 10), name: m[4].trim(), started: now - parseInt(m[3], 10) * 1000 });
       }
     }
-  } catch { /* unavailable: callers treat as unknown */ }
-  return out;
+  } catch {
+    return null;
+  }
+  return out.size > 0 ? out : null;
 }
 
 const WEZTERM_PROCESS = /^wezterm(-gui|-mux-server)?(\.exe)?$/i;
+function processBasename(name: string): string {
+  return name.split(/[\\/]/).pop() ?? name;
+}
 
 /**
  * Does `pid` run inside WezTerm on this host (a WezTerm process among its
  * ancestors)? False for a pid that does not exist here, which is what a
- * remote agent's pid looks like. `tree` is injectable for tests.
+ * remote agent's pid looks like. A parent that started AFTER its child is a
+ * recycled pid, not an ancestor, and ends the walk. `tree` is injectable
+ * for tests; names may be full paths (macOS ps prints them).
  */
-export function isInsideWezTermTree(pid: number, tree: Map<number, { ppid: number; name: string }>): boolean {
+export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>): boolean {
   let cur = pid;
+  let childStart: number | undefined = tree.get(pid)?.started;
   for (let depth = 0; depth < 64 && cur > 0; depth++) {
     const entry = tree.get(cur);
     if (!entry) return false;
-    if (WEZTERM_PROCESS.test(entry.name)) return true;
+    if (WEZTERM_PROCESS.test(processBasename(entry.name))) return true;
     if (entry.ppid === cur) return false;
+    const parent = tree.get(entry.ppid);
+    if (parent?.started != null && childStart != null && parent.started > childStart + 1000) return false; // pid reuse
+    childStart = parent?.started ?? childStart;
     cur = entry.ppid;
   }
   return false;
 }
 
-export async function isInsideWezTerm(pid: number): Promise<boolean> {
+/** true / false, or "unknown" when the host cannot enumerate processes. */
+export async function isInsideWezTerm(pid: number): Promise<boolean | "unknown"> {
   if (!(pid > 0)) return false;
-  return isInsideWezTermTree(pid, await listParentPids());
+  const tree = await listParentPids();
+  if (!tree) return "unknown";
+  return isInsideWezTermTree(pid, tree);
 }
 
 /** Get extra env vars needed for wezterm CLI (socket path). */

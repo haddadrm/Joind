@@ -738,19 +738,25 @@ app.post("/api/conversations/import", express.json({ limit: "50mb" }), (req, res
   res.json({ ok: true, conversation: meta, imported: { messages: (bundle.messages as unknown[]).length, tasks: importedTasks } });
 });
 
-app.post("/api/join", express.json(), (req, res) => {
+app.post("/api/join", express.json(), async (req, res) => {
   const room = activeRoom(res);
   if (!room) return;
-  const { name, pid, wtSession, weztermPaneId } = req.body as {
+  const { name, pid, wtSession, weztermPaneId: requestedPane } = req.body as {
     name?: string; pid?: number; wtSession?: string; weztermPaneId?: number;
   };
-  if (!name || (!pid && weztermPaneId == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
+  if (!name || (!pid && requestedPane == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
+  // Same invariant as the agent joins: a pane is bound only when it is live and this process's.
+  const paneResolution = await resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager));
+  const weztermPaneId = paneResolution.paneId;
   const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
   const activeId = manager.getActiveId();
   if (activeId) manager.bindAgent(name, activeId, pid, weztermPaneId);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
-  res.json({ name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, online: room.whoNames() });
+  res.json({
+    name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, online: room.whoNames(),
+    ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
+  });
 });
 
 app.post("/api/leave", express.json(), (req, res) => {
@@ -1475,17 +1481,17 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
 
   // Bind a WezTerm pane only when it is live and really this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager));
-  weztermPaneId = paneResolution.paneId;
+  const boundPane = paneResolution.paneId;
 
-  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
-  manager.bindAgent(name, convId, pid, weztermPaneId);
+  const agent = room.join(name, pid || 0, boundPane, agentRoles[name]);
+  manager.bindAgent(name, convId, pid, boundPane);
   room.touch(name);
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
   // Name the WezTerm tab if available
-  if (weztermPaneId != null) {
+  if (agent.weztermPaneId != null) {
     const wtEnv = Object.keys(getWeztermEnv()).length > 0 ? { ...process.env, ...getWeztermEnv() } : undefined;
-    execFileAsync(getWeztermPath(), ["cli", "--no-auto-start", "set-tab-title", name, "--pane-id", String(weztermPaneId)], { env: wtEnv })
+    execFileAsync(getWeztermPath(), ["cli", "--no-auto-start", "set-tab-title", name, "--pane-id", String(agent.weztermPaneId)], { env: wtEnv })
       .catch(() => {});
   }
 
