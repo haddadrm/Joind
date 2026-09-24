@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { resolveOrcaForJoin, joinNotesText, requestedOrcaHandle, type OrcaResolverDeps } from "../src/tools.js";
-import { hasAncestor, isInsideOrcaTree, isInsideWezTermTree, type ProcessEntry } from "../src/terminals.js";
+import { resolveOrcaForJoin, resolvePaneForJoin, joinNotesText, requestedOrcaHandle, type OrcaResolverDeps } from "../src/tools.js";
+import { hasAncestor, isInsideOrcaTree, isInsideWezTermTree, isSessionRoot, type ProcessEntry } from "../src/terminals.js";
 import { inject, WakeFallbackAborted, type InjectBackends } from "../src/inject.js";
 import {
   injectOrca, orcaSendFailure, parseOrcaTerminalList, resolveOrcaCli, listOrcaTerminals, resetOrcaListCache,
@@ -361,5 +361,99 @@ describe("source guard: every Orca invocation goes through the one resolver", ()
     expect(runOrca).toMatch(/exe = resolveOrcaCli\(\)/);
     expect(runOrca).toMatch(/spawn\(exe, args/);
     expect(runOrca).not.toMatch(/shell:/);
+  });
+});
+
+describe("ancestry: a chain that ends at a session or system root is disproved, not unknown", () => {
+  const T0 = 1_700_000_000_000;
+  const e = (ppid: number, name: string, dt: number): ProcessEntry => ({ ppid, name, started: T0 + dt });
+  // Field case: an agent started through WMI. wininit's parent (smss) has exited.
+  const wmi = new Map<number, ProcessEntry>([
+    [90, e(89, "claude.exe", 9000)],
+    [89, e(88, "claude.exe", 8000)],
+    [88, e(87, "WmiPrvSE.exe", 7000)],
+    [87, e(86, "svchost.exe", 6000)],
+    [86, e(85, "services.exe", 5000)],
+    [85, e(80, "wininit.exe", 4000)],
+  ]);
+  // A shell in Windows Terminal. explorer's parent (userinit) has exited.
+  const wt = new Map<number, ProcessEntry>([
+    [40, e(30, "claude.exe", 9000)],
+    [30, e(20, "pwsh.exe", 8000)],
+    [20, e(10, "WindowsTerminal.exe", 7000)],
+    [10, e(5, "explorer.exe", 1000)],
+  ]);
+  // An Orca shell, also rooted at explorer with its parent gone.
+  const orcaChain = new Map<number, ProcessEntry>([
+    [40, e(30, "claude.exe", 9000)],
+    [30, e(20, "pwsh.exe", 8000)],
+    [20, e(15, "Orca.exe", 7000)],
+    [15, e(10, "Orca.exe", 6000)],
+    [10, e(5, "explorer.exe", 1000)],
+  ]);
+
+  it("the WMI chain and the Windows Terminal chain are outside both terminals", () => {
+    expect(isInsideOrcaTree(90, wmi)).toBe(false);
+    expect(isInsideWezTermTree(90, wmi)).toBe(false);
+    expect(isInsideOrcaTree(40, wt)).toBe(false);
+    expect(isInsideWezTermTree(40, wt)).toBe(false);
+  });
+
+  it("an exited wrapper in the middle of an ordinary chain stays unknown", () => {
+    const wrapped = new Map<number, ProcessEntry>([
+      [40, e(30, "claude.exe", 9000)],
+      [30, e(25, "pwsh.exe", 8000)], // its parent (a wrapper) has exited
+    ]);
+    expect(isInsideOrcaTree(40, wrapped)).toBe("unknown");
+    expect(isInsideWezTermTree(40, wrapped)).toBe("unknown");
+  });
+
+  it("the Orca chain is still inside Orca", () => {
+    expect(isInsideOrcaTree(40, orcaChain)).toBe(true);
+    expect(isInsideWezTermTree(40, orcaChain)).toBe(false);
+  });
+
+  it("a macOS chain rooted at launchd is outside both terminals", () => {
+    const mac = new Map<number, ProcessEntry>([
+      [900, { ppid: 800, name: "claude", started: 9000, startedPrecisionMs: 1000 }],
+      [800, { ppid: 700, name: "-zsh", started: 8000, startedPrecisionMs: 1000 }],
+      [700, { ppid: 600, name: "/usr/bin/login", started: 7000, startedPrecisionMs: 1000 }],
+      [600, { ppid: 1, name: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal", started: 6000, startedPrecisionMs: 1000 }],
+      [1, { ppid: 0, name: "/sbin/launchd", started: 0, startedPrecisionMs: 1000 }],
+    ]);
+    expect(isInsideOrcaTree(900, mac)).toBe(false);
+    expect(isInsideWezTermTree(900, mac)).toBe(false);
+  });
+
+  it("a root whose parent carries no start time is still a root; the recycled-pid rule stays", () => {
+    const noDate = new Map(wt);
+    noDate.set(5, { ppid: 1, name: "userinit.exe" }); // present, but no creation date
+    expect(isInsideOrcaTree(40, noDate)).toBe(false);
+    const recycled = new Map(orcaChain);
+    recycled.set(20, e(15, "node.exe", 9500)); // "parent" younger than its child pwsh
+    expect(isInsideOrcaTree(40, recycled)).toBe(false);
+    expect(isSessionRoot(4, { ppid: 0, name: "System" })).toBe(true);
+    expect(isSessionRoot(30, e(25, "pwsh.exe", 0))).toBe(false);
+    expect(isSessionRoot(12, e(1, "RuntimeBroker.EXE", 0))).toBe(true);
+  });
+
+  it("the resolvers now DROP a requested Orca handle or WezTerm pane from a pid on the WMI or Windows Terminal chain", async () => {
+    for (const [tree, pid] of [[wmi, 90], [wt, 40]] as const) {
+      const orca = await resolveOrcaForJoin("Claude", pid, H1, deps({ isInsideOrca: async (p) => isInsideOrcaTree(p, tree) }));
+      expect(orca.orcaTerminal).toBeNull();
+      expect(orca.note).toMatch(new RegExp(`pid ${pid} does not run inside Orca`));
+      const lines: string[] = [];
+      const pane = await resolvePaneForJoin("Claude", pid, 0, {
+        checkWezTerm: async () => true,
+        listPaneIds: async () => new Set([0]),
+        isInsideWezTerm: async (p) => isInsideWezTermTree(p, tree),
+        autoDetect: async () => 0,
+        log: (l) => lines.push(l),
+      });
+      expect(pane.paneId).toBeNull();
+      expect(pane.note).toMatch(new RegExp(`pid ${pid} does not run inside WezTerm`));
+    }
+    // And the Orca chain keeps its handle.
+    expect((await resolveOrcaForJoin("Claude", 40, H1, deps({ isInsideOrca: async (p) => isInsideOrcaTree(p, orcaChain) }))).orcaTerminal).toBe(H1);
   });
 });
