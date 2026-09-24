@@ -308,19 +308,30 @@ export class ConversationManager extends EventEmitter {
     return keys.length > 0 ? keys : ["pid:0"];
   }
 
+  /** The binding entry bindAgent() would merge a join into: first the one
+   *  matching by pane or non-zero pid, else the one for the same
+   *  conversation. Kept as one function so freshness and merging agree. */
+  private mergeTargetFor(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined) {
+    const entries = this.agentBindings.get(agentName) ?? [];
+    const byTerminal = entries.find(e =>
+      (paneId != null && e.paneId === paneId) ||
+      (pid != null && pid !== 0 && e.pid === pid)
+    );
+    return byTerminal ?? entries.find(e => e.conversationId === conversationId);
+  }
+
   /**
    * The aliases a join will effectively hold once bound: the request's own,
-   * plus those of any existing binding for the name that bindAgent would
-   * merge with (it matches by pid OR pane and keeps the aliases the request
-   * omitted). Freshness has to cover all of them.
+   * plus those of the existing binding bindAgent would merge it with (it
+   * keeps the aliases the request omitted). Freshness has to cover all of
+   * them, over-approximating when validation later drops a pane.
    */
-  effectiveJoinAliases(agentName: string, pid: number | undefined, paneId: number | undefined): string[] {
+  effectiveJoinAliases(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined): string[] {
     const keys = new Set(ConversationManager.joinTerminalKeys(pid, paneId));
-    for (const e of this.agentBindings.get(agentName) ?? []) {
-      const matches = (paneId != null && e.paneId === paneId) || (pid != null && pid !== 0 && e.pid === pid);
-      if (!matches) continue;
-      if (e.pid && e.pid > 0) keys.add(`pid:${e.pid}`);
-      if (e.paneId != null) keys.add(`pane:${e.paneId}`);
+    const target = this.mergeTargetFor(agentName, conversationId, pid, paneId);
+    if (target) {
+      if (target.pid && target.pid > 0) keys.add(`pid:${target.pid}`);
+      if (target.paneId != null) keys.add(`pane:${target.paneId}`);
     }
     return [...keys];
   }

@@ -749,7 +749,7 @@ app.post("/api/join", express.json(), async (req, res) => {
   };
   if (!name || (!pid && requestedPane == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, pid, requestedPane), convId);
+  const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, convId, pid, requestedPane), convId);
   // Same invariant as the agent joins: a pane is bound only when it is live and this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager));
   const weztermPaneId = paneResolution.paneId;
@@ -1485,7 +1485,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   }
 
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, pid, weztermPaneId), convId);
+  const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, convId, pid, weztermPaneId), convId);
 
   // Bind a WezTerm pane only when it is live and really this process's.
   const paneResolution = await resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager));

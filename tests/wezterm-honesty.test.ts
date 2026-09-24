@@ -98,13 +98,22 @@ describe("join generations (manager-level: name+terminal across rooms, room+name
       // {pid 100, pane 7} in X; a pane-only join into X is held; a newer pid-only join
       // into Y (which keeps pane 7 through the binding merge) must supersede it.
       manager.bindAgent("Claude", x.id, 100, 7);
-      expect(manager.effectiveJoinAliases("Claude", 0, 7).sort()).toEqual(["pane:7", "pid:100"]);
-      expect(manager.effectiveJoinAliases("Claude", 100, undefined).sort()).toEqual(["pane:7", "pid:100"]);
-      expect(manager.effectiveJoinAliases("Claude", 900, undefined)).toEqual(["pid:900"]);
-      const heldPaneOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", 0, 7), x.id);
-      const newerPidOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", 100, undefined), y.id);
+      expect(manager.effectiveJoinAliases("Claude", x.id, 0, 7).sort()).toEqual(["pane:7", "pid:100"]);
+      expect(manager.effectiveJoinAliases("Claude", y.id, 100, undefined).sort()).toEqual(["pane:7", "pid:100"]);
+      // Unrelated terminal into a room where the name has no binding: its own alias only.
+      expect(manager.effectiveJoinAliases("Claude", y.id, 900, undefined)).toEqual(["pid:900"]);
+      // Unrelated terminal into the SAME room: the merge falls back to the room's entry (round-12 case).
+      expect(manager.effectiveJoinAliases("Claude", x.id, 200, undefined).sort()).toEqual(["pane:7", "pid:100", "pid:200"]);
+      const heldPaneOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", x.id, 0, 7), x.id);
+      const newerPidOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", y.id, 100, undefined), y.id);
       expect(manager.joinIsCurrent(newerPidOnly)).toBe(true);
       expect(manager.joinIsCurrent(heldPaneOnly)).toBe(false);
+      // Round-12 sequence: hold a pane-only 7 join into Y; a newer pid-only 200 join into X
+      // inherits pane 7 through the same-conversation merge and must supersede it.
+      const heldIntoY = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", y.id, 0, 7), y.id);
+      const newerIntoX = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", x.id, 200, undefined), x.id);
+      expect(manager.joinIsCurrent(newerIntoX)).toBe(true);
+      expect(manager.joinIsCurrent(heldIntoY)).toBe(false);
       manager.unbindAgent("Claude");
       // A departure for the name (even with no binding yet) ends every pending join for it.
       manager.supersedeJoins("Claude");

@@ -197,7 +197,7 @@ export function registerTools(
       if (!manager.getRoom(convId)) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, pid, weztermPaneId), convId);
+      const joinToken = manager.beginJoin(name, manager.effectiveJoinAliases(name, convId, pid, weztermPaneId), convId);
 
       // Bind a WezTerm pane only when it is live and really this process's.
       const { paneId: resolvedPaneId, note: paneNote } = await resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager));
