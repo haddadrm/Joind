@@ -48,6 +48,12 @@ const NO_CONSOLE_PATTERNS = [
   /PID 0\b/,
   /not found in any tmux pane/i, // Unix: the pid is not under any tmux pane
   /no console/i,
+  // Orca (src/orca.ts wording): the handle names no live, writable terminal
+  // ("terminal_handle_stale" observed for unknown and closed handles), or
+  // there is no Orca CLI on this host. "orca send failed" stays transient.
+  /orca terminal \S+ unavailable \(/i,
+  /\bterminal_handle_stale\b/i,
+  /orca cli unavailable/i,
 ];
 
 export function classifyWakeFailure(err: unknown): WakeFailureKind {

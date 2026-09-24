@@ -29,12 +29,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
 import { visibleToViewer, type ChatMessage } from "./room.js";
-import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps } from "./tools.js";
+import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
 import { EditStore } from "./edits.js";
-import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv } from "./terminals.js";
+import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, processTreeOnce } from "./terminals.js";
 import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from "./crew.js";
 import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webNamePath, validWebName, canRegister } from "./config.js";
 import type { CrewFolder } from "./crew.js";
@@ -744,25 +744,33 @@ app.post("/api/join", express.json(), async (req, res) => {
   // routing must land in the same room.
   const convId = manager.getActiveId();
   if (!convId) { res.status(400).json({ error: "No active conversation. Create or select one." }); return; }
-  const { name, pid, wtSession, weztermPaneId: requestedPane } = req.body as {
-    name?: string; pid?: number; wtSession?: string; weztermPaneId?: number;
+  const { name, pid, wtSession, weztermPaneId: requestedPane, orcaTerminal: requestedOrca } = req.body as {
+    name?: string; pid?: number; wtSession?: string; weztermPaneId?: number; orcaTerminal?: unknown;
   };
-  if (!name || (!pid && requestedPane == null)) { res.status(400).json({ error: "name and pid (or weztermPaneId) required" }); return; }
+  if (!name || (!pid && requestedPane == null && requestedOrcaHandle(requestedOrca) === undefined)) {
+    res.status(400).json({ error: "name and pid (or weztermPaneId, or orcaTerminal) required" }); return;
+  }
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, convId, pid, requestedPane);
-  // Same invariant as the agent joins: a pane is bound only when it is live and this process's.
-  const paneResolution = await resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager));
+  const joinToken = manager.beginJoin(name, convId, pid, requestedPane, requestedOrcaHandle(requestedOrca));
+  // Same invariant as the agent joins: a pane or Orca terminal is bound only when it is live and this process's.
+  const tree = processTreeOnce();
+  const [paneResolution, orcaResolution] = await Promise.all([
+    resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager, tree)),
+    resolveOrcaForJoin(name, pid || 0, requestedOrca, defaultOrcaResolverDeps(manager, tree)),
+  ]);
   const weztermPaneId = paneResolution.paneId;
+  const boundOrca = orcaResolution.orcaTerminal;
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
-  if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
-  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name]);
-  manager.bindAgent(name, convId, pid, weztermPaneId);
+  if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined, boundOrca ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name], boundOrca);
+  manager.bindAgent(name, convId, pid, weztermPaneId, boundOrca);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
   res.json({
-    name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, online: room.whoNames(),
+    name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, orcaTerminal: agent.orcaTerminal, online: room.whoNames(),
     ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
+    ...(orcaResolution.note ? { orcaNote: orcaResolution.note } : {}),
   });
 });
 
@@ -793,7 +801,7 @@ app.post("/api/rename", express.json(), (req, res) => {
   const convId = manager.getAgentBinding(oldName);
   if (convId) {
     manager.unbindAgent(oldName, convId);
-    manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId);
+    manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId, agent.orcaTerminal);
   }
   res.json({ name: agent.name, pid: agent.pid });
 });
@@ -1443,10 +1451,11 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   let { name, pid, conversation, wtSession, weztermPaneId } = req.body as {
     name?: string; pid?: number; conversation?: string; wtSession?: string; weztermPaneId?: number;
   };
+  const requestedOrca = (req.body as { orcaTerminal?: unknown }).orcaTerminal;
   if (!name) { res.status(400).json({ error: "name required" }); return; }
 
-  // Auto-detect PID/paneId if not provided
-  if (!pid && weztermPaneId == null) {
+  // Auto-detect PID/paneId if not provided (an Orca handle names its terminal already)
+  if (!pid && weztermPaneId == null && requestedOrcaHandle(requestedOrca) === undefined) {
     try {
       const terminals = await discoverTerminals();
       const allRooms = manager.listConversations().map(c => manager.getRoom(c.id)).filter(Boolean);
@@ -1485,21 +1494,27 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   }
 
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId);
+  const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId, requestedOrcaHandle(requestedOrca));
 
-  // Bind a WezTerm pane only when it is live and really this process's.
-  const paneResolution = await resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager));
+  // Bind a WezTerm pane or an Orca terminal only when it is live and really
+  // this process's (one process enumeration shared by both checks).
+  const tree = processTreeOnce();
+  const [paneResolution, orcaResolution] = await Promise.all([
+    resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager, tree)),
+    resolveOrcaForJoin(name, pid || 0, requestedOrca, defaultOrcaResolverDeps(manager, tree)),
+  ]);
   const boundPane = paneResolution.paneId;
+  const boundOrca = orcaResolution.orcaTerminal;
 
   // Re-fetch after the await: a conversation deleted meanwhile must not be
   // resurrected by joining its destroyed room, and a newer join or a
   // departure for this name meanwhile wins over this one.
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
-  if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+  if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined, boundOrca ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
 
-  const agent = room.join(name, pid || 0, boundPane, agentRoles[name]);
-  manager.bindAgent(name, convId, pid, boundPane);
+  const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca);
+  manager.bindAgent(name, convId, pid, boundPane, boundOrca);
   room.touch(name);
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
@@ -1523,7 +1538,9 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
     recentMessages: recent,
     totalMessages: room.messageCount(),
     weztermPaneId: agent.weztermPaneId,
+    orcaTerminal: agent.orcaTerminal,
     ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
+    ...(orcaResolution.note ? { orcaNote: orcaResolution.note } : {}),
   });
 });
 

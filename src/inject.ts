@@ -7,6 +7,7 @@
 
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { injectOrca } from "./orca.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -117,7 +118,10 @@ export class WakeFallbackAborted extends Error {
 }
 
 export interface InjectOptions {
-  /** Called after a WezTerm failure and before the console fallback: the
+  /** Orca terminal handle: when set, Orca's own input path is tried first
+   *  (before WezTerm and the console). */
+  orcaTerminal?: string;
+  /** Called after an Orca or WezTerm failure and before the console fallback: the
    *  caller re-checks that the target is still the same live session.
    *  Anything but "proceed" aborts the fallback with WakeFallbackAborted. */
   fallbackGuard?: () => "proceed" | "skip" | "moved";
@@ -125,6 +129,8 @@ export interface InjectOptions {
 
 /** Backends, injectable for tests. */
 export interface InjectBackends {
+  /** Optional so callers that predate Orca keep compiling; defaults to injectOrca. */
+  orca?: (handle: string, text: string) => Promise<void>;
   wezterm: typeof injectWezTerm;
   windows: (pid: number, text: string, delayMs: number, doubleEnter: boolean) => Promise<void>;
   unix: (pid: number, text: string, guard?: () => void) => Promise<void>;
@@ -133,32 +139,44 @@ export interface InjectBackends {
 
 /**
  * Inject a text prompt + Enter into the terminal of a running process.
- * Prefer WezTerm pane injection when paneId is provided; when that path
- * fails and a real pid is known, fall back to console injection rather than
- * giving up (a pane id can be stale while the process is alive).
+ * Backend order: Orca (options.orcaTerminal), else WezTerm (paneId), else
+ * the console. When the Orca or WezTerm path fails and a real pid is known,
+ * fall back to console injection rather than giving up (a handle or pane can
+ * be stale while the process is alive), through the caller's guard.
  */
 export async function inject(
   pid: number, text: string, weztermPaneId?: number, weztermExe?: string, weztermEnv?: Record<string, string>,
-  backends: InjectBackends = { wezterm: injectWezTerm, windows: injectWindows, unix: injectUnix },
+  backends: InjectBackends = { orca: injectOrca, wezterm: injectWezTerm, windows: injectWindows, unix: injectUnix },
   options: InjectOptions = {}
 ): Promise<void> {
   const platform = backends.platform ?? process.platform;
   let primary: unknown;
-  if (weztermPaneId != null) {
+  let via: string | null = null;
+  let attempt: (() => Promise<void>) | null = null;
+  if (options.orcaTerminal) {
+    const handle = options.orcaTerminal;
+    const orca = backends.orca ?? injectOrca;
+    via = `orca terminal ${handle}`;
+    attempt = () => orca(handle, text);
+  } else if (weztermPaneId != null) {
+    via = `wezterm pane ${weztermPaneId}`;
+    attempt = () => backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv);
+  }
+  if (attempt) {
     try {
-      return await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv);
+      return await attempt();
     } catch (err) {
       if (!(pid > 0)) throw err;
       primary = err;
       const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
-      // The WezTerm attempt took time; the target may have left or been
+      // The first attempt took time; the target may have left or been
       // replaced meanwhile. Never type into a pid the caller no longer vouches for.
       const verdict = options.fallbackGuard?.() ?? "proceed";
       if (verdict !== "proceed") {
-        console.log(`  [inject] wezterm pane ${weztermPaneId} failed (${msg.slice(0, 120)}); no console fallback: target ${verdict === "skip" ? "left" : "moved"}`);
+        console.log(`  [inject] ${via} failed (${msg.slice(0, 120)}); no console fallback: target ${verdict === "skip" ? "left" : "moved"}`);
         throw new WakeFallbackAborted(verdict);
       }
-      console.log(`  [inject] wezterm pane ${weztermPaneId} failed (${msg.slice(0, 120)}); falling back to pid ${pid}`);
+      console.log(`  [inject] ${via} failed (${msg.slice(0, 120)}); falling back to pid ${pid}`);
     }
   }
 
@@ -166,9 +184,9 @@ export async function inject(
     await injectConsole(pid, text, platform, backends, options);
   } catch (err) {
     if (primary === undefined || err instanceof WakeFallbackAborted) throw err;
-    // Both paths failed: the WezTerm error stays the reported one, so a
-    // transient socket failure is still retried rather than being reclassed
-    // as "no console" by the fallback's own complaint.
+    // Both paths failed: the first backend's error stays the reported one,
+    // so a transient socket failure is still retried rather than being
+    // reclassed as "no console" by the fallback's own complaint.
     const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
     console.log(`  [inject] console fallback for pid ${pid} failed too (${msg.slice(0, 120)})`);
     throw primary;

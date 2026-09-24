@@ -576,21 +576,21 @@ function processBasename(name: string): string {
 }
 
 /**
- * Does `pid` run inside WezTerm on this host (a WezTerm process among its
- * ancestors)? False for a pid that does not exist here, which is what a
- * remote agent's pid looks like. A parent that started after its child is
- * a recycled pid, not an ancestor: false. Ordering that the clock cannot
- * settle (missing start times, or a gap inside the clock's precision) is
- * "unknown", never a silent yes. `tree` is injectable for tests; names may
- * be full paths (macOS ps prints them).
+ * Does `pid` have a process whose executable basename matches `host` among
+ * its ancestors (itself included) on this host? False for a pid that does
+ * not exist here, which is what a remote agent's pid looks like. A parent
+ * that started after its child is a recycled pid, not an ancestor: false.
+ * Ordering that the clock cannot settle (missing start times, or a gap
+ * inside the clock's precision) is "unknown", never a silent yes. `tree` is
+ * injectable for tests; names may be full paths (macOS ps prints them).
  */
-export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>): boolean | "unknown" {
+export function hasAncestor(pid: number, tree: Map<number, ProcessEntry>, host: RegExp): boolean | "unknown" {
   let cur = pid;
   let child = tree.get(pid);
   for (let depth = 0; depth < 64 && cur > 0; depth++) {
     const entry = tree.get(cur);
     if (!entry) return false;
-    if (WEZTERM_PROCESS.test(processBasename(entry.name))) return true;
+    if (host.test(processBasename(entry.name))) return true;
     if (entry.ppid === cur || entry.ppid <= 0) return false;
     const parent = tree.get(entry.ppid);
     // The chain breaks above a live process: an exited intermediary leaves
@@ -610,13 +610,45 @@ export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>
   return false;
 }
 
+/** Does `pid` run inside WezTerm on this host? See hasAncestor. */
+export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>): boolean | "unknown" {
+  return hasAncestor(pid, tree, WEZTERM_PROCESS);
+}
+
+/** Orca's app process (Orca.exe on Windows, Orca on macOS and Linux). Its
+ *  own CLI launcher (orca.exe, lowercase, short-lived) never parents a shell,
+ *  so an exact match is safe on case-insensitive names. */
+const ORCA_PROCESS = /^orca(\.exe)?$/i;
+
+/** Does `pid` run inside an Orca terminal on this host? See hasAncestor. */
+export function isInsideOrcaTree(pid: number, tree: Map<number, ProcessEntry>): boolean | "unknown" {
+  return hasAncestor(pid, tree, ORCA_PROCESS);
+}
+
 /** true / false, or "unknown" when the host cannot enumerate processes or
- *  cannot order the chain by start time. */
-export async function isInsideWezTerm(pid: number): Promise<boolean | "unknown"> {
+ *  cannot order the chain by start time. `tree` lets one join share a single
+ *  enumeration between the WezTerm and Orca checks. */
+export async function isInsideWezTerm(pid: number, tree?: () => Promise<Map<number, ProcessEntry> | null>): Promise<boolean | "unknown"> {
   if (!(pid > 0)) return false;
-  const tree = await listParentPids();
-  if (!tree) return "unknown";
-  return isInsideWezTermTree(pid, tree);
+  const t = await (tree ?? listParentPids)();
+  if (!t) return "unknown";
+  return isInsideWezTermTree(pid, t);
+}
+
+/** Same contract as isInsideWezTerm, for Orca. */
+export async function isInsideOrca(pid: number, tree?: () => Promise<Map<number, ProcessEntry> | null>): Promise<boolean | "unknown"> {
+  if (!(pid > 0)) return false;
+  const t = await (tree ?? listParentPids)();
+  if (!t) return "unknown";
+  return isInsideOrcaTree(pid, t);
+}
+
+/** One process enumeration per join, however many terminal checks ask for
+ *  it. Never shared across joins: a cached table could miss a process that
+ *  started a moment ago and misread it as absent. */
+export function processTreeOnce(): () => Promise<Map<number, ProcessEntry> | null> {
+  let pending: Promise<Map<number, ProcessEntry> | null> | null = null;
+  return () => (pending ??= listParentPids());
 }
 
 /** Get extra env vars needed for wezterm CLI (socket path). */

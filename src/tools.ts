@@ -16,7 +16,8 @@ import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
-import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, listWezTermPaneIds, isInsideWezTerm } from "./terminals.js";
+import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, type ProcessEntry } from "./terminals.js";
+import { listOrcaTerminals, ORCA_HANDLE, type OrcaTerminalState } from "./orca.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,13 +85,115 @@ export async function resolvePaneForJoin(
   return { paneId: await deps.autoDetect() };
 }
 
-export function defaultPaneResolverDeps(manager: ConversationManager): PaneResolverDeps {
+/** A per-join process table source (see processTreeOnce), so the WezTerm
+ *  and Orca checks of one join share a single enumeration. */
+export type ProcessTreeSource = () => Promise<Map<number, ProcessEntry> | null>;
+
+export function defaultPaneResolverDeps(manager: ConversationManager, tree: ProcessTreeSource = processTreeOnce()): PaneResolverDeps {
   return {
     checkWezTerm,
     listPaneIds: listWezTermPaneIds,
-    isInsideWezTerm,
+    isInsideWezTerm: (pid) => isInsideWezTerm(pid, tree),
     autoDetect: () => autoDetectWezTermPane(manager),
   };
+}
+
+/** Dependencies of resolveOrcaForJoin, injectable for tests. */
+export interface OrcaResolverDeps {
+  /** Live Orca terminals by handle, or null when Orca cannot be reached. */
+  listTerminals: () => Promise<Map<string, OrcaTerminalState> | null>;
+  isInsideOrca: (pid: number) => Promise<boolean | "unknown">;
+  /** Whether any binding of this name holds an Orca handle today. */
+  holdsHandle: (name: string) => boolean;
+  log?: (line: string) => void;
+}
+
+/** Outcome of Orca handle resolution: a handle binds, null clears any
+ *  handle held before, undefined leaves it as it was. */
+export interface OrcaResolution { orcaTerminal: string | null | undefined; note?: string; }
+
+/**
+ * Decide which Orca terminal, if any, a joining agent is bound to. Same
+ * invariant as the WezTerm pane: a handle is accepted only when Orca lists
+ * it as connected and writable AND, when the join carries a pid, that pid
+ * runs inside Orca on this host. A handle that fails is dropped with a log
+ * line and a note; the join still succeeds on the pid. Orca's listing has no
+ * pid, so there is no auto-detection: a join without a handle gets none, and
+ * one that rejoins from a pid provably outside Orca, or inside Orca without
+ * saying which terminal, clears a handle it held before.
+ */
+export async function resolveOrcaForJoin(
+  name: string, pid: number, requested: unknown, deps: OrcaResolverDeps
+): Promise<OrcaResolution> {
+  const log = deps.log ?? ((line: string) => console.log(`  [orca] ${line}`));
+  const handle = typeof requested === "string" && requested.trim() !== "" ? requested.trim() : undefined;
+  if (requested != null && typeof requested !== "string") {
+    const note = `orcaTerminal ignored for ${name}: not a string`;
+    log(note);
+    return { orcaTerminal: null, note };
+  }
+  if (handle === undefined) {
+    // Nothing requested. Only a name that holds a handle has anything to lose;
+    // skip the process enumeration otherwise.
+    if (pid > 0 && deps.holdsHandle(name)) {
+      const inside = await deps.isInsideOrca(pid);
+      if (inside !== "unknown") return { orcaTerminal: null };
+    }
+    return { orcaTerminal: undefined };
+  }
+  if (!ORCA_HANDLE.test(handle)) {
+    const note = `Orca terminal ${JSON.stringify(handle.slice(0, 60))} ignored for ${name}: not an Orca terminal handle`;
+    log(note);
+    return { orcaTerminal: null, note };
+  }
+  const live = await deps.listTerminals();
+  if (!live) {
+    const note = `Orca terminal ${handle} ignored for ${name}: no Orca reachable from this server`;
+    log(note);
+    return { orcaTerminal: null, note };
+  }
+  const state = live.get(handle);
+  if (!state) {
+    const note = `Orca terminal ${handle} ignored for ${name}: not a live Orca terminal`;
+    log(note);
+    return { orcaTerminal: null, note };
+  }
+  if (!state.connected || !state.writable) {
+    const note = `Orca terminal ${handle} ignored for ${name}: not ${!state.connected ? "connected" : "writable"}`;
+    log(note);
+    return { orcaTerminal: null, note };
+  }
+  if (pid > 0) {
+    const inside = await deps.isInsideOrca(pid);
+    if (inside === false) {
+      const note = `Orca terminal ${handle} ignored for ${name}: pid ${pid} does not run inside Orca on this host`;
+      log(note);
+      return { orcaTerminal: null, note };
+    }
+    if (inside === "unknown") log(`Orca terminal ${handle} accepted for ${name} unverified: this host cannot enumerate processes`);
+  }
+  return { orcaTerminal: handle };
+}
+
+export function defaultOrcaResolverDeps(manager: ConversationManager, tree: ProcessTreeSource = processTreeOnce()): OrcaResolverDeps {
+  return {
+    listTerminals: () => listOrcaTerminals(),
+    isInsideOrca: (pid) => isInsideOrca(pid, tree),
+    holdsHandle: (name) => manager.holdsOrcaTerminal(name),
+  };
+}
+
+/** The handle a join request names, for the freshness token (before validation). */
+export function requestedOrcaHandle(requested: unknown): string | undefined {
+  return typeof requested === "string" && ORCA_HANDLE.test(requested.trim()) ? requested.trim() : undefined;
+}
+
+/** One line for the MCP join text when a pane or handle was dropped. */
+export function joinNotesText(notes: Array<string | undefined>): string {
+  const kept = notes.filter((n): n is string => !!n);
+  return kept.length > 0
+    ? `\nNote: ${kept.join("; ")}. Mentions reach you by console injection (pid) if that works here, otherwise only by chat_listen.`
+    : "";
 }
 
 /**
@@ -182,9 +285,12 @@ export function registerTools(
         weztermPaneId: z.number().optional().describe(
           "WezTerm pane ID (from $WEZTERM_PANE env var). Enables reliable @mention injection."
         ),
+        orcaTerminal: z.string().optional().describe(
+          "Orca terminal handle, from $env:ORCA_TERMINAL_HANDLE; enables wake-ups inside Orca"
+        ),
       }),
     },
-    async ({ name, pid, conversation, weztermPaneId }, extra) => {
+    async ({ name, pid, conversation, weztermPaneId, orcaTerminal }, extra) => {
       // Determine which conversation to join
       let convId = conversation || manager.getActiveId();
       if (!convId) {
@@ -197,10 +303,15 @@ export function registerTools(
       if (!manager.getRoom(convId)) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId);
+      const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId, requestedOrcaHandle(orcaTerminal));
 
-      // Bind a WezTerm pane only when it is live and really this process's.
-      const { paneId: resolvedPaneId, note: paneNote } = await resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager));
+      // Bind a WezTerm pane or an Orca terminal only when it is live and
+      // really this process's (one process enumeration shared by both checks).
+      const tree = processTreeOnce();
+      const [{ paneId: resolvedPaneId, note: paneNote }, { orcaTerminal: resolvedOrca, note: orcaNote }] = await Promise.all([
+        resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager, tree)),
+        resolveOrcaForJoin(name, pid, orcaTerminal, defaultOrcaResolverDeps(manager, tree)),
+      ]);
 
       // Re-fetch after the await: a conversation deleted meanwhile must not
       // be resurrected by joining its destroyed room, and a newer join or a
@@ -209,13 +320,13 @@ export function registerTools(
       if (!room) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      if (!manager.joinIsCurrent(joinToken, pid, resolvedPaneId ?? undefined)) {
+      if (!manager.joinIsCurrent(joinToken, pid, resolvedPaneId ?? undefined, resolvedOrca ?? undefined)) {
         return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
       const persistedRole = getPersistedRole?.(name);
-      const agent = room.join(name, pid, resolvedPaneId, persistedRole);
-      manager.bindAgent(name, convId, pid, resolvedPaneId);
+      const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca);
+      manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca);
       sessionBindings.set(extra.sessionId, convId);
       room.touch(name);
 
@@ -246,7 +357,8 @@ export function registerTools(
           text:
             `Joined conversation "${meta?.name ?? convId}".\n` +
             `Online: ${online.join(", ") || "just you"}` +
-            (paneNote ? `\nNote: ${paneNote}. Mentions reach you by console injection (pid) if that works here, otherwise only by chat_listen.` : "") +
+            (agent.orcaTerminal ? `\nOrca terminal: ${agent.orcaTerminal} (mentions arrive through Orca)` : "") +
+            joinNotesText([paneNote, orcaNote]) +
             recentText + historyHint,
         }],
       };
