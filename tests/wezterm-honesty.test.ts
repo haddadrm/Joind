@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { resolvePaneForJoin, type PaneResolverDeps } from "../src/tools.js";
 import { isInsideWezTermTree, parseCimDate, parseEtime, parseProcessTable, type ProcessEntry } from "../src/terminals.js";
-import { inject } from "../src/inject.js";
+import { inject, WakeFallbackAborted } from "../src/inject.js";
 import { ChatRoom } from "../src/room.js";
 import { ConversationManager } from "../src/manager.js";
 import { mkdtempSync, rmSync } from "fs";
@@ -190,6 +190,24 @@ describe("inject fallback", () => {
       unix: async () => { throw new Error("Unix injection failed: PID 4242 not found in any tmux pane"); },
       platform: "linux",
     })).rejects.toThrow(/failed to connect to Socket/);
+  });
+
+  it("asks the caller before falling back and aborts with skip or moved when the target changed", async () => {
+    const calls: string[] = [];
+    const backends = {
+      wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
+      windows: async (pid: number) => { calls.push(`windows:${pid}`); },
+      unix: async () => {},
+      platform: "win32" as const,
+    };
+    await expect(inject(100, "hi", 0, undefined, undefined, backends, { fallbackGuard: () => "skip" }))
+      .rejects.toBeInstanceOf(WakeFallbackAborted);
+    const moved = await inject(100, "hi", 0, undefined, undefined, backends, { fallbackGuard: () => "moved" }).catch((e) => e);
+    expect(moved).toBeInstanceOf(WakeFallbackAborted);
+    expect((moved as WakeFallbackAborted).result).toBe("moved");
+    expect(calls).toEqual([]);
+    await inject(100, "hi", 0, undefined, undefined, backends, { fallbackGuard: () => "proceed" });
+    expect(calls).toEqual(["windows:100"]);
   });
 
   it("surfaces the WezTerm failure when there is no pid to fall back to", async () => {

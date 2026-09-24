@@ -107,6 +107,21 @@ export async function injectWezTerm(paneId: number, text: string, weztermExe?: s
   });
 }
 
+/** Thrown by inject() when the caller's guard refused the console fallback:
+ *  the target left ("skip") or is a different session now ("moved"). */
+export class WakeFallbackAborted extends Error {
+  constructor(public readonly result: "skip" | "moved") {
+    super(`console fallback aborted: target ${result === "skip" ? "left" : "moved"}`);
+  }
+}
+
+export interface InjectOptions {
+  /** Called after a WezTerm failure and before the console fallback: the
+   *  caller re-checks that the target is still the same live session.
+   *  Anything but "proceed" aborts the fallback with WakeFallbackAborted. */
+  fallbackGuard?: () => "proceed" | "skip" | "moved";
+}
+
 /** Backends, injectable for tests. */
 export interface InjectBackends {
   wezterm: typeof injectWezTerm;
@@ -123,7 +138,8 @@ export interface InjectBackends {
  */
 export async function inject(
   pid: number, text: string, weztermPaneId?: number, weztermExe?: string, weztermEnv?: Record<string, string>,
-  backends: InjectBackends = { wezterm: injectWezTerm, windows: injectWindows, unix: injectUnix }
+  backends: InjectBackends = { wezterm: injectWezTerm, windows: injectWindows, unix: injectUnix },
+  options: InjectOptions = {}
 ): Promise<void> {
   const platform = backends.platform ?? process.platform;
   let primary: unknown;
@@ -134,6 +150,13 @@ export async function inject(
       if (!(pid > 0)) throw err;
       primary = err;
       const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      // The WezTerm attempt took time; the target may have left or been
+      // replaced meanwhile. Never type into a pid the caller no longer vouches for.
+      const verdict = options.fallbackGuard?.() ?? "proceed";
+      if (verdict !== "proceed") {
+        console.log(`  [inject] wezterm pane ${weztermPaneId} failed (${msg.slice(0, 120)}); no console fallback: target ${verdict === "skip" ? "left" : "moved"}`);
+        throw new WakeFallbackAborted(verdict);
+      }
       console.log(`  [inject] wezterm pane ${weztermPaneId} failed (${msg.slice(0, 120)}); falling back to pid ${pid}`);
     }
   }

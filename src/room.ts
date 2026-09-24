@@ -6,7 +6,7 @@
 import { EventEmitter } from "events";
 import { writeFileSync } from "fs";
 import { dirname } from "path";
-import { inject } from "./inject.js";
+import { inject, WakeFallbackAborted } from "./inject.js";
 import { cancelRoomListens } from "./listen.js";
 import { WakeCoordinator } from "./wake.js";
 
@@ -416,7 +416,21 @@ export class ChatRoom extends EventEmitter {
         if (lockKeysFor(agent).some((k) => !held.has(k))) return "moved";
         const prompt = this.buildWakePrompt(sender, agent);
         console.log(`  → Injecting into ${name} (${identity})...`);
-        await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv());
+        try {
+          await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv(), undefined, {
+            // Between the WezTerm failure and the console fallback the target
+            // must still be this session; otherwise skip or re-queue.
+            fallbackGuard: () => {
+              const live = this.agents.get(name);
+              if (this.destroyed || !live?.active) return "skip";
+              if (terminalIdentity(live) !== identity) return "moved";
+              return "proceed";
+            },
+          });
+        } catch (err) {
+          if (err instanceof WakeFallbackAborted) return err.result;
+          throw err;
+        }
         // Brief delay to let Windows console state settle before the next one
         if (process.platform === "win32") {
           await new Promise((r) => setTimeout(r, 300));
