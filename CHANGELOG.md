@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-09-24: Injection Matrix Harness
+
+A repeatable probe, `tools/inject-matrix/`, that shows with evidence which terminal hosts on a Windows machine the wake-up injector can type into. It drives the real `dist/inject.js`, and a marker only counts as landed when the receiver logs it. See `tools/inject-matrix/README.md` for how to run it and for the full matrix.
+
+### Added
+- `receiver.ps1`: a line receiver run inside each host. It writes its pid and terminal variables, logs each console line with a timestamp, and exits on `QUIT`, on a quit file or after a time limit, so no shell is left behind.
+- `inject-once.mjs`: one call to `inject()`, reported as JSON. Whether the injector resolved is kept separate from whether the text arrived.
+- `matrix.ps1`: launches conhost, Windows Terminal (pwsh 7 and PowerShell 5), WezTerm, Orca, wmux and Warp. It records each receiver's parent chain and console servers, injects with retries plus one warm attempt, and tests each host's own input route (WezTerm backend, `orca terminal send`, `wmux send`). It then cleans up and checks for strays. Results go to the gitignored `results/`.
+
+### Findings (Windows 11 10.0.26200, not elevated)
+- The console backend landed on the first attempt in all seven hosts, ConPTY ones included, in about one second. The time is mostly the process-name lookup and Python startup. Warp was slowest: 8.6 s into a fresh tab, 2.2 s warm.
+- The WezTerm backend reports success, but a line-mode reader never receives the text. It ends with LF, which does not submit under ConPTY, and a later CR does. Because the call does not throw, `inject()` does not fall back to the console path. This was not checked against raw-mode agent TUIs.
+- `orca terminal send` delivers but, for a plain shell, reports only `input_accepted` with provider `unsupported`. `wmux send --submit` delivers, finds no receipt signal, retries Enter and so sends one extra blank line.
+- Warp has a hidden `warp.exe --warpctrl` local-control CLI. It is off by default, and its `input insert` does not submit.
+
 ## 2026-09-24: WezTerm Honesty
 
 From the first live wakes after the Honest Wake-Ups deploy: an agent started outside any terminal (WMI-spawned, no console) joined with WezTerm pane 0, which was someone else's shell; every mention was typed at the wrong pane and the honest failure line blamed a transient error. Underneath it, a process leak: every `wezterm cli` call ran without `--no-auto-start`, so whenever no GUI socket answered it spawned a headless mux server, one per call, forever (579 orphans on one host after three days of joins and 30-second checks).
