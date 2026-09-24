@@ -65,16 +65,18 @@ function terminalRefOf(agent: TerminalRef): TerminalRef {
   return { pid: agent.pid, weztermPaneId: agent.weztermPaneId, orcaTerminal: agent.orcaTerminal };
 }
 /**
- * Is `live` the terminal that `delivered` (with the lock set `held` taken for
- * it) refers to? The same equivalence lockKeysFor() uses: any key of `live`
- * inside the delivered terminal's lock closure, or any delivered key inside
- * the closure of `live` through the live registrations now. A terminal linked
- * only through another registration is still the same terminal.
+ * Is `live` still the terminal an attempt typed into? True when the closure
+ * of `live` through the live registrations now (the same equivalence
+ * lockKeysFor() uses for locking) shares any key with the COMPLETE lock set
+ * the attempt holds, not only the delivered agent's own keys. The held set
+ * already contains every key the delivered terminal was reachable through,
+ * so a terminal linked to it only through a registration that has since
+ * left and rejoined elsewhere (sharing, say, just an Orca handle) is still
+ * recognised. The two narrower checks this replaces (a key of `live` in the
+ * held set; a delivered key in the current closure) are both special cases.
  */
-function sameTerminal(delivered: TerminalRef, held: ReadonlySet<string>, live: TerminalRef): boolean {
-  if (terminalKeys(live).some((k) => held.has(k))) return true;
-  const now = new Set(lockKeysFor(live));
-  return terminalKeys(delivered).some((k) => now.has(k));
+function sameTerminal(held: ReadonlySet<string>, live: TerminalRef): boolean {
+  return lockKeysFor(live).some((k) => held.has(k));
 }
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
@@ -450,7 +452,6 @@ export class ChatRoom extends EventEmitter {
         // the full set instead.
         if (lockKeysFor(agent).some((k) => !held.has(k))) return "moved";
         const prompt = this.buildWakePrompt(sender, agent);
-        const deliveredTo = terminalRefOf(agent);
         partialLine = false;
         console.log(`  → Injecting into ${name} (${identity})...`);
         try {
@@ -489,7 +490,7 @@ export class ChatRoom extends EventEmitter {
               if (terminalIdentity(live) === identity) return "proceed";
               // The registration changed. Same terminal (by lock equivalence,
               // transitively through live registrations): never replay, warn.
-              if (sameTerminal(deliveredTo, held, live)) {
+              if (sameTerminal(held, live)) {
                 console.log(`  [wake] ${name}'s registration changed (${identity} -> ${terminalIdentity(live)}) but it is the terminal holding the prompt; not typing it again`);
                 partialLine = true;
                 return "skip";

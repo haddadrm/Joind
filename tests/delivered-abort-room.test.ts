@@ -176,6 +176,33 @@ describe("a wake whose text is in the terminal finishes in place", () => {
     }
   });
 
+  it("a bridge leaves and rejoins elsewhere with the same handle, then the agent follows: still the same terminal through the held locks (gate round 4)", async () => {
+    const room = new ChatRoom();
+    try {
+      // A pane-only at pane 7; the bridge carries pid 100, pane 7 and handle H,
+      // so A's wake holds pane:7, pid:100 and orca:H. During A's delay the
+      // bridge leaves and rejoins as pid 200 with the same H, and A rejoins
+      // pid-only at 200. A's closure now is {pid:200, orca:H}: linked to the
+      // terminal holding the text only through H, a key the attempt holds.
+      room.join("A", 0, 7);
+      room.join("Bridge", 100, 7, undefined, H);
+      state.onFirstSleep = () => {
+        room.leave("Bridge");
+        room.join("Bridge", 200, null, undefined, H);
+        room.join("A", 200, null);
+      };
+      room.send("Rami", "@A ping");
+      await run();
+      expect(state.sends.filter(isPrompt)).toHaveLength(1);
+      expect(state.sends.filter(isEnter)).toHaveLength(0);
+      expect(state.orca).toEqual([]);
+      expect(lines(room)).toContain("Could not submit the prompt to A; the text is in their input box.");
+    } finally {
+      await run();
+      room.destroy();
+    }
+  });
+
   it("the agent moved to a disjoint terminal: the old one is never typed into again, the new one gets a fresh wake", async () => {
     const room = new ChatRoom();
     try {

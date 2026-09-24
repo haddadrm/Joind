@@ -35,6 +35,7 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
   - Once the text is in, the same attempt sends the delayed second Enter and its one recovery over the route that typed it, still holding every lock it took. `inject()` asks the new `afterTextGuard` there (falling back to `fallbackGuard` for callers that give none). The room's version stops only when the agent left (the log says unsent text remains in that terminal) or its terminal identity changed. It ignores lock growth on purpose: the attempt still holds its locks, so no other wake of ours can type into that terminal until it releases, and a half-typed prompt is the worse outcome.
   - An identity change after the text is judged with the lock equivalence (`sameTerminal`: the delivered terminal's held lock set, or `lockKeysFor` through the live registrations now). The same terminal gets the partial-delivery line and no replay. A different terminal keeps its unsent text (logged) and the new one gets a fresh wake after this attempt releases.
   - `PartialDeliveryError` and the `partial` kind remain for a recovery Enter that fails.
+- Codex gate round 4 (1 Medium, closed): `sameTerminal` checked the live agent's keys against the held locks and the delivered agent's keys against the current closure, and missed a terminal linked only through a key the attempt holds. The sequence: A pane-only at pane 7; a bridge with pid 100, pane 7 and handle H; during A's delay the bridge leaves and rejoins as pid 200 with H, and A rejoins pid-only at 200. The room called that a different terminal and replayed the prompt through pid 200. Now the rule is one intersection: the current closure of the live registration (`lockKeysFor`) against the complete lock set the attempt holds. Both old checks are special cases of it, and genuinely disjoint terminals still get a fresh wake.
 
 ### Verified after the fix (real agents, same harness, fresh session per route)
 
@@ -54,7 +55,7 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
   - a departure;
   - tmux delivering after a WezTerm failure: the Enter goes through tmux.
 
-  In `tests/inject-fixes-gate1.test.ts`, the 7 round-2 tests of the delivered flag and Enter-only mode are deleted and 4 finish-in-place tests take their place. Suite 258.
+  In `tests/inject-fixes-gate1.test.ts`, the 7 round-2 tests of the delivered flag and Enter-only mode are deleted and 4 finish-in-place tests take their place. Suite 258. Gate round 4 adds the bridge departure-and-rejoin sequence as an eighth room-level case (one prompt, no Enter, the partial line), failing on 1f1a070. Suite 259.
 
 ## 2026-09-24: Orca Wake-Ups
 
