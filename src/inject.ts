@@ -481,7 +481,7 @@ export async function injectUnix(pid: number, text: string, guard?: () => void, 
       { timeout: 5000 }
     );
 
-    const lines = stdout.trim().split("\\n");
+    const lines = stdout.trim().split("\n");
     let target: string | null = null;
 
     for (const line of lines) {
@@ -502,7 +502,7 @@ export async function injectUnix(pid: number, text: string, guard?: () => void, 
             ["-P", panePid],
             { timeout: 3000 }
           );
-          if (children.trim().split("\\n").includes(String(pid))) {
+          if (children.trim().split("\n").includes(String(pid))) {
             target = paneTarget;
             break;
           }

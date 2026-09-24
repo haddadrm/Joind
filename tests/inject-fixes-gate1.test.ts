@@ -256,3 +256,31 @@ describe("finding 6: application identity beats ancestor folder names", () => {
     it(label, () => { expect(classifyCommandLine(line)).toEqual(plan); });
   }
 });
+
+describe("tmux pane discovery splits on real newlines (addendum)", () => {
+  /** tmux and pgrep as a two-pane host would answer them. */
+  function twoPaneExec(sent: string[][], children: Record<string, string> = {}): UnixExec {
+    return async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "list-panes") return { stdout: "11 main:0.0\n12 main:0.1\n" };
+      if (cmd === "pgrep") {
+        const out = children[args[1]];
+        if (out === undefined) throw new Error("pgrep: no children");
+        return { stdout: out };
+      }
+      sent.push(args);
+      return { stdout: "" };
+    };
+  }
+
+  it("finds a pane whose own pid is not on the first line", async () => {
+    const sent: string[][] = [];
+    await injectUnix(12, "hello", undefined, DEFAULT_PLAN, { exec: twoPaneExec(sent), sleep: noSleep });
+    expect(sent.map((a) => a[2])).toEqual(["main:0.1", "main:0.1"]);
+  });
+
+  it("finds a pane through a child pid when pgrep lists several children", async () => {
+    const sent: string[][] = [];
+    await injectUnix(300, "hello", undefined, DEFAULT_PLAN, { exec: twoPaneExec(sent, { "12": "299\n300\n" }), sleep: noSleep });
+    expect(sent.map((a) => a[2])).toEqual(["main:0.1", "main:0.1"]);
+  });
+});

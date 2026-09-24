@@ -27,6 +27,8 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
   - Runtime options with a separate value (`--require`/`-r`, `--import`, `--loader`, `--experimental-loader`, `-C` and the rest of node's list, case-sensitive) are skipped before the entry script is chosen. An inline `-e`/`--eval`/`-p`/`--print` program has no entry script, `--` ends the options, and `bun run` and `deno run` step over the subcommand.
   - Application identity beats folder names. The last `node_modules/<package>` in the path decides first (`@openai/codex`, `@github/copilot`, `@anthropic-ai/claude-code`), then the entry point's own name, and only for a generic entry (`cli.js`, `index.js`) the application root below the build folders. Folders above that root are never read, so Claude inside a `codex-cli` checkout stays Claude.
 
+- tmux pane discovery split `list-panes` and `pgrep` output on the two characters backslash and n instead of a newline, so on a host with more than one pane the whole listing was one line and only a pid on the first line could ever be found. Both splits use a real newline now.
+
 ### Verified after the fix (real agents, same harness, fresh session per route)
 
 | route | agent | submitted | reply |
@@ -37,7 +39,7 @@ A raw key reader showed why the WezTerm route failed: it delivered U+000A, where
 
 ### Tests
 - 30 in `tests/submit-plan.test.ts`: classification of the native Codex build, the npm Codex under node (the field command line), `@openai/codex` on Unix, a `codex-cli` checkout, Copilot in four forms, and six negatives including Claude resuming a session named after Codex; the 60 second cache, a shared lookup in flight, failures neither cached nor fatal, no lookup without a pid; the WezTerm terminator and argv (`--no-auto-start`, `--no-paste`) and the Codex sequence (text and CR, the delay, a lone CR) with a fake spawn, and no second Enter after a failed first send; one lookup per wake shared with the console fallback, the plan reaching WezTerm, the Windows console and tmux, no lookup on the Orca path, and a throwing classifier giving a single-Enter wake.
-- `tests/wake-fallback.test.ts` and `tests/orca-wake-room.test.ts` pass a fixed plan: the Linux console path now looks up the command line too, and these tests settle on microtasks alone. Suite 211. Gate round 1 added 34 in `tests/inject-fixes-gate1.test.ts` (27 of them fail on 92603bb; the other 7 pin cases that were already right) and 1 in `tests/partial-delivery-room.test.ts` (the room types a partially delivered prompt once, never through the console or a retry, and says so). The per-pid cache test now asserts a read on every wake. Suite 245.
+- `tests/wake-fallback.test.ts` and `tests/orca-wake-room.test.ts` pass a fixed plan: the Linux console path now looks up the command line too, and these tests settle on microtasks alone. Suite 211. Gate round 1 added 34 in `tests/inject-fixes-gate1.test.ts` (27 of them fail on 92603bb; the other 7 pin cases that were already right) and 1 in `tests/partial-delivery-room.test.ts` (the room types a partially delivered prompt once, never through the console or a retry, and says so). The per-pid cache test now asserts a read on every wake. Suite 245. The tmux split fix adds 2 (a two-pane host: a pane on the second line, and a pane found through the second of two child pids), both failing before it. Suite 247.
 
 ## 2026-09-24: Orca Wake-Ups
 
