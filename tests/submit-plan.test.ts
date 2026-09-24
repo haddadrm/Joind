@@ -13,9 +13,7 @@ describe("classifyCommandLine", () => {
   const codex: Array<[string, string]> = [
     ["native Windows build", "C:\\Users\\u\\AppData\\Local\\OpenAI\\Codex\\bin\\80f7\\codex.exe -c features.x=true"],
     ["npm install under node on Windows (the field case)", "\"C:\\nvm4w\\nodejs\\node.exe\" C:\\Users\\u\\AppData\\Roaming\\npm/node_modules/@openai/codex/bin/codex.js --dangerously-bypass-approvals-and-sandbox"],
-    ["node codex.js, relative", "node codex.js"],
     ["@openai/codex bin under node on Unix", "node /usr/lib/node_modules/@openai/codex/bin/codex.js"],
-    ["a codex-cli checkout", "node /home/u/src/codex-cli/dist/cli.js"],
     ["bare codex on PATH", "/usr/local/bin/codex"],
     ["quoted path with spaces", "\"C:\\Program Files\\Codex\\codex.exe\""],
   ];
@@ -60,7 +58,7 @@ describe("classifyTarget: one read per wake, never a failed wake", () => {
   // about to type into (was: one read per pid per minute).
   it("every wake reads the current process; nothing carries over", async () => {
     const reads: number[] = [];
-    const read = async (pid: number) => { reads.push(pid); return "node /x/@openai/codex/bin/codex.js"; };
+    const read = async (pid: number) => { reads.push(pid); return "node /x/node_modules/@openai/codex/bin/codex.js"; };
     expect(await classifyTarget(42, "win32", { read })).toEqual(CODEX_PLAN);
     expect(await classifyTarget(42, "win32", { read })).toEqual(CODEX_PLAN);
     expect(reads).toEqual([42, 42]);

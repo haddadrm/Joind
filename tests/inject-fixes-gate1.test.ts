@@ -3,7 +3,7 @@ import {
   inject, injectWezTerm, injectUnix, PartialDeliveryError, WakeFallbackAborted,
   type InjectBackends, type SendTextProcess, type SpawnSendText, type UnixExec,
 } from "../src/inject.js";
-import { classifyCommandLine, classifyTarget, forgetTarget, resetTargetCache, CODEX_PLAN, DEFAULT_PLAN, type SubmitPlan } from "../src/target.js";
+import { classifyCommandLine, classifyTarget, forgetTarget, resetTargetCache, CODEX_PLAN, COPILOT_PLAN, DEFAULT_PLAN, type SubmitPlan } from "../src/target.js";
 import { classifyWakeFailure, WakeCoordinator } from "../src/wake.js";
 
 // Codex gate round 1 on feat/inject-fixes (92603bb): one test (or group) per
@@ -222,45 +222,36 @@ describe("finding 4: a reused pid never inherits the previous process's plan", (
   });
 });
 
-describe("finding 5: node options that take a value are not the entry script", () => {
-  const cases: Array<[string, string, SubmitPlan]> = [
-    ["--require with a separate value (the gate's case)", "node --require /opt/tracing/register.cjs /usr/lib/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["-r", "node -r /opt/tracing/register.cjs /usr/lib/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["--env-file-if-exists with a separate value (gate round 5)", "node --env-file-if-exists .env /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["--env-file-if-exists in = form", "node --env-file-if-exists=.env /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["underscore spelling (node accepts it)", "node --env_file_if_exists .env /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["an option not in the list with a bare value (gate round 6)", "node --disable-warning ExperimentalWarning /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["several unknown options with bare values", "node --test-timeout 5000 --inspect-publish-uid stderr,http --watch-kill-signal SIGTERM /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["a boolean option directly before a script path", "node --trace-warnings /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["a boolean option before a relative script with an extension", "node --trace-warnings codex.js", CODEX_PLAN],
-    ["a boolean option before a bare script name reads as a value (documented limit)", "node --trace-warnings server", DEFAULT_PLAN],
-    ["a Windows path with backslashes is a script even without an extension", "node --disable-warning ExperimentalWarning C:\\tools\\node_modules\\@openai\\codex\\bin\\codex", CODEX_PLAN],
-    ["--env-file and --localstorage-file with separate values", "node --env-file .env --localstorage-file /tmp/ls.db /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["--import", "node --import ./otel.mjs /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["--loader and --experimental-loader", "node --loader ts-node/esm --experimental-loader ./l.mjs /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["= forms are one token", "node --inspect=9229 --max-old-space-size=4096 /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["-C takes a value, case-sensitive", "node -C development /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["-- ends the options", "node --trace-warnings -- /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["an inline -e program has no entry script", "node -e \"require('/x/node_modules/@openai/codex/bin/codex.js')\"", DEFAULT_PLAN],
-    ["--eval likewise", "node --eval 1 /x/node_modules/@openai/codex/bin/codex.js", DEFAULT_PLAN],
-    ["bun run", "bun run /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["deno run with options", "deno run --allow-all --config deno.json /x/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["node's run is a file name, not a subcommand", "node run /x/node_modules/@openai/codex/bin/codex.js", DEFAULT_PLAN],
-  ];
-  for (const [label, line, plan] of cases) {
-    it(label, () => { expect(classifyCommandLine(line)).toEqual(plan); });
-  }
-});
-
-describe("finding 6: application identity beats ancestor folder names", () => {
-  const cases: Array<[string, string, SubmitPlan]> = [
-    ["Claude's package inside a codex-cli folder (the gate's case)", "node /home/u/codex-cli/node_modules/@anthropic-ai/claude-code/cli.js", DEFAULT_PLAN],
-    ["a claude executable inside a codex-cli folder (the gate's case)", "/home/u/codex-cli/.tools/claude", DEFAULT_PLAN],
-    ["Codex's package inside a claude-code folder", "node /home/u/claude-code/node_modules/@openai/codex/bin/codex.js", CODEX_PLAN],
-    ["the last package wins when packages nest", "node /x/node_modules/@openai/codex/node_modules/@anthropic-ai/claude-code/cli.js", DEFAULT_PLAN],
-    ["a generic entry is named by its application root, past build folders", "node /home/u/src/codex-cli/dist/cli.js", CODEX_PLAN],
-    ["but not by folders above that root", "node /home/u/codex-cli/tools/runner/index.js", DEFAULT_PLAN],
-    ["an unrelated tool in a codex folder", "/opt/codex/bin/rg", DEFAULT_PLAN],
+describe("application identity (gate round 7): a known executable name or a known package path, never argv parsing", () => {
+  const NPM_CODEX = "/usr/lib/node_modules/@openai/codex/bin/codex.js";
+  const cases: Array<[string, string | null, SubmitPlan]> = [
+    // 1. The executable names the application; its arguments are never read.
+    ["codex.exe", "codex.exe", CODEX_PLAN],
+    ["a quoted Windows path to codex.exe, with arguments", "\"C:\\Program Files\\Codex\\codex.exe\" -c features.x=true", CODEX_PLAN],
+    ["claude.exe resuming a session named after Codex", "claude.exe --resume codex-notes", DEFAULT_PLAN],
+    ["claude.exe with a codex path in its arguments", `claude.exe --add-dir ${NPM_CODEX}`, DEFAULT_PLAN],
+    // 2. gh copilot.
+    ["gh copilot", "gh copilot suggest", COPILOT_PLAN],
+    // 3. A runtime: the first argument carrying a known package path decides.
+    ["node with the npm Codex path, Unix separators", `node ${NPM_CODEX}`, CODEX_PLAN],
+    ["node with the npm Codex path, Windows separators (the field case)", "\"C:\\nvm4w\\nodejs\\node.exe\" C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js --dangerously-bypass-approvals-and-sandbox", CODEX_PLAN],
+    ["node --require x before the path", `node --require /opt/tracing/register.cjs ${NPM_CODEX}`, CODEX_PLAN],
+    ["node --experimental-config-file ./node.config.json before the path (round 7)", `node --experimental-config-file ./node.config.json ${NPM_CODEX}`, CODEX_PLAN],
+    ["node --disable-warning ExperimentalWarning before the path", `node --disable-warning ExperimentalWarning ${NPM_CODEX}`, CODEX_PLAN],
+    ["node --env_file_if_exists .env before the path", `node --env_file_if_exists .env ${NPM_CODEX}`, CODEX_PLAN],
+    ["node --allow-fs-read ./node_modules before the path", `node --allow-fs-read ./node_modules ${NPM_CODEX}`, CODEX_PLAN],
+    ["bun with the package path", `bun ${NPM_CODEX}`, CODEX_PLAN],
+    ["deno run with the package path", `deno run --allow-all ${NPM_CODEX}`, CODEX_PLAN],
+    ["node with the @github/copilot path", "node /usr/lib/node_modules/@github/copilot/index.js", COPILOT_PLAN],
+    ["node with the Claude package path and --resume codex-notes", "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume codex-notes", DEFAULT_PLAN],
+    ["node --trace-warnings server codex.js (round 7: application arguments are never read)", "node --trace-warnings server codex.js", DEFAULT_PLAN],
+    ["node --trace-warnings server", "node --trace-warnings server", DEFAULT_PLAN],
+    // Documented behaviour, both directions.
+    ["a Codex source checkout without node_modules gets the default plan (documented loss)", "node /home/u/src/codex-cli/dist/cli.js", DEFAULT_PLAN],
+    ["a package path in an option value still counts (documented, absurd)", "node --require /x/node_modules/@openai/codex/register.js app.js", CODEX_PLAN],
+    // 4. Nothing to go on.
+    ["empty", "", DEFAULT_PLAN],
+    ["unreadable", null, DEFAULT_PLAN],
   ];
   for (const [label, line, plan] of cases) {
     it(label, () => { expect(classifyCommandLine(line)).toEqual(plan); });
