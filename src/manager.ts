@@ -308,6 +308,23 @@ export class ConversationManager extends EventEmitter {
     return keys.length > 0 ? keys : ["pid:0"];
   }
 
+  /**
+   * The aliases a join will effectively hold once bound: the request's own,
+   * plus those of any existing binding for the name that bindAgent would
+   * merge with (it matches by pid OR pane and keeps the aliases the request
+   * omitted). Freshness has to cover all of them.
+   */
+  effectiveJoinAliases(agentName: string, pid: number | undefined, paneId: number | undefined): string[] {
+    const keys = new Set(ConversationManager.joinTerminalKeys(pid, paneId));
+    for (const e of this.agentBindings.get(agentName) ?? []) {
+      const matches = (paneId != null && e.paneId === paneId) || (pid != null && pid !== 0 && e.pid === pid);
+      if (!matches) continue;
+      if (e.pid && e.pid > 0) keys.add(`pid:${e.pid}`);
+      if (e.paneId != null) keys.add(`pane:${e.paneId}`);
+    }
+    return [...keys];
+  }
+
   beginJoin(agentName: string, terminals: string[], conversationId: string): JoinToken {
     const terminalGens: Record<string, number> = {};
     for (const terminal of new Set(terminals)) {

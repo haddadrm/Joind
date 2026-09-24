@@ -94,6 +94,18 @@ describe("join generations (manager-level: name+terminal across rooms, room+name
       const otherPidSamePane = manager.beginJoin("Claude", ["pid:700", "pane:8"], y.id);
       expect(manager.joinIsCurrent(otherPidSamePane)).toBe(true);
       expect(manager.joinIsCurrent(withBoth2)).toBe(false);
+      // Round-11 case: aliases retained by an existing binding count. Claude is bound
+      // {pid 100, pane 7} in X; a pane-only join into X is held; a newer pid-only join
+      // into Y (which keeps pane 7 through the binding merge) must supersede it.
+      manager.bindAgent("Claude", x.id, 100, 7);
+      expect(manager.effectiveJoinAliases("Claude", 0, 7).sort()).toEqual(["pane:7", "pid:100"]);
+      expect(manager.effectiveJoinAliases("Claude", 100, undefined).sort()).toEqual(["pane:7", "pid:100"]);
+      expect(manager.effectiveJoinAliases("Claude", 900, undefined)).toEqual(["pid:900"]);
+      const heldPaneOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", 0, 7), x.id);
+      const newerPidOnly = manager.beginJoin("Claude", manager.effectiveJoinAliases("Claude", 100, undefined), y.id);
+      expect(manager.joinIsCurrent(newerPidOnly)).toBe(true);
+      expect(manager.joinIsCurrent(heldPaneOnly)).toBe(false);
+      manager.unbindAgent("Claude");
       // A departure for the name (even with no binding yet) ends every pending join for it.
       manager.supersedeJoins("Claude");
       expect(manager.joinIsCurrent(pendingX)).toBe(false);
