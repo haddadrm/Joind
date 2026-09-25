@@ -246,6 +246,7 @@ function connect() {
         allMessages = (event.data.messages || []).slice();
         activeConversation = event.data.activeConversation || null;
         conversationList = event.data.conversations || [];
+        applyLinkPayload(event.data);
         initTaskCount = event.data.openTaskCount || 0;
         initHasUrgent = event.data.hasUrgentTask || false;
         if (event.data.turnGuard) initTurnGuard(event.data.turnGuard);
@@ -261,6 +262,7 @@ function connect() {
             refreshDmThread(activeDm);
           } else {
             renderMessages(event.data.messages || []);
+            renderPendingForActive();
           }
           renderTaskBadgeFromCount(initTaskCount, initHasUrgent);
         } else {
@@ -334,6 +336,8 @@ function connect() {
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) {
           break;
         }
+        // A dispatched undelivered message is replaced by its real copy here
+        settlePendingFor(event.conversationId || activeConversation.id, event.data);
         allMessages.push(event.data);
         // Filter: only render messages that belong to the current view
         // (channel view skips DMs; DM view skips channel traffic)
@@ -494,6 +498,19 @@ function connect() {
       case 'message-edited':
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         handleMessageEdited(event.data);
+        break;
+      // Linked servers: link state and the undelivered queue of remote rooms
+      case 'link':
+        onLinkEvent(event.data);
+        break;
+      case 'pending':
+        onPendingEvent(event);
+        break;
+      case 'pending-dispatched':
+        onPendingDispatched(event);
+        break;
+      case 'pending-deleted':
+        onPendingDeleted(event);
         break;
     }
   };
@@ -2281,6 +2298,7 @@ function loadConversations() {
   fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).then(function(data) {
     activeConversation = data.active;
     conversationList = data.conversations || [];
+    applyLinkPayload(data);
     renderConversationList();
   });
 }
@@ -2300,7 +2318,7 @@ function selectConversation(id) {
   clearReply();
   clearImagePreview();
   // Optimistic: immediately highlight the selected conversation + clear chat
-  var meta = conversationList.find(function(c) { return c.id === id; });
+  var meta = findConversationMeta(id);
   if (meta) {
     activeConversation = meta;
     renderConversationList();
@@ -2321,6 +2339,11 @@ function selectConversation(id) {
       if (mySelect !== convSelectSeq) return; // superseded by a newer selection
       if (data.conversation) {
         activeConversation = data.conversation;
+        if (Array.isArray(data.pending)) {
+          // A server snapshot of this room's queue replaces the local copy
+          delete pendingByConv[id];
+          data.pending.forEach(function(p) { addPendingEntry(id, p); });
+        }
         allMessages = (data.messages || []).slice();
         agents = data.agents || [];
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
@@ -2368,6 +2391,8 @@ function renderConversationList() {
     activeEl.className = 'active-session';
     activeEl.title = 'Click to rename';
     activeEl.onclick = function() {
+      // Remote rooms are administered on their home server only
+      if (isRemoteConversation(activeConversation.id)) return;
       customPrompt('Rename conversation:', activeConversation.name, function(newName) {
         if (newName && newName !== activeConversation.name) {
           fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2381,6 +2406,7 @@ function renderConversationList() {
     activeEl.onclick = null;
   }
   syncChannelHeader();
+  renderRemoteSections();
 
   // Filter
   var items = conversationList;
@@ -2666,6 +2692,7 @@ function renderChannelView() {
   var c = document.getElementById('messages');
   c.textContent = '';
   currentViewMessages(allMessages).forEach(function(m) { appendMessage(m, false); });
+  renderPendingForActive();
   if (allMessages.length > 0) scrollToBottom();
   renderConversationList();
   renderDmList();
@@ -2682,10 +2709,450 @@ function syncChannelHeader() {
     topic.textContent = 'Direct message';
   } else if (activeConversation) {
     title.textContent = '# ' + activeConversation.name;
-    topic.textContent = agents.length + ' member(s)';
+    var server = remoteServerOf(activeConversation.id);
+    if (server) {
+      // Home server and link state lead, so a narrow header truncates the
+      // member count rather than the link state.
+      topic.textContent = '';
+      appendRemoteHeaderState(topic, server);
+      topic.appendChild(document.createTextNode(' · ' + agents.length + ' member(s)'));
+    } else {
+      topic.textContent = agents.length + ' member(s)';
+    }
   } else {
     title.textContent = '#';
     topic.textContent = '';
+  }
+  syncLinkHint();
+}
+
+// ============================================================
+// Linked servers. A remote room lives on a peer (its home server)
+// and is mirrored here under the id "<server>:<room>". That id is
+// used unchanged by every existing call (select, read, send, bell,
+// DMs), so the room behaves like a local one. This module adds only
+// what is new: the "remote: <server>" groups in the channel list,
+// the link state in the header and composer, and the undelivered
+// queue (pending messages) of the viewer.
+// ============================================================
+
+var links = []; // [{ name, state: 'up' | 'down', since }]
+var remoteConversations = []; // [{ id, server, name, messageCount, starred, state }]
+// Undelivered messages per remote room, in queue order:
+// { clientId, sender, text, queuedAt }
+var pendingByConv = {};
+// clientId -> { conv, id } for dispatched entries whose real message has
+// not been rendered yet; the row stays until that message lands.
+var pendingAwaiting = {};
+var PENDING_AWAIT_MS = 15000;
+
+// Accept links, remote rooms and (optionally) queued messages from any
+// payload that carries them: init and /api/conversations.
+function applyLinkPayload(data) {
+  if (!data) return;
+  if (Array.isArray(data.links)) links = data.links.slice();
+  if (Array.isArray(data.remoteConversations)) remoteConversations = data.remoteConversations.slice();
+  if (Array.isArray(data.pending)) {
+    pendingByConv = {};
+    data.pending.forEach(function(p) { addPendingEntry(p.conversationId, p); });
+  }
+}
+
+function linkByName(name) {
+  for (var i = 0; i < links.length; i++) {
+    if (links[i].name === name) return links[i];
+  }
+  return null;
+}
+
+function remoteMetaById(id) {
+  for (var i = 0; i < remoteConversations.length; i++) {
+    if (remoteConversations[i].id === id) return remoteConversations[i];
+  }
+  return null;
+}
+
+// The home server of a conversation id, or null for a local room. Local
+// ids look like "c-2026-09-25T..." and never start with a configured link
+// name plus a colon, so the prefix test is safe before the list loads.
+function remoteServerOf(id) {
+  if (!id) return null;
+  var meta = remoteMetaById(id);
+  if (meta) return meta.server;
+  var colon = id.indexOf(':');
+  if (colon > 0 && linkByName(id.slice(0, colon))) return id.slice(0, colon);
+  return null;
+}
+
+function isRemoteConversation(id) { return remoteServerOf(id) !== null; }
+
+function findConversationMeta(id) {
+  var local = conversationList.find(function(c) { return c.id === id; });
+  return local || remoteMetaById(id);
+}
+
+// Link state for a server: the link entry wins, the room's own state is
+// the fallback, and an unknown server counts as down.
+function linkStateOf(server) {
+  var link = linkByName(server);
+  if (link) return link;
+  var room = remoteConversations.find(function(c) { return c.server === server; });
+  return { name: server, state: room && room.state === 'up' ? 'up' : 'down', since: null };
+}
+
+// `since` may be epoch milliseconds or an ISO string.
+function formatLinkSince(since) {
+  if (since == null || since === '') return '';
+  var d = new Date(since);
+  if (isNaN(d.getTime())) return '';
+  var sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay ? formatTimeShort(d.getTime())
+    : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + formatTimeShort(d.getTime());
+}
+
+function linkBadge(state) {
+  var badge = document.createElement('span');
+  badge.className = 'link-badge ' + (state === 'up' ? 'up' : 'down');
+  badge.textContent = state === 'up' ? 'linked' : 'link down';
+  return badge;
+}
+
+// One group per link (plus any server that only appears in the room list),
+// rendered below the local channels. Local rooms are untouched.
+function renderRemoteSections() {
+  var host = document.getElementById('remote-sections');
+  if (!host) return;
+  host.textContent = '';
+  var servers = [];
+  links.forEach(function(l) { if (servers.indexOf(l.name) < 0) servers.push(l.name); });
+  remoteConversations.forEach(function(c) { if (servers.indexOf(c.server) < 0) servers.push(c.server); });
+  var q = convSearchQuery ? convSearchQuery.toLowerCase() : '';
+
+  servers.forEach(function(server) {
+    var link = linkStateOf(server);
+    var down = link.state !== 'up';
+    var rooms = remoteConversations.filter(function(c) { return c.server === server; });
+    if (q) rooms = rooms.filter(function(c) { return c.name.toLowerCase().indexOf(q) >= 0; });
+    if (q && rooms.length === 0) return;
+
+    var group = document.createElement('div');
+    group.className = 'remote-section' + (down ? ' link-down' : '');
+    group.dataset.server = server;
+
+    var heading = document.createElement('div');
+    heading.className = 'remote-heading';
+    var since = formatLinkSince(link.since);
+    heading.title = (down ? 'Link down' : 'Linked') + (since ? ' since ' + since : '') +
+      (down ? '. Messages you send to these rooms will queue.' : '');
+    var icon = document.createElement('i');
+    icon.setAttribute('data-lucide', down ? 'unlink' : 'link');
+    icon.setAttribute('width', '12');
+    icon.setAttribute('height', '12');
+    icon.setAttribute('aria-hidden', 'true');
+    var label = document.createElement('span');
+    label.className = 'remote-heading-label';
+    label.textContent = 'remote: ' + server;
+    heading.appendChild(icon);
+    heading.appendChild(label);
+    heading.appendChild(linkBadge(link.state));
+    group.appendChild(heading);
+
+    var ul = document.createElement('ul');
+    ul.className = 'conversation-list remote-list';
+    if (rooms.length === 0) {
+      var empty = document.createElement('li');
+      empty.className = 'empty-state';
+      empty.textContent = down ? 'Unreachable' : 'No rooms';
+      ul.appendChild(empty);
+    }
+    rooms.forEach(function(conv) {
+      var li = document.createElement('li');
+      li.className = 'conversation-item remote' + (down ? ' link-down' : '') +
+        (activeConversation && conv.id === activeConversation.id ? ' active' : '');
+      li.title = conv.name + ' on ' + server + (down ? ' (link down)' : '');
+      if (conv.starred) {
+        var star = document.createElement('span');
+        star.className = 'conv-star';
+        star.textContent = '★';
+        li.appendChild(star);
+      }
+      var name = document.createElement('span');
+      name.className = 'conv-name';
+      name.textContent = conv.name;
+      li.appendChild(name);
+      var queued = (pendingByConv[conv.id] || []).length;
+      if (queued > 0) {
+        var qBadge = document.createElement('span');
+        qBadge.className = 'conv-queued';
+        qBadge.textContent = queued + ' queued';
+        li.appendChild(qBadge);
+      }
+      var count = document.createElement('span');
+      count.className = 'conv-count';
+      count.textContent = conv.messageCount || '';
+      li.appendChild(count);
+      // No menu: star, rename and delete belong to the home server.
+      li.addEventListener('click', function() { selectConversation(conv.id); });
+      ul.appendChild(li);
+    });
+    group.appendChild(ul);
+    host.appendChild(group);
+  });
+  if (window.lucide) lucide.createIcons({ root: host });
+}
+
+// Header suffix for a remote room: home server and link state with since.
+function appendRemoteHeaderState(topic, server) {
+  var link = linkStateOf(server);
+  var since = formatLinkSince(link.since);
+  var wrap = document.createElement('span');
+  wrap.className = 'remote-header-state' + (link.state === 'up' ? '' : ' link-down');
+  wrap.appendChild(document.createTextNode('on ' + server + ' '));
+  var badge = linkBadge(link.state);
+  badge.textContent = (link.state === 'up' ? 'up' : 'down') + (since ? ' since ' + since : '');
+  badge.title = (link.state === 'up' ? 'Linked' : 'Link down') + (since ? ' since ' + since : '');
+  wrap.appendChild(badge);
+  topic.appendChild(wrap);
+}
+
+// One-line hint above the composer while the active remote room's link is
+// down. The composer itself stays enabled: sends queue on the server.
+function syncLinkHint() {
+  var hint = document.getElementById('link-hint');
+  if (!hint) return;
+  var server = (!activeDm && activeConversation) ? remoteServerOf(activeConversation.id) : null;
+  var link = server ? linkStateOf(server) : null;
+  if (!link || link.state === 'up') {
+    hint.hidden = true;
+    hint.textContent = '';
+    return;
+  }
+  hint.textContent = 'Link to ' + server + ' is down. Messages you send here will queue and go out when it returns.';
+  hint.hidden = false;
+}
+
+function onLinkEvent(data) {
+  if (!data || !data.name) return;
+  var next = { name: data.name, state: data.state === 'up' ? 'up' : 'down', since: data.since };
+  var found = false;
+  links = links.map(function(l) {
+    if (l.name !== data.name) return l;
+    found = true;
+    return next;
+  });
+  if (!found) links.push(next);
+  remoteConversations.forEach(function(c) { if (c.server === data.name) c.state = next.state; });
+  renderConversationList(); // also refreshes the header and the composer hint
+}
+
+// Pending payloads carry conversationId in data; the envelope's
+// conversationId (the convention of every other event) is the fallback.
+function pendingConvOf(event) {
+  return (event.data && event.data.conversationId) || event.conversationId || null;
+}
+
+function addPendingEntry(conv, p) {
+  if (!conv || !p || !p.clientId) return false;
+  var list = pendingByConv[conv] || (pendingByConv[conv] = []);
+  if (list.some(function(x) { return x.clientId === p.clientId; })) return false;
+  list.push({ clientId: p.clientId, sender: p.sender, text: p.text, queuedAt: p.queuedAt });
+  return true;
+}
+
+function removePendingEntry(conv, clientId) {
+  var list = pendingByConv[conv];
+  if (!list) return;
+  pendingByConv[conv] = list.filter(function(x) { return x.clientId !== clientId; });
+  if (pendingByConv[conv].length === 0) delete pendingByConv[conv];
+}
+
+function pendingElement(conv, clientId) {
+  var els = document.querySelectorAll('.message.pending');
+  for (var i = 0; i < els.length; i++) {
+    if (els[i].dataset.conv === conv && els[i].dataset.clientId === clientId) return els[i];
+  }
+  return null;
+}
+
+function pendingViewActive(conv) {
+  return !!(activeConversation && activeConversation.id === conv && !activeDm);
+}
+
+function renderPendingForActive() {
+  if (!activeConversation || activeDm) return;
+  (pendingByConv[activeConversation.id] || []).forEach(function(p) {
+    if (!pendingElement(activeConversation.id, p.clientId)) appendPending(activeConversation.id, p);
+  });
+}
+
+// An undelivered message: the shape of a message row, dimmed, with a
+// queued marker. Its author, and only its author, may delete it.
+function appendPending(conv, p) {
+  var c = document.getElementById('messages');
+  if (!c) return;
+  hideWelcome();
+  var color = getSenderColor(p.sender || '');
+  var el = document.createElement('div');
+  el.className = 'message pending';
+  el.dataset.id = '';
+  el.dataset.conv = conv;
+  el.dataset.clientId = p.clientId;
+  el.style.setProperty('--bubble-color', color);
+
+  var av = document.createElement('div');
+  av.className = 'msg-avatar';
+  av.style.background = color;
+  av.style.setProperty('--avatar-color', color);
+  av.textContent = (p.sender || '?').charAt(0).toUpperCase();
+
+  var body = document.createElement('div');
+  body.className = 'msg-body';
+  var hdr = document.createElement('div');
+  hdr.className = 'msg-header';
+  var sn = document.createElement('span');
+  sn.className = 'msg-sender';
+  sn.style.color = color;
+  sn.textContent = p.sender || '';
+  var marker = document.createElement('span');
+  marker.className = 'pending-marker';
+  var clock = document.createElement('i');
+  clock.setAttribute('data-lucide', 'clock');
+  clock.setAttribute('width', '11');
+  clock.setAttribute('height', '11');
+  clock.setAttribute('aria-hidden', 'true');
+  var markerText = document.createElement('span');
+  markerText.className = 'pending-marker-text';
+  markerText.textContent = 'queued, not delivered';
+  marker.appendChild(clock);
+  marker.appendChild(markerText);
+  hdr.appendChild(sn);
+  hdr.appendChild(marker);
+  if (p.queuedAt != null) {
+    var tm = document.createElement('span');
+    tm.className = 'msg-time';
+    tm.textContent = formatTime(p.queuedAt);
+    hdr.appendChild(tm);
+  }
+  body.appendChild(hdr);
+  var tw = document.createElement('div');
+  tw.className = 'msg-text-wrap';
+  renderContent(tw, p.text);
+  body.appendChild(tw);
+
+  if (p.sender && p.sender === myName()) {
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'pending-delete';
+    del.title = 'Delete this queued message before it is sent';
+    del.setAttribute('aria-label', 'Delete queued message');
+    var delIcon = document.createElement('i');
+    delIcon.setAttribute('data-lucide', 'trash-2');
+    delIcon.setAttribute('width', '12');
+    delIcon.setAttribute('height', '12');
+    delIcon.setAttribute('aria-hidden', 'true');
+    var delText = document.createElement('span');
+    delText.textContent = 'Delete';
+    del.appendChild(delIcon);
+    del.appendChild(delText);
+    del.addEventListener('click', function() { deletePending(conv, p.clientId, el, del); });
+    body.appendChild(del);
+  }
+
+  el.appendChild(av);
+  el.appendChild(body);
+  c.appendChild(el);
+  lastSender = null; // a pending row never groups with the next real message
+  if (window.lucide) lucide.createIcons({ root: el });
+  if (autoScroll) scrollToBottom();
+}
+
+function deletePending(conv, clientId, el, btn) {
+  btn.disabled = true;
+  el.classList.add('deleting');
+  fetch('/api/pending/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversation: conv, clientId: clientId, token: webToken() }) })
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      // The pending-deleted event normally lands first; this is idempotent.
+      dropPending(conv, clientId);
+    })
+    .catch(function() {
+      // Already dispatched, or the server refused: keep the row honest.
+      btn.disabled = false;
+      el.classList.remove('deleting');
+      btn.title = 'Could not delete: it may already have been sent';
+    });
+}
+
+function dropPending(conv, clientId) {
+  removePendingEntry(conv, clientId);
+  delete pendingAwaiting[clientId];
+  var el = pendingElement(conv, clientId);
+  if (el) el.remove();
+  renderRemoteSections();
+}
+
+function onPendingEvent(event) {
+  var conv = pendingConvOf(event);
+  var p = event.data;
+  if (!addPendingEntry(conv, p)) return;
+  if (pendingViewActive(conv) && !pendingElement(conv, p.clientId)) appendPending(conv, p);
+  renderRemoteSections();
+}
+
+function onPendingDeleted(event) {
+  var conv = pendingConvOf(event);
+  if (!conv || !event.data || !event.data.clientId) return;
+  dropPending(conv, event.data.clientId);
+}
+
+// Dispatched: the home server assigned an id and the real message arrives
+// as a normal `message` event. Whichever of the two lands second removes
+// the pending row, so the room never shows the message twice.
+function onPendingDispatched(event) {
+  var conv = pendingConvOf(event);
+  var d = event.data;
+  if (!conv || !d || !d.clientId) return;
+  removePendingEntry(conv, d.clientId);
+  renderRemoteSections();
+  var el = pendingElement(conv, d.clientId);
+  if (!el) return;
+  var landed = d.id != null && activeConversation && activeConversation.id === conv &&
+    allMessages.some(function(m) { return m.id === d.id; });
+  if (landed) { el.remove(); return; }
+  el.classList.add('dispatched');
+  var txt = el.querySelector('.pending-marker-text');
+  if (txt) txt.textContent = 'sending';
+  var btn = el.querySelector('.pending-delete');
+  if (btn) btn.remove();
+  pendingAwaiting[d.clientId] = { conv: conv, id: d.id };
+  // Safety net: a real message filtered out of this view never arrives.
+  setTimeout(function() {
+    if (!pendingAwaiting[d.clientId]) return;
+    delete pendingAwaiting[d.clientId];
+    var stale = pendingElement(conv, d.clientId);
+    if (stale) stale.remove();
+  }, PENDING_AWAIT_MS);
+}
+
+// Called for every message that reaches the active room: drop the pending
+// row it replaces (matched by the dispatched id, or by clientId when the
+// server echoes it on the message).
+function settlePendingFor(conv, msg) {
+  if (!conv || !msg) return;
+  Object.keys(pendingAwaiting).forEach(function(clientId) {
+    var w = pendingAwaiting[clientId];
+    if (w.conv === conv && w.id != null && w.id === msg.id) {
+      delete pendingAwaiting[clientId];
+      var el = pendingElement(conv, clientId);
+      if (el) el.remove();
+    }
+  });
+  if (msg.clientId) {
+    removePendingEntry(conv, msg.clientId);
+    delete pendingAwaiting[msg.clientId];
+    var echoed = pendingElement(conv, msg.clientId);
+    if (echoed) echoed.remove();
   }
 }
 

@@ -36,3 +36,6 @@ data/**
 Thumbs.db
 .vscode/
 .idea/
+
+# Linked servers UI mock screenshots
+tools/link-mock/shots/
