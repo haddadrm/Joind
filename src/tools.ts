@@ -13,7 +13,7 @@ import { ConversationManager, isTerminalLess, newRegistrationId, type AgentBindi
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { visibleToViewer } from "./room.js";
 import { MirrorRoom, type WriteResult } from "./mirror.js";
-import type { RemoteRooms } from "./peer-types.js";
+import type { RemoteRegistered, RemoteRooms } from "./peer-types.js";
 import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
@@ -385,6 +385,26 @@ export function departureIsCurrent(
   return true;
 }
 
+/**
+ * A local join of `name` into `room` is refused while a linked peer owns the
+ * name there: its hosted member or its human (gate round 1, finding 1).
+ * Checked when the join begins and again when it commits, since a peer can
+ * register during the join's terminal validation (finding 4).
+ */
+export function peerOwnerRefusal(
+  room: { peerOwnerOf(name: string): { peer: string; human: boolean } | undefined },
+  convId: string, name: string,
+): { error: string; candidates: Array<{ conversation: string; host: string; human?: true }> } | null {
+  const owner = room.peerOwnerOf(name);
+  if (!owner) return null;
+  return {
+    error: owner.human
+      ? `${name} is taken in this room by the human of ${owner.peer}; pick another name`
+      : `${name} is a member of this room hosted on ${owner.peer}; join from there, or pick another name`,
+    candidates: [{ conversation: convId, host: owner.peer, ...(owner.human ? { human: true as const } : {}) }],
+  };
+}
+
 const registrationArg = z.string().optional().describe(
   "The registration id your join returned. Pass it when your name may be registered more than once, and after an MCP reconnect."
 );
@@ -450,9 +470,9 @@ export function registerTools(
       if (!found) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
-      const hostedHere = found.getAgent(name)?.host;
-      if (hostedHere) {
-        return { content: [{ type: "text" as const, text: `${name} is a member of this room hosted on ${hostedHere}. Join from there, or pick another name.` }] };
+      const owned = peerOwnerRefusal(found, convId, name);
+      if (owned) {
+        return { content: [{ type: "text" as const, text: `Could not join: ${owned.error}. Candidates: ${JSON.stringify(owned.candidates)}` }] };
       }
       const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId, requestedOrcaHandle(orcaTerminal));
 
@@ -474,9 +494,11 @@ export function registerTools(
       }
       const persistedRole = getPersistedRole?.(name);
       const registration = newRegistrationId();
+      let remoteReg: RemoteRegistered | undefined;
       if (room instanceof MirrorRoom && remote) {
         // The home server registers this member as hosted here; its wakes
-        // come back to this server, where the terminal is.
+        // come back to this server, where the terminal is. Kept here only if
+        // this join is still current below.
         const reg = await remote.registerMember(convId, name, registration, {
           pid, paneId: resolvedPaneId ?? undefined, gui: paneResolution.gui, orcaTerminal: resolvedOrca ?? undefined, role: persistedRole,
         });
@@ -484,8 +506,12 @@ export function registerTools(
           const cands = reg.candidates ? ` Candidates: ${JSON.stringify(reg.candidates)}` : "";
           return { content: [{ type: "text" as const, text: `Could not join ${convId}: ${reg.error}.${cands}` }] };
         }
+        remoteReg = reg;
       }
-      if (!manager.joinIsCurrent(joinToken, pid, resolvedPaneId ?? undefined, resolvedOrca ?? undefined, paneResolution.gui)) {
+      const ownedNow = peerOwnerRefusal(room, convId, name);
+      if (ownedNow || !manager.joinIsCurrent(joinToken, pid, resolvedPaneId ?? undefined, resolvedOrca ?? undefined, paneResolution.gui)) {
+        if (remoteReg && remote) await remote.abandonMember(convId, name, remoteReg);
+        if (ownedNow) return { content: [{ type: "text" as const, text: `Could not join: ${ownedNow.error}. Candidates: ${JSON.stringify(ownedNow.candidates)}` }] };
         return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
@@ -496,7 +522,10 @@ export function registerTools(
         paneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal,
       });
       room.touch(name);
-      if (room instanceof MirrorRoom && remote) await remote.joined(convId);
+      if (remoteReg && remote) {
+        remote.commitMember(convId, name, remoteReg);
+        await remote.joined(convId);
+      }
 
       // Name the WezTerm tab to just the agent name
       if (agent.weztermPaneId != null) {

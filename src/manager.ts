@@ -532,6 +532,13 @@ export class ConversationManager extends EventEmitter {
     return true;
   }
 
+  /** A linked peer registered this name in this room (a hosted member or
+   *  its human): every local join of the name into the room begun before
+   *  it is superseded (it would otherwise overwrite the peer's claim). */
+  supersedeRoomJoins(conversationId: string, agentName: string): void {
+    this.roomTouchedAt.set(`${conversationId}|${agentName}`, ++this.joinCounter);
+  }
+
   /** A departure for this name, from any terminal and room, outranks every join begun before it. */
   supersedeJoins(agentName: string): void {
     this.departedAt.set(agentName, ++this.joinCounter);

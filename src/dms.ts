@@ -22,6 +22,9 @@ export interface ConversationMetaLike {
 /** The slice of ConversationManager these helpers need (kept small for tests). */
 export interface ManagerLike {
   listConversations(): ConversationMetaLike[];
+  /** Local rooms and mirrors of remote rooms ("<server>:<room>"); the
+   *  mailboxes cover both (gate round 1, finding 9). */
+  listAllRoomMetas?(): ConversationMetaLike[];
   getRoom(id: string): ChatRoom | undefined;
   getAgentConversationId(agentName: string): string | undefined;
   getActiveId(): string | null;
@@ -52,7 +55,7 @@ export function collectDmThread(
   cap = 200
 ): DmThreadMessage[] {
   const out: DmThreadMessage[] = [];
-  for (const meta of manager.listConversations()) {
+  for (const meta of manager.listAllRoomMetas?.() ?? manager.listConversations()) {
     const room = manager.getRoom(meta.id);
     if (!room) continue;
     for (const m of room.read(undefined, Number.MAX_SAFE_INTEGER, undefined, viewer)) {
@@ -75,7 +78,7 @@ export interface DmPartnerSummary {
 /** Every partner the viewer has exchanged DMs with, newest activity first. */
 export function collectDmPartners(manager: ManagerLike, viewer: string): DmPartnerSummary[] {
   const latest = new Map<string, DmPartnerSummary>();
-  for (const meta of manager.listConversations()) {
+  for (const meta of manager.listAllRoomMetas?.() ?? manager.listConversations()) {
     const room = manager.getRoom(meta.id);
     if (!room) continue;
     for (const m of room.read(undefined, Number.MAX_SAFE_INTEGER, undefined, viewer)) {

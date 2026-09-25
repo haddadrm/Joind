@@ -32,7 +32,7 @@ import {
   LinkDownError, PeerRefusedError, parseRemoteRoomId,
   type PeerActBody, type PeerLeaveBody, type PeerMessagesResult, type PeerRegisterBody, type PeerRegisterResult,
   type PeerRoomsResult, type PeerSendBody, type PeerSendResult, type PeerSubscribeResult, type PeerWakeBody,
-  type RemoteRegisterOutcome, type RemoteRooms,
+  type RemoteRegisterOutcome, type RemoteRegistered, type RemoteRooms,
 } from "./peer-types.js";
 
 export type LinkState = "up" | "down";
@@ -365,12 +365,14 @@ export class LinkClient extends EventEmitter {
     });
   }
 
-  /** Fill a mirror from the home snapshot (messages, members, cursor). */
-  async fill(m: MirrorRoom, signal?: AbortSignal): Promise<number> {
+  /** Fill a mirror from the home snapshot (messages, members, cursor).
+   *  `announce`: emit what changed (a refill after an outage). The mirror's
+   *  events go out before the cursor moves past them. */
+  async fill(m: MirrorRoom, signal?: AbortSignal, announce = false): Promise<number> {
     const snap = await this.request<PeerMessagesResult>("GET", "/api/peer/messages", {
       query: { room: m.homeRoomId, limit: "500", viewers: m.viewerNames().join(",") }, signal,
     });
-    m.fill(snap);
+    m.fill(snap, announce);
     this.writeCursor(m.homeRoomId, snap.cursor);
     return snap.cursor;
   }
@@ -398,13 +400,16 @@ export class LinkClient extends EventEmitter {
   private async loop(m: MirrorRoom, ac: AbortController): Promise<void> {
     let backoff = this.opts.backoffMinMs;
     let filled = false;
+    // Set by an outage or a reset: the next refill announces what it finds.
+    let recovering = false;
     let cursor = this.readCursor(m.homeRoomId);
     while (!this.stopped && !ac.signal.aborted && this.matters(m)) {
       const epoch = this.downEpoch;
       try {
         if (!filled) {
-          cursor = await this.fill(m, ac.signal);
+          cursor = await this.fill(m, ac.signal, recovering);
           filled = true;
+          recovering = false;
           this.markUp(epoch);
         }
         const r = await this.request<PeerSubscribeResult>("GET", "/api/peer/subscribe", {
@@ -414,7 +419,7 @@ export class LinkClient extends EventEmitter {
         });
         if (ac.signal.aborted) break;
         this.markUp(epoch);
-        if (r.reset) { filled = false; continue; }
+        if (r.reset) { filled = false; recovering = true; continue; }
         for (const ev of r.events ?? []) m.applyEvent(ev);
         if (typeof r.cursor === "number") { cursor = r.cursor; this.writeCursor(m.homeRoomId, cursor); }
         backoff = this.opts.backoffMinMs;
@@ -425,8 +430,10 @@ export class LinkClient extends EventEmitter {
           break;
         }
         this.markDown((err as Error).message);
-        // After an outage the home may have restarted: refill before resuming.
+        // After an outage the home may have restarted: refill before
+        // resuming, and announce what arrived meanwhile.
         filled = false;
+        recovering = true;
         await sleep(backoff, ac.signal);
         backoff = Math.min(backoff * 2, this.opts.backoffMaxMs);
       }
@@ -543,14 +550,43 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     ].filter(Boolean).join(", ") || "no terminal";
     try {
       const res = await c.register({ room: r.room, name, host: this.selfName, registration, terminalSummary, ...(t.role ? { role: t.role } : {}) });
-      m.setShadow(name, { homeRegistration: res.registration, role: t.role, terminalSummary });
-      return { ok: true, online: res.online ?? [] };
+      // Nothing is kept here yet: the join may still be superseded (gate
+      // round 1, finding 3). The caller commits or abandons.
+      return { ok: true, online: res.online ?? [], homeRegistration: res.registration, role: t.role, terminalSummary };
     } catch (err) {
       if (err instanceof PeerRefusedError) {
         const body = err.body as { candidates?: unknown } | undefined;
         return { ok: false, status: err.status, error: err.message, ...(body?.candidates ? { candidates: body.candidates } : {}) };
       }
       return { ok: false, status: 503, error: `the link to ${r.server} is down (${(err as Error).message}); a remote room can be joined only while its home server answers` };
+    }
+  }
+
+  commitMember(convId: string, name: string, outcome: RemoteRegistered): void {
+    const m = this.mirror(convId);
+    if (!m) return;
+    m.setShadow(name, { homeRegistration: outcome.homeRegistration, role: outcome.role, terminalSummary: outcome.terminalSummary });
+    m.resumeAuthor(name);
+  }
+
+  async abandonMember(convId: string, name: string, outcome: RemoteRegistered): Promise<void> {
+    const r = parseRemoteRoomId(convId);
+    const c = r ? this.clients.get(r.server) : undefined;
+    const m = r && c ? c.getMirror(r.room) : undefined;
+    if (!r || !c || !m) return;
+    const current = m.shadowsForRegister().find((s) => s.name === name);
+    try {
+      if (current) {
+        // The newer join of this name is the member here: the home must
+        // hold ITS registration, not the abandoned one (idempotent when it does).
+        const res = await c.register({ room: r.room, name, host: this.selfName, registration: current.registration, terminalSummary: current.terminalSummary, ...(current.role ? { role: current.role } : {}) });
+        m.setShadow(name, { homeRegistration: res.registration, role: current.role, terminalSummary: current.terminalSummary });
+      } else {
+        // No member of that name here any more: remove what was registered.
+        await c.leave({ room: r.room, name, registration: outcome.homeRegistration });
+      }
+    } catch (err) {
+      console.log(`  [link ${r.server}] could not restore ${name} in ${convId} after a superseded join: ${(err as Error).message}`);
     }
   }
 

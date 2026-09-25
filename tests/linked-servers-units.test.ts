@@ -154,7 +154,7 @@ describe("MirrorRoom", () => {
     expect(m.queuedCount()).toBe(1);
   });
 
-  it("drains in order, reports each dispatch with the home id, and drops a refused one with a line", async () => {
+  it("drains in order, reports each dispatch with the home id, and holds a refused one (with that author's later ones) until its author deletes it", async () => {
     const t = fakeTransport();
     const m = mirrorWith(t); rooms.push(m);
     const notices: MirrorNotice[] = [];
@@ -167,13 +167,17 @@ describe("MirrorRoom", () => {
     let calls = 0;
     const realSend = t.send;
     t.send = async (b) => { calls++; if (calls === 2) throw new PeerRefusedError(400, "to must be an array of names"); return realSend(b); };
-    expect(await m.drain()).toBe(2);
-    expect(t.sent.map((b) => b.text)).toEqual(["one", "three"]);
-    expect(notices.filter((n) => n.type === "pending-dispatched").map((n) => n.data)).toEqual([
-      expect.objectContaining({ id: 100 }), expect.objectContaining({ id: 101 }),
-    ]);
-    expect(notices.some((n) => n.type === "pending-deleted")).toBe(true);
-    expect(m.readForView(10, undefined).some((x) => x.local && /A queued message from Curzon was not delivered: to must be an array of names/.test(x.text))).toBe(true);
+    expect(await m.drain()).toBe(1);
+    expect(t.sent.map((b) => b.text)).toEqual(["one"]);
+    expect(notices.filter((n) => n.type === "pending-dispatched").map((n) => n.data)).toEqual([expect.objectContaining({ id: 100 })]);
+    expect(notices.some((n) => n.type === "pending-deleted")).toBe(false);
+    expect(m.pendingFor(undefined).map((p) => p.text)).toEqual(["two", "three"]);
+    expect(m.readForView(10, undefined).some((x) => x.local && /A queued message from Curzon was refused by home: to must be an array of names\. It stays queued until its author deletes it\./.test(x.text))).toBe(true);
+    // The author deletes the refused one; the next drain sends the rest.
+    const two = m.pendingFor(undefined)[0].clientId;
+    expect(m.deleteUndelivered(two, "Curzon")).toEqual({ ok: true });
+    t.send = realSend;
+    expect(await m.drain()).toBe(1);
     expect(m.readAll().map((x) => x.text)).toEqual(["one", "three"]);
   });
 

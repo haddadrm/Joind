@@ -29,7 +29,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager, newRegistrationId, isTerminalLess } from "./manager.js";
 import { visibleToViewer, type ChatMessage } from "./room.js";
-import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent } from "./tools.js";
+import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
@@ -40,7 +40,7 @@ import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webN
 import { LinkRegistry, type LinkClientOptions } from "./link.js";
 import { PeerHub } from "./peer.js";
 import { MirrorRoom, type MirrorNotice } from "./mirror.js";
-import { PeerRefusedError } from "./peer-types.js";
+import { PeerRefusedError, type RemoteRegistered } from "./peer-types.js";
 import type { CrewFolder } from "./crew.js";
 import { scaffoldCrewMember } from "./scaffold.js";
 import { buildIdentityKit } from "./identity-kit.js";
@@ -871,8 +871,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.status(400).json({ error: "name and pid (or weztermPaneId, or orcaTerminal) required" }); return;
     }
     if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-    const hostedOn = manager.getRoom(convId)?.getAgent(name)?.host;
-    if (hostedOn) { res.status(409).json({ error: `${name} is a member of this room hosted on ${hostedOn}` }); return; }
+    const owned = peerOwnerRefusal(manager.getRoom(convId)!, convId, name);
+    if (owned) { res.status(409).json(owned); return; }
     const joinToken = manager.beginJoin(name, convId, pid, requestedPane, requestedOrcaHandle(requestedOrca), typeof discoveredGui === "number" ? discoveredGui : undefined);
     // Same invariant as the agent joins: a pane or Orca terminal is bound only when it is live and this process's.
     const tree = processTreeOnce();
@@ -886,14 +886,21 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const room = manager.getRoom(convId);
     if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
     const registration = newRegistrationId();
+    let remoteReg: RemoteRegistered | undefined;
     if (room instanceof MirrorRoom) {
       const reg = await linkRegistry.registerMember(convId, name, registration, { pid: pid || undefined, paneId: weztermPaneId ?? undefined, gui: paneResolution.gui, orcaTerminal: boundOrca ?? undefined, role: agentRoles[name] });
       if (!reg.ok) { res.status(reg.status).json({ error: reg.error, ...(reg.candidates ? { candidates: reg.candidates } : {}) }); return; }
+      remoteReg = reg;
     }
-    if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined, boundOrca ?? undefined, paneResolution.gui)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+    // Committed only if still current and still not a peer's name here.
+    const ownedNow = peerOwnerRefusal(room, convId, name);
+    if (ownedNow || !manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined, boundOrca ?? undefined, paneResolution.gui)) {
+      if (remoteReg) await linkRegistry.abandonMember(convId, name, remoteReg);
+      res.status(409).json(ownedNow ?? { error: "Join superseded by a newer join or a departure for this name" }); return;
+    }
     const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name], boundOrca, paneResolution.gui, registration);
     manager.bindAgent(name, convId, pid, weztermPaneId, boundOrca, paneResolution.gui, registration);
-    if (room instanceof MirrorRoom) await linkRegistry.joined(convId);
+    if (remoteReg) { linkRegistry.commitMember(convId, name, remoteReg); await linkRegistry.joined(convId); }
     if (pid) renameTabTitle(pid, name).catch(() => {});
     if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
     res.json({
@@ -1010,6 +1017,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   app.post("/api/message/:id/react", express.json(), (req, res) => {
     const room = activeRoom(res);
     if (!room) return;
+    // Reactions of a remote room live on its home server (gate round 1, finding 10).
+    if (room instanceof MirrorRoom) { res.status(400).json({ error: "Reactions in a remote room are made on its home server" }); return; }
     const messageId = Number(req.params.id);
     if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
     const { sender, emoji } = req.body as { sender?: string; emoji?: string };
@@ -1077,7 +1086,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // Send a DM as the registered viewer, routed into a room the recipient
   // actually reads (their bound conversation, else the pair's last DM room,
   // else the active room). Returns where it landed.
-  app.post("/api/dm/send", express.json(), (req, res) => {
+  app.post("/api/dm/send", express.json(), async (req, res) => {
     const { to, text, token, image, replyTo, replyConversationId } = (req.body ?? {}) as {
       to?: string; text?: string; token?: string; image?: string; replyTo?: number; replyConversationId?: string;
     };
@@ -1098,6 +1107,24 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       typeof replyTo === "number" && replyConversationId === convId && room.getMessageById(replyTo)
         ? replyTo
         : undefined;
+    if (room instanceof MirrorRoom) {
+      // A DM routed into a remote room goes to its home server as this
+      // server's human (registered there when needed), and queues while the
+      // link is down (gate round 1, finding 8).
+      await linkRegistry.ensureHuman(room.id, viewer);
+      try {
+        const r = await room.writeThrough(viewer, text, { to: [to], replyTo: safeReplyTo });
+        if (r.status === "sent") {
+          const msg = r.message;
+          res.json({ id: msg.id, conversationId: convId, sender: msg.sender, to: msg.to, text: msg.text, timestamp: msg.timestamp, replyTo: msg.replyTo });
+        } else {
+          res.status(202).json({ queued: true, pending: true, clientId: r.clientId, conversationId: convId, reason: r.reason });
+        }
+      } catch (err) {
+        res.status(err instanceof PeerRefusedError ? err.status : 502).json({ error: (err as Error).message });
+      }
+      return;
+    }
     const msg = room.send(viewer, text, {
       to: [to],
       image: typeof image === "string" ? image : undefined,
@@ -1173,6 +1200,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   app.post("/api/message/:id/edit", express.json(), (req, res) => {
     const room = activeRoom(res);
     if (!room) return;
+    // Edits of a remote room are made on its home server (gate round 1, finding 10).
+    if (room instanceof MirrorRoom) { res.status(400).json({ error: "Messages in a remote room are edited on its home server" }); return; }
     const { sender, newText, token } = req.body as { sender?: string; newText?: string; token?: string };
     if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     const messageId = Number(req.params.id);
@@ -1700,8 +1729,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     }
 
     if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-    const hostedOn = manager.getRoom(convId)?.getAgent(name)?.host;
-    if (hostedOn) { res.status(409).json({ error: `${name} is a member of this room hosted on ${hostedOn}; join from there, or pick another name`, candidates: [{ conversation: convId, host: hostedOn }] }); return; }
+    const owned = peerOwnerRefusal(manager.getRoom(convId)!, convId, name);
+    if (owned) { res.status(409).json(owned); return; }
     const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId, requestedOrcaHandle(requestedOrca), discoveredGui);
 
     // Bind a WezTerm pane or an Orca terminal only when it is live and really
@@ -1720,17 +1749,25 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const room = manager.getRoom(convId);
     if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
     const registration = newRegistrationId();
+    let remoteReg: RemoteRegistered | undefined;
     if (room instanceof MirrorRoom) {
       // Registered on the home server as hosted here: wakes come back here.
+      // Kept here only if this join is still current (gate round 1, finding 3).
       const reg = await linkRegistry.registerMember(convId, name, registration, { pid: pid || undefined, paneId: boundPane ?? undefined, gui: paneResolution.gui, orcaTerminal: boundOrca ?? undefined, role: agentRoles[name] });
       if (!reg.ok) { res.status(reg.status).json({ error: reg.error, ...(reg.candidates ? { candidates: reg.candidates } : {}) }); return; }
+      remoteReg = reg;
     }
-    if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined, boundOrca ?? undefined, paneResolution.gui)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+    // A peer may have registered this name during validation (finding 4).
+    const ownedNow = peerOwnerRefusal(room, convId, name);
+    if (ownedNow || !manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined, boundOrca ?? undefined, paneResolution.gui)) {
+      if (remoteReg) await linkRegistry.abandonMember(convId, name, remoteReg);
+      res.status(409).json(ownedNow ?? { error: "Join superseded by a newer join or a departure for this name" }); return;
+    }
 
     const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui, registration);
     manager.bindAgent(name, convId, pid, boundPane, boundOrca, paneResolution.gui, registration);
     room.touch(name);
-    if (room instanceof MirrorRoom) await linkRegistry.joined(convId);
+    if (remoteReg) { linkRegistry.commitMember(convId, name, remoteReg); await linkRegistry.joined(convId); }
     if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
     // Name the WezTerm tab if available
