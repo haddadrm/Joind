@@ -51,6 +51,13 @@ A Joind server can now link to peer servers, mirror their rooms, and host member
 - **A new web viewer name releases the old one at the home** (a peer leave of the previous human registration, under the human's lock), so the old name is free again there.
 - 9 tests in `tests/linked-servers-gate2.test.ts`, one per finding, all failing on b73ea7e at the finding's own assertion. Suite 391.
 
+### Codex gate round 3 (3 Medium on the server side, closed)
+- **The human is one persisted transition.** `MirrorRoom.settleHuman` runs under the human's lock: it releases every former registration still owed, registers the wanted viewer (a change recorded while offline comes before the current one), queues the former viewer's release when it changed, and resumes the viewer's waiting messages. The state (the registered human, the wanted one, the releases owed) is saved beside the queue as `<room>.human.json`, so it survives a restart. Recovery and `ensureHuman` both go through it.
+- **A failed release is kept and retried** at recovery before anything else for the human; it leaves the record only when the home confirms it or says the registration is gone.
+- **A viewer change made offline is carried out at recovery:** the former human is released, the new one registered, and its waiting messages sent.
+- **A drain owes another pass** when a delete or a resume unblocks an entry while it runs (`requestDrain`), so a pass that ends on another author's refusal no longer strands the unblocked author's later entries.
+- 3 tests in `tests/linked-servers-gate3.test.ts`, one per finding, all failing on 7e8b204. Suite 394.
+
 ### Known limits
 - **A peer and this server may still share a human's name.** A peer's human may take any name that is not a local member or binding of the room, including this server's own web viewer name (the same person on both machines is the intended case).
 - **A linked peer is trusted with names.** It can register any name that is not a member of the room now, as a member or as its human, and then read what that name may read, as a local join can today. Tokens authenticate servers, not people.

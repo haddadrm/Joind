@@ -204,8 +204,16 @@ export class MirrorRoom extends ChatRoom {
   private draining: Promise<number> | null = null;
   private lastTouchSent = new Map<string, number>();
   private nameLocks = new Map<string, Promise<void>>();
-  /** A viewer that queued before it was registered here (finding 8). */
+  /** A viewer that queued before it was registered here (finding 8), or a
+   *  viewer change made while the link was down (gate round 3, finding 2). */
   private humanWanted: string | null = null;
+  /** Former human registrations whose release the home has not confirmed
+   *  (gate round 3, finding 1). Persisted with the human state. */
+  private pendingReleases: Array<{ name: string; registration: string }> = [];
+  private readonly humanFile: string | null;
+  /** Another drain pass is owed (an entry was unblocked mid-drain; gate
+   *  round 3, finding 3). */
+  private rerunDrain = false;
   /** Order of insertion of each cached message: a snapshot requested at a
    *  mark never removes what was inserted after it (finding 4). */
   private insertSeq = 0;
@@ -223,12 +231,96 @@ export class MirrorRoom extends ChatRoom {
     this.transport = opts.transport;
     this.selfName = opts.selfName;
     this.queue = new UndeliveredQueue(opts.queueFile);
+    this.humanFile = opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") + ".human.json" : null;
+    this.loadHumanState();
     // After a restart the reasons of held entries are said again, and a
     // viewer who queued before registering is registered when the link allows.
     for (const e of this.queue.list()) {
       if (e.state === "held") this.addLocalLine(this.refusalLine(e.sender, e.heldReason ?? "refused"));
       if (e.asHuman && !this.humanWanted) this.humanWanted = e.sender;
     }
+  }
+
+  /** The human's state survives a restart: who is registered, who is
+   *  wanted, and which former registrations still owe a release. */
+  private loadHumanState(): void {
+    if (!this.humanFile || !existsSync(this.humanFile)) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.humanFile, "utf-8")) as {
+        human?: { name?: unknown; registration?: unknown } | null; wanted?: unknown; releases?: Array<{ name?: unknown; registration?: unknown }>;
+      };
+      if (raw.human && typeof raw.human.name === "string" && typeof raw.human.registration === "string") this.human = { name: raw.human.name, registration: raw.human.registration };
+      if (typeof raw.wanted === "string") this.humanWanted = raw.wanted;
+      for (const r of raw.releases ?? []) if (typeof r.name === "string" && typeof r.registration === "string") this.pendingReleases.push({ name: r.name, registration: r.registration });
+    } catch { /* a torn file: start clean */ }
+  }
+
+  private saveHumanState(): void {
+    if (!this.humanFile) return;
+    try {
+      ensureDir(dirname(this.humanFile));
+      const tmp = `${this.humanFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ human: this.human, wanted: this.humanWanted, releases: this.pendingReleases }), "utf-8");
+      renameSync(tmp, this.humanFile);
+    } catch { /* kept in memory for this run */ }
+  }
+
+  /** Former human registrations still to release at the home. */
+  pendingHumanReleases(): Array<{ name: string; registration: string }> {
+    return this.pendingReleases.map((r) => ({ ...r }));
+  }
+
+  /**
+   * Bring the home's view of this server's human in line, under the human's
+   * lock, in this order (gate round 3, findings 1 and 2):
+   *   1. release every former registration still owed (kept until the home
+   *      confirms, or says it is gone);
+   *   2. register the wanted viewer (`want`, else a viewer change recorded
+   *      offline, else the current one again, since the home may have
+   *      restarted), and queue the former one's release when it changed;
+   *   3. resume the registered viewer's waiting messages.
+   * A link failure stops the transition; everything owed stays recorded.
+   */
+  async settleHuman(want?: string): Promise<void> {
+    const release = await this.lockName(HUMAN_LOCK);
+    try {
+      if (!this.transport.isUp()) {
+        if (want && want !== this.human?.name) { this.humanWanted = want; this.saveHumanState(); }
+        return;
+      }
+      if (!(await this.releaseOwed())) return;
+      const target = want ?? this.humanWanted ?? this.human?.name;
+      if (!target) return;
+      const previous = this.human;
+      const r = await this.transport.register({ room: this.homeRoomId, name: target, host: this.selfName, registration: `human:${this.selfName}`, human: true });
+      this.human = { name: target, registration: r.registration };
+      if (this.humanWanted === target) this.humanWanted = null;
+      if (previous && previous.name !== target) this.pendingReleases.push(previous);
+      this.saveHumanState();
+      await this.releaseOwed();
+      this.resumeAuthor(target);
+    } catch (err) {
+      if (err instanceof LinkDownError) this.transport.failed(err.message);
+      else console.log(`  [link ${this.server}] human registration in ${this.id} refused: ${(err as Error).message}`);
+    } finally {
+      release();
+    }
+  }
+
+  /** Release owed former registrations; false when the link failed. */
+  private async releaseOwed(): Promise<boolean> {
+    while (this.pendingReleases.length > 0) {
+      const r = this.pendingReleases[0];
+      try {
+        await this.transport.leave({ room: this.homeRoomId, name: r.name, registration: r.registration });
+      } catch (err) {
+        if (err instanceof LinkDownError) { this.transport.failed(err.message); return false; }
+        // Refused (already gone there): nothing left to release.
+      }
+      this.pendingReleases.shift();
+      this.saveHumanState();
+    }
+    return true;
   }
 
   private refusalLine(sender: string, reason: string): string {
@@ -453,6 +545,7 @@ export class MirrorRoom extends ChatRoom {
   setHuman(name: string, registration: string): void {
     this.human = { name, registration };
     if (this.humanWanted === name) this.humanWanted = null;
+    this.saveHumanState();
     // Its waiting messages go now, as for a member's commit (finding 6).
     this.resumeAuthor(name);
   }
@@ -464,7 +557,12 @@ export class MirrorRoom extends ChatRoom {
   /** The viewer name to register as this server's human: the current one,
    *  or one that queued before it was registered (finding 8). */
   humanToRegister(): string | undefined {
-    return this.human?.name ?? this.humanWanted ?? undefined;
+    return this.humanWanted ?? this.human?.name ?? undefined;
+  }
+
+  /** Whether the human's state owes the home anything (a release, a change). */
+  humanOwes(): boolean {
+    return this.pendingReleases.length > 0 || this.humanWanted != null;
   }
 
   humanName(): string | undefined {
@@ -515,18 +613,7 @@ export class MirrorRoom extends ChatRoom {
         release();
       }
     }
-    const human = this.humanToRegister();
-    if (human) {
-      const release = await this.lockName(HUMAN_LOCK);
-      try {
-        if (this.humanToRegister() === human) {
-          const r = await this.transport.register({ room: this.homeRoomId, name: human, host: this.selfName, registration: `human:${this.selfName}`, human: true });
-          this.setHuman(human, r.registration);
-        }
-      } catch { /* retried at the next restore */ } finally {
-        release();
-      }
-    }
+    if (this.humanToRegister() || this.pendingReleases.length > 0) await this.settleHuman();
   }
 
   override leave(name: string, reason: "deliberate" | "timeout" = "deliberate"): void {
@@ -644,13 +731,14 @@ export class MirrorRoom extends ChatRoom {
       // home knows it: queued, waiting for its registration as this
       // server's human, which the next restore (or open) makes.
       this.humanWanted = sender;
+      this.saveHumanState();
       this.enqueue({ ...entry, state: "waiting", asHuman: true });
       return { status: "queued", clientId: entry.clientId, reason: `${sender} is not registered with ${this.server} yet; it goes once the link allows` };
     }
     // Order is kept per author: queue behind this author's own older entries.
     if (!this.transport.isUp() || this.queue.list().some((e) => e.sender === sender)) {
       this.enqueue(entry);
-      if (this.transport.isUp()) void this.drain();
+      if (this.transport.isUp()) this.requestDrain();
       return { status: "queued", clientId: entry.clientId, reason: this.transport.isUp() ? "your older messages here are still queued" : `the link to ${this.server} is down` };
     }
     try {
@@ -728,7 +816,7 @@ export class MirrorRoom extends ChatRoom {
     for (const e of this.queue.list()) {
       if (e.sender === name && e.state === "waiting") { this.queue.mark(e.clientId, undefined); this.noticePending(e.clientId); any = true; }
     }
-    if (any && this.transport.isUp()) void this.drain();
+    if (any && this.transport.isUp()) this.requestDrain();
   }
 
   /**
@@ -739,14 +827,23 @@ export class MirrorRoom extends ChatRoom {
    * both cases that author's later entries wait behind it. A link failure
    * stops the drain and keeps everything.
    */
+  /** A drain now, or one more pass of the drain in progress: that pass may
+   *  already have passed the entry this request unblocked (gate round 3,
+   *  finding 3). */
+  private requestDrain(): void {
+    if (this.draining) this.rerunDrain = true;
+    else void this.drain();
+  }
+
   drain(): Promise<number> {
     if (this.draining) return this.draining;
     const run = async (): Promise<number> => {
       let sent = 0;
       let progress = true;
-      // Entries added while draining are picked up by the next pass.
-      while (progress && this.transport.isUp() && !this.destroyed) {
+      // Entries added or unblocked while draining are picked up by another pass.
+      while ((progress || this.rerunDrain) && this.transport.isUp() && !this.destroyed) {
         progress = false;
+        this.rerunDrain = false;
         const blocked = new Set<string>();
         for (const e of this.queue.list()) {
           if (!this.transport.isUp() || this.destroyed) break;
@@ -803,7 +900,7 @@ export class MirrorRoom extends ChatRoom {
     this.queue.remove(clientId);
     this.notice({ type: "pending-deleted", conversationId: this.id, data: { conversationId: this.id, clientId } });
     // It may have held up its author's later entries (gate round 2, finding 5).
-    if (this.transport.isUp() && this.queue.list().some((x) => x.sender === by)) void this.drain();
+    if (this.transport.isUp() && this.queue.list().some((x) => x.sender === by)) this.requestDrain();
     return { ok: true };
   }
 
