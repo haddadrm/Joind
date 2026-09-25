@@ -309,6 +309,7 @@ function connect() {
           if (dmPartners.length > 0) {
             var dmMsg = event.data;
             if (!dmMsg.conversationId && event.conversationId) dmMsg.conversationId = event.conversationId;
+            settlePendingFor(dmMsg.conversationId, dmMsg);
             if (activeConversation && event.conversationId === activeConversation.id) {
               allMessages.push(dmMsg);
             }
@@ -2651,6 +2652,7 @@ function refreshDmThread(name) {
       } else {
         dmThread.forEach(function(m) { appendMessage(m, false); });
       }
+      renderPendingForActive();
       scrollToBottom();
     }).catch(function() {});
 }
@@ -2739,7 +2741,7 @@ function syncChannelHeader() {
 var links = []; // [{ name, state: 'up' | 'down', since }]
 var remoteConversations = []; // [{ id, server, name, messageCount, starred, state }]
 // Undelivered messages per remote room, in queue order:
-// { clientId, sender, text, queuedAt }
+// { clientId, sender, text, queuedAt, to? } where `to` marks a queued DM
 var pendingByConv = {};
 // clientId -> { conv, id } for dispatched entries whose real message has
 // not been rendered yet; the row stays until that message lands.
@@ -2955,7 +2957,11 @@ function addPendingEntry(conv, p) {
   if (!conv || !p || !p.clientId) return false;
   var list = pendingByConv[conv] || (pendingByConv[conv] = []);
   if (list.some(function(x) { return x.clientId === p.clientId; })) return false;
-  list.push({ clientId: p.clientId, sender: p.sender, text: p.text, queuedAt: p.queuedAt });
+  var entry = { clientId: p.clientId, sender: p.sender, text: p.text, queuedAt: p.queuedAt };
+  // A queued DM keeps its recipients so it routes to the mailbox, never
+  // the channel (the same view rule as a real message).
+  if (Array.isArray(p.to) && p.to.length > 0) entry.to = p.to.slice();
+  list.push(entry);
   return true;
 }
 
@@ -2966,6 +2972,15 @@ function removePendingEntry(conv, clientId) {
   if (pendingByConv[conv].length === 0) delete pendingByConv[conv];
 }
 
+// The rendered row of a real (non-pending) message, in either view.
+function realMessageElement(conv, id) {
+  var els = document.querySelectorAll('.message:not(.pending)');
+  for (var i = 0; i < els.length; i++) {
+    if (els[i].dataset.conv === conv && els[i].dataset.id === String(id)) return els[i];
+  }
+  return null;
+}
+
 function pendingElement(conv, clientId) {
   var els = document.querySelectorAll('.message.pending');
   for (var i = 0; i < els.length; i++) {
@@ -2974,14 +2989,22 @@ function pendingElement(conv, clientId) {
   return null;
 }
 
-function pendingViewActive(conv) {
-  return !!(activeConversation && activeConversation.id === conv && !activeDm);
+// Whether a queued entry belongs on screen now. Channel view: only the
+// active room's queued channel messages. Mailbox view: queued DMs of that
+// mailbox from any room, since a mailbox spans conversations.
+function pendingVisibleNow(conv, p) {
+  if (!messageInCurrentView(p)) return false;
+  if (activeDm) return true;
+  return !!(activeConversation && activeConversation.id === conv);
 }
 
 function renderPendingForActive() {
-  if (!activeConversation || activeDm) return;
-  (pendingByConv[activeConversation.id] || []).forEach(function(p) {
-    if (!pendingElement(activeConversation.id, p.clientId)) appendPending(activeConversation.id, p);
+  var convs = activeDm ? Object.keys(pendingByConv)
+    : (activeConversation ? [activeConversation.id] : []);
+  convs.forEach(function(conv) {
+    (pendingByConv[conv] || []).forEach(function(p) {
+      if (pendingVisibleNow(conv, p) && !pendingElement(conv, p.clientId)) appendPending(conv, p);
+    });
   });
 }
 
@@ -2991,6 +3014,9 @@ function appendPending(conv, p) {
   var c = document.getElementById('messages');
   if (!c) return;
   hideWelcome();
+  // An empty mailbox's "No messages yet" line gives way to a queued DM
+  var emptyLine = c.querySelector(':scope > .empty-state');
+  if (emptyLine) emptyLine.remove();
   var color = getSenderColor(p.sender || '');
   var el = document.createElement('div');
   el.className = 'message pending';
@@ -3096,7 +3122,8 @@ function onPendingEvent(event) {
   var conv = pendingConvOf(event);
   var p = event.data;
   if (!addPendingEntry(conv, p)) return;
-  if (pendingViewActive(conv) && !pendingElement(conv, p.clientId)) appendPending(conv, p);
+  var stored = (pendingByConv[conv] || []).find(function(x) { return x.clientId === p.clientId; });
+  if (stored && pendingVisibleNow(conv, stored) && !pendingElement(conv, p.clientId)) appendPending(conv, stored);
   renderRemoteSections();
 }
 
@@ -3117,9 +3144,7 @@ function onPendingDispatched(event) {
   renderRemoteSections();
   var el = pendingElement(conv, d.clientId);
   if (!el) return;
-  var landed = d.id != null && activeConversation && activeConversation.id === conv &&
-    allMessages.some(function(m) { return m.id === d.id; });
-  if (landed) { el.remove(); return; }
+  if (d.id != null && realMessageElement(conv, d.id)) { el.remove(); return; }
   el.classList.add('dispatched');
   var txt = el.querySelector('.pending-marker-text');
   if (txt) txt.textContent = 'sending';

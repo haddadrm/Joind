@@ -76,6 +76,7 @@ addMessage(conversations[0].id, 'claude', 'Local room, unchanged by the link wor
 addMessage(HOME + ':cpm-engine', 'jadzia', 'Morning. The **engine run** for window 14 is on the Y530.', { timestamp: now - 600000 });
 addMessage(HOME + ':cpm-engine', 'curzon', 'Reading the mirror from rami9ipro, no listen loop.', { timestamp: now - 540000 });
 addMessage(HOME + ':cpm-engine', 'system', 'curzon joined (hosted on rami9ipro)', { timestamp: now - 530000 });
+addMessage(HOME + ':cpm-engine', 'curzon', 'DM: I have the W14 inputs locally.', { timestamp: now - 500000, to: ['human'] });
 addMessage(HOME + ':scratch', 'codex', 'Scratch room on the home server.', { timestamp: now - 300000 });
 let active = HOME + ':cpm-engine';
 
@@ -204,8 +205,9 @@ function localSystem(conv, text) {
   const msg = addMessage(conv, 'system', text);
   broadcast({ type: 'message', conversationId: conv, data: msg });
 }
-function queue(conv, sender, text) {
+function queue(conv, sender, text, to) {
   const p = { clientId: crypto.randomUUID(), sender, text, queuedAt: Date.now() };
+  if (to && to.length) p.to = to; // a queued DM
   (pending[conv] ||= []).push(p);
   broadcast({ type: 'pending', conversationId: conv, data: Object.assign({ conversationId: conv }, p) });
   return p;
@@ -214,7 +216,7 @@ function queue(conv, sender, text) {
 // is exercised both ways (the contract does not fix the order).
 function dispatch(conv, p, messageFirst) {
   pending[conv] = (pending[conv] || []).filter((x) => x.clientId !== p.clientId);
-  const msg = addMessage(conv, p.sender, p.text);
+  const msg = addMessage(conv, p.sender, p.text, p.to ? { to: p.to } : undefined);
   const dispatched = { type: 'pending-dispatched', conversationId: conv, data: { conversationId: conv, clientId: p.clientId, id: msg.id } };
   const real = { type: 'message', conversationId: conv, data: msg };
   if (messageFirst) { broadcast(real); broadcast(dispatched); }
@@ -236,6 +238,7 @@ const steps = [
   }],
   ['pending while down (viewer)', () => { queue(ROOM, viewer, 'Queued while the Y530 is away: the facade float is 12 days.'); }],
   ['pending while down (curzon, no delete for the viewer)', () => { queue(ROOM, 'curzon', 'Agree, and the MEP fragnet carries it.'); }],
+  ['pending DM from the viewer to curzon while down (mailbox only)', () => { queue(ROOM, viewer, 'Private: can you rerun W14 with the revised facade durations?', ['curzon']); }],
   ['link up and drain', () => {
     const q = (pending[ROOM] || []).slice();
     linkEvent('up');
@@ -323,7 +326,20 @@ async function api(req, res, u) {
     broadcast({ type: 'pending-deleted', conversationId: b.conversation, data: { conversationId: b.conversation, clientId: b.clientId } });
     return json(res, 200, { ok: true });
   }
-  if (p === '/api/dms') return json(res, 200, u.searchParams.get('with') ? { partner: u.searchParams.get('with'), messages: [] } : { partners: [] });
+  if (p === '/api/dms') {
+    // DMs involving the viewer, across every room (the mailbox view)
+    const dms = [];
+    for (const conv of Object.keys(messages)) {
+      for (const m of messages[conv]) {
+        if (m.to && (m.sender === viewer || m.to.includes(viewer))) dms.push(Object.assign({ conversationId: conv }, m));
+      }
+    }
+    const partnerOf = (m) => (m.sender === viewer ? m.to.find((t) => t !== viewer) : m.sender);
+    const withName = u.searchParams.get('with');
+    if (withName) return json(res, 200, { partner: withName, messages: dms.filter((m) => partnerOf(m) === withName) });
+    const partners = [...new Set(dms.map(partnerOf).filter(Boolean))].map((partner) => ({ partner }));
+    return json(res, 200, { partners });
+  }
   if (p === '/api/decisions') return json(res, 200, { decisions: [], for: viewer, state: 'open' });
   if (p === '/api/tasks/count') return json(res, 200, { count: 0, hasUrgent: false });
   if (p === '/api/tasks') return json(res, 200, []);
