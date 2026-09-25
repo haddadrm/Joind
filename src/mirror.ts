@@ -27,6 +27,7 @@ import { dirname } from "path";
 import { ChatRoom, visibleToViewer, type Agent, type ChatMessage, type HostedWakeResult } from "./room.js";
 import { ensureDir } from "./persist.js";
 import { HumanState, HumanStateError, type HumanStateData } from "./human-state.js";
+import { MemberState, type MemberRecord } from "./member-state.js";
 import {
   LinkDownError, PeerRefusedError,
   type PeerActBody, type PeerAction, type PeerEvent, type PeerLeaveBody, type PeerMessagesResult,
@@ -210,13 +211,9 @@ export class MirrorRoom extends ChatRoom {
    *  (a registration whose reply arrived after its member left; gate round
    *  7, finding 1). Kept until the home confirms (success or 404), and
    *  saved beside the queue. */
-  private memberReleases: Array<{ name: string; registration: string }> = [];
-  /** Member registrations sent (or about to be) to the home and not yet
-   *  answered: the host registration id of each. Written BEFORE the request
-   *  (gate round 9, finding 2), so a reply that lands after the member left,
-   *  or a restart, always finds a durable record to turn into debt. */
-  private memberIntents: Array<{ name: string; hosted: string }> = [];
-  private readonly releasesFile: string | null;
+  /** The members' write-ahead record (gate round 10): per name, the live
+   *  id, an unconfirmed id, and ids owed a release, all this server's ids. */
+  private readonly memberState: MemberState;
   /** Another drain pass is owed (an entry was unblocked mid-drain; gate
    *  round 3, finding 3). */
   private rerunDrain = false;
@@ -238,20 +235,8 @@ export class MirrorRoom extends ChatRoom {
     this.selfName = opts.selfName;
     this.queue = new UndeliveredQueue(opts.queueFile);
     this.humanState = new HumanState(opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") + ".human.json" : null);
-    this.releasesFile = opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") + ".releases.json" : null;
-    if (this.releasesFile && existsSync(this.releasesFile)) {
-      try {
-        // { releases, intents }; the round-7 layout was the releases array alone.
-        const raw = JSON.parse(readFileSync(this.releasesFile, "utf-8")) as unknown;
-        const rec = (Array.isArray(raw) ? { releases: raw } : raw) as { releases?: unknown; intents?: unknown };
-        for (const r of Array.isArray(rec.releases) ? rec.releases as Array<{ name?: unknown; registration?: unknown }> : []) {
-          if (typeof r.name === "string" && typeof r.registration === "string") this.memberReleases.push({ name: r.name, registration: r.registration });
-        }
-        for (const i of Array.isArray(rec.intents) ? rec.intents as Array<{ name?: unknown; hosted?: unknown }> : []) {
-          if (typeof i.name === "string" && typeof i.hosted === "string") this.memberIntents.push({ name: i.name, hosted: i.hosted });
-        }
-      } catch { /* a torn file: nothing owed is known */ }
-    }
+    const base = opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") : null;
+    this.memberState = new MemberState(base ? `${base}.members.json` : null, base ? `${base}.releases.json` : null);
     // After a restart the reasons of held entries are said again. The viewer
     // is never inferred from the queue: the human record alone says who it
     // is (gate round 4, finding 2).
@@ -666,37 +651,172 @@ export class MirrorRoom extends ChatRoom {
 
   /** Register (again) every local member and the human with the home
    *  server: idempotent there, and needed after the home restarted. */
-  async reregisterAll(): Promise<void> {
-    await this.releaseMembers();
-    await this.settleMemberIntents();
-    for (const name of [...this.agents.keys()]) {
-      // Under the name's lock, and with the member as it is NOW: a join that
-      // committed meanwhile is never replaced by an older registration.
-      const release = await this.lockName(name);
+  // ---------------------------------------------------------------------
+  // Members' registrations at the home: one write-ahead record per name
+  // (member-state.ts). Every id is this server's; the home releases by it.
+  // ---------------------------------------------------------------------
+
+  /** The record of one member (for tests and diagnostics). */
+  memberRecord(name: string): MemberRecord {
+    return this.memberState.get(name);
+  }
+
+  /** Whether any member id is recorded here (live, unconfirmed or owed):
+   *  recovery then runs for this room even with no member here. */
+  hasMemberRecords(): boolean {
+    return !this.memberState.isEmpty();
+  }
+
+  /** Ids owed a release at the home, for every name. */
+  pendingMemberReleases(): Array<{ name: string; registration: string }> {
+    return this.memberState.owed();
+  }
+
+  /** A registration of `id` is about to be sent (under the name's lock).
+   *  A previous unconfirmed id that is not the live one becomes owed.
+   *  Throws MemberStateError when it cannot be written; nothing is sent. */
+  beginMemberRegistration(name: string, id: string): void {
+    this.memberState.update(name, (r) => {
+      if (r.unconfirmed && r.unconfirmed !== id && r.unconfirmed !== r.live) r.releasesOwed.push(r.unconfirmed);
+      r.unconfirmed = id;
+    });
+  }
+
+  /** The home refused `id` for good: it holds nothing under it. */
+  refusedMemberRegistration(name: string, id: string): void {
+    try {
+      this.memberState.update(name, (r) => { if (r.unconfirmed === id) r.unconfirmed = null; });
+    } catch (err) {
+      console.log(`  [link ${this.server}] ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * The home answered a registration of `id` with `homeRegistration`. It
+   * becomes the live registration only if the member here is still the one
+   * with that id (checked now, after the await); otherwise it is owed a
+   * release. Returns whether it was kept. A record that cannot be written
+   * is logged: the id stays unconfirmed there, and recovery releases it.
+   */
+  confirmMemberRegistration(name: string, id: string, homeRegistration: string, info?: { role?: string; terminalSummary?: string }): boolean {
+    const here = this.agents.has(name) && this.registrationOf(name) === id;
+    try {
+      this.memberState.update(name, (r) => {
+        if (here) {
+          if (r.live && r.live !== id) r.releasesOwed.push(r.live);
+          r.live = id;
+        } else if (r.live !== id) {
+          r.releasesOwed.push(id);
+        }
+        if (r.unconfirmed === id) r.unconfirmed = null;
+      });
+    } catch (err) {
+      console.log(`  [link ${this.server}] ${(err as Error).message}`);
+    }
+    if (here) {
+      const prev = this.shadows.get(name);
+      this.shadows.set(name, { homeRegistration, role: info?.role ?? prev?.role, terminalSummary: info?.terminalSummary ?? prev?.terminalSummary });
+    }
+    return here;
+  }
+
+  /** A join that registered `id` was superseded here: whatever the home
+   *  holds under `id` is owed a release. */
+  abandonMemberRegistration(name: string, id: string): void {
+    try {
+      this.memberState.update(name, (r) => {
+        if (r.unconfirmed === id) r.unconfirmed = null;
+        if (r.live !== id) r.releasesOwed.push(id);
+      });
+    } catch (err) {
+      console.log(`  [link ${this.server}] ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Release every id of `name` the home may hold that is not the live one:
+   * the owed ones, and an unconfirmed one (callers hold the name's lock, so
+   * no attempt is in flight). A release is settled by success or 404 (the
+   * home holds nothing under it); a link error stops and keeps the rest;
+   * any other refusal keeps that id. False when the link failed. The
+   * caller holds the name's lock.
+   */
+  async releaseMemberIds(name: string): Promise<boolean> {
+    const first = this.memberState.get(name);
+    if (first.unconfirmed && first.unconfirmed !== first.live) {
+      const stray = first.unconfirmed;
       try {
-        const registration = this.registrationOf(name);
-        if (!this.agents.has(name) || !registration) continue;
-        const info = this.shadows.get(name);
-        // The intent first; a record that cannot be written aborts the attempt.
-        try {
-          this.noteMemberIntent(name, registration);
-        } catch (err) {
-          console.log(`  [link ${this.server}] re-register ${name} in ${this.id} not attempted: ${(err as Error).message}`);
+        this.memberState.update(name, (r) => { if (r.unconfirmed === stray) { r.unconfirmed = null; r.releasesOwed.push(stray); } });
+      } catch (err) {
+        console.log(`  [link ${this.server}] ${(err as Error).message}`);
+      }
+    }
+    for (const id of this.memberState.get(name).releasesOwed) {
+      try {
+        await this.transport.leave({ room: this.homeRoomId, name, hostedRegistration: id });
+      } catch (err) {
+        if (err instanceof LinkDownError) { this.transport.failed(err.message); return false; }
+        if (!(err instanceof PeerRefusedError && err.status === 404)) {
+          console.log(`  [link ${this.server}] release of ${name} (${id}) in ${this.id} refused (${(err as Error).message}); kept`);
           continue;
         }
-        const r = await this.transport.register({ room: this.homeRoomId, name, host: this.selfName, registration, terminalSummary: info?.terminalSummary, role: info?.role });
-        if (this.agents.has(name) && this.registrationOf(name) === registration) {
-          this.shadows.set(name, { homeRegistration: r.registration, role: info?.role, terminalSummary: info?.terminalSummary });
-          this.resolveMemberIntent(name, registration, r.registration, true);
-        } else {
-          // The member left while this was in flight: the home now holds a
-          // registration nobody here owns. It is owed a release (round 7).
-          this.resolveMemberIntent(name, registration, r.registration, false);
-          await this.releaseMembers();
-        }
+      }
+      try {
+        this.memberState.update(name, (r) => { r.releasesOwed = r.releasesOwed.filter((x) => x !== id); });
       } catch (err) {
-        if (err instanceof LinkDownError) return;
-        console.log(`  [link ${this.server}] re-register ${name} in ${this.id} refused: ${(err as Error).message}`);
+        console.log(`  [link ${this.server}] ${(err as Error).message}`);
+      }
+    }
+    return true;
+  }
+
+  /** Round-9 records carried the home's ids: released by those until settled. */
+  private async releaseLegacy(): Promise<boolean> {
+    for (const r of this.memberState.legacyReleases()) {
+      try {
+        await this.transport.leave({ room: this.homeRoomId, name: r.name, registration: r.registration });
+      } catch (err) {
+        if (err instanceof LinkDownError) { this.transport.failed(err.message); return false; }
+        if (!(err instanceof PeerRefusedError && err.status === 404)) continue;
+      }
+      try { this.memberState.removeLegacy(r); } catch (err) { console.log(`  [link ${this.server}] ${(err as Error).message}`); }
+    }
+    return true;
+  }
+
+  /**
+   * Recovery. Per name with a member here or a record, under the name's
+   * lock: (a) a member here: the home must hold exactly its id (recorded as
+   * live first, then registered; the reply is applied only if the member is
+   * still that one); a live id on record with no member here (a restart)
+   * is owed instead. (b) Every other id, unconfirmed or owed, is released
+   * by id. Nothing is registered to learn anything. Then the human.
+   */
+  async reregisterAll(): Promise<void> {
+    if (!(await this.releaseLegacy())) return;
+    const names = new Set([...this.agents.keys(), ...this.memberState.names()]);
+    for (const name of names) {
+      const release = await this.lockName(name);
+      try {
+        if (this.agents.has(name) && this.registrationOf(name)) {
+          const id = this.registrationOf(name)!;
+          if (this.memberState.get(name).live !== id) {
+            this.memberState.update(name, (r) => {
+              if (r.live && r.live !== id) r.releasesOwed.push(r.live);
+              r.live = id;
+              if (r.unconfirmed === id) r.unconfirmed = null;
+            });
+          }
+          const info = this.shadows.get(name);
+          const r = await this.transport.register({ room: this.homeRoomId, name, host: this.selfName, registration: id, terminalSummary: info?.terminalSummary, role: info?.role });
+          this.confirmMemberRegistration(name, id, r.registration);
+        } else if (this.memberState.get(name).live) {
+          this.memberState.update(name, (r) => { if (r.live) r.releasesOwed.push(r.live); r.live = null; });
+        }
+        if (!(await this.releaseMemberIds(name))) return;
+      } catch (err) {
+        if (err instanceof LinkDownError) { this.transport.failed(err.message); return; }
+        console.log(`  [link ${this.server}] recovery of ${name} in ${this.id}: ${(err as Error).message}`);
       } finally {
         release();
       }
@@ -707,20 +827,22 @@ export class MirrorRoom extends ChatRoom {
   }
 
   /**
-   * A local member leaves the remote room. Its home registration is written
-   * to the release record FIRST (write-ahead, gate round 8, finding 2); only
-   * then is the member removed here. A record that cannot be written stops a
-   * deliberate departure with an error (the member stays, nothing is lost);
-   * a timed-out one keeps the member and says so in the log, to be swept
-   * again. The release itself waits for the name's lock, so a registration
-   * in flight finishes first (gate round 7, finding 1).
+   * A local member leaves the remote room. Its id is written to the record
+   * as owed FIRST (write-ahead); only then is the member removed here. A
+   * record that cannot be written stops a deliberate departure with an error
+   * (the member stays); a timed-out one keeps the member and logs it. The
+   * release itself waits for the name's lock, so a registration in flight
+   * finishes first, and a reply that lands after this converts to debt.
    */
   override leave(name: string, reason: "deliberate" | "timeout" = "deliberate"): void {
     const had = this.agents.has(name);
-    const reg = had ? this.shadows.get(name)?.homeRegistration : undefined;
-    if (reg) {
+    const id = had ? this.registrationOf(name) : undefined;
+    if (id) {
       try {
-        this.oweMemberRelease(name, reg);
+        this.memberState.update(name, (r) => {
+          if (r.live === id) r.live = null;
+          r.releasesOwed.push(id);
+        });
       } catch (err) {
         if (reason === "timeout") {
           console.log(`  [link ${this.server}] ${name} not dropped from ${this.id}: ${(err as Error).message}`);
@@ -735,131 +857,12 @@ export class MirrorRoom extends ChatRoom {
     void (async () => {
       const release = await this.lockName(name);
       try {
-        // Rejoined meanwhile: that join owns the name at the home now.
         if (!this.agents.has(name)) this.shadows.delete(name);
-        await this.releaseMembers();
+        await this.releaseMemberIds(name);
       } finally {
         release();
       }
     })();
-  }
-
-  /** Write the member release record, then take it as the state; a write
-   *  that fails throws HumanStateError and changes nothing (the same
-   *  write-ahead rule as the human record). */
-  private writeMemberReleases(next: Array<{ name: string; registration: string }>, intents = this.memberIntents): void {
-    if (this.releasesFile) {
-      try {
-        ensureDir(dirname(this.releasesFile));
-        const tmp = `${this.releasesFile}.tmp`;
-        writeFileSync(tmp, JSON.stringify({ releases: next, intents }), "utf-8");
-        renameSync(tmp, this.releasesFile);
-      } catch (err) {
-        throw new HumanStateError(`the member release record could not be saved (${(err as Error).message}); nothing was changed`);
-      }
-    }
-    this.memberReleases = next;
-    this.memberIntents = intents;
-  }
-
-  /** Record a member registration about to be sent (write-ahead); throws
-   *  HumanStateError when it cannot be written, and then nothing is sent. */
-  noteMemberIntent(name: string, hosted: string): void {
-    if (this.memberIntents.some((i) => i.name === name && i.hosted === hosted)) return;
-    this.writeMemberReleases(this.memberReleases, [...this.memberIntents, { name, hosted }]);
-  }
-
-  /** The home answered a registration: keep it (the member is here with it)
-   *  or owe its release. One write; if it cannot be made, the change still
-   *  holds for this run and the durable intent settles it after a restart. */
-  resolveMemberIntent(name: string, hosted: string, homeRegistration: string, keep: boolean): void {
-    const intents = this.memberIntents.filter((i) => !(i.name === name && i.hosted === hosted));
-    const releases = keep || this.memberReleases.some((r) => r.name === name && r.registration === homeRegistration)
-      ? this.memberReleases
-      : [...this.memberReleases, { name, registration: homeRegistration }];
-    try {
-      this.writeMemberReleases(releases, intents);
-    } catch (err) {
-      console.log(`  [link ${this.server}] ${(err as Error).message}`);
-      // Memory only: the release is still made in this run; the intent stays
-      // on disk, so a restart re-registers it (idempotent) and releases it.
-      this.memberReleases = releases;
-    }
-  }
-
-  /** Intents left from before (a reply lost, a restart): an intent whose
-   *  member is not here with that registration is registered again, which
-   *  the home answers with the same registration (idempotent for the same
-   *  host registration), and released. */
-  async settleMemberIntents(): Promise<void> {
-    for (const i of [...this.memberIntents]) {
-      if (this.agents.has(i.name) && this.registrationOf(i.name) === i.hosted) continue; // a live attempt
-      const release = await this.lockName(i.name);
-      try {
-        if (!this.memberIntents.some((x) => x.name === i.name && x.hosted === i.hosted)) continue;
-        if (this.agents.has(i.name) && this.registrationOf(i.name) === i.hosted) continue;
-        const r = await this.transport.register({ room: this.homeRoomId, name: i.name, host: this.selfName, registration: i.hosted });
-        this.resolveMemberIntent(i.name, i.hosted, r.registration, false);
-      } catch (err) {
-        if (err instanceof LinkDownError) { this.transport.failed(err.message); return; }
-        // Refused (the name is someone else's there now): nothing of ours is held.
-        if (err instanceof PeerRefusedError && (err.status === 409 || err.status === 404)) {
-          try { this.writeMemberReleases(this.memberReleases, this.memberIntents.filter((x) => !(x.name === i.name && x.hosted === i.hosted))); } catch { /* kept, retried */ }
-        } else {
-          console.log(`  [link ${this.server}] settling ${i.name} in ${this.id}: ${(err as Error).message}`);
-        }
-      } finally {
-        release();
-      }
-    }
-    await this.releaseMembers();
-  }
-
-  /** Member registrations sent and not yet answered (for tests and diagnostics). */
-  pendingMemberIntents(): Array<{ name: string; hosted: string }> {
-    return this.memberIntents.map((i) => ({ ...i }));
-  }
-
-  private oweMemberRelease(name: string, registration: string): void {
-    if (this.memberReleases.some((r) => r.name === name && r.registration === registration)) return;
-    this.writeMemberReleases([...this.memberReleases, { name, registration }]);
-  }
-
-  /** Clear a settled debt; if that cannot be written it stays (a retry
-   *  then gets 404 and clears it). */
-  private clearMemberRelease(r: { name: string; registration: string }): void {
-    try {
-      this.writeMemberReleases(this.memberReleases.filter((x) => !(x.name === r.name && x.registration === r.registration)));
-    } catch (err) {
-      console.log(`  [link ${this.server}] ${(err as Error).message}`);
-    }
-  }
-
-  /** Home registrations of departed members still to release. */
-  pendingMemberReleases(): Array<{ name: string; registration: string }> {
-    return this.memberReleases.map((r) => ({ ...r }));
-  }
-
-  /** Release what departed members still hold at the home. A debt is
-   *  cleared only when the home confirms (success, or 404: it is gone). */
-  async releaseMembers(): Promise<void> {
-    for (const r of [...this.memberReleases]) {
-      // A member of that name here again may own the name at the home now.
-      if (this.agents.has(r.name) && this.shadows.get(r.name)?.homeRegistration === r.registration) {
-        this.clearMemberRelease(r);
-        continue;
-      }
-      try {
-        await this.transport.leave({ room: this.homeRoomId, name: r.name, registration: r.registration });
-      } catch (err) {
-        if (err instanceof LinkDownError) { this.transport.failed(err.message); return; }
-        if (!(err instanceof PeerRefusedError && err.status === 404)) {
-          console.log(`  [link ${this.server}] release of ${r.name} in ${this.id} refused (${(err as Error).message}); kept`);
-          continue;
-        }
-      }
-      this.clearMemberRelease(r);
-    }
   }
 
   private registrationFor(sender: string): string | undefined {

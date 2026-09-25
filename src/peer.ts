@@ -435,9 +435,22 @@ export class PeerHub {
       const room = localRoom(roomId);
       const name = str(body.name);
       const registration = str(body.registration);
-      if (!room || !name || !registration) { res.status(404).json({ error: "No such registration" }); return; }
+      // The peer may name the member by ITS OWN registration id (the hosted
+      // one) instead of this server's: it releases whatever is held here for
+      // that host and that id, so a peer never has to re-register an old id
+      // to learn what to release (gate round 10).
+      const hosted = str(body.hostedRegistration);
+      if (!room || !name || (!registration && !hosted)) { res.status(404).json({ error: "No such registration" }); return; }
       const member = room.getAgent(name);
-      if (member?.host === peer && room.registrationOf(name) === registration) {
+      if (member?.host === peer && hosted && !registration && room.hostedRegistrationOf(name) === hosted) {
+        const own = room.registrationOf(name);
+        manager.supersedeJoins(name);
+        room.leave(name);
+        if (own) manager.unbindRegistration(name, own);
+        res.json({ ok: true });
+        return;
+      }
+      if (member?.host === peer && registration && room.registrationOf(name) === registration) {
         manager.supersedeJoins(name);
         room.leave(name);
         manager.unbindRegistration(name, registration);
@@ -445,7 +458,7 @@ export class PeerHub {
         return;
       }
       const human = room.peerHumanOf(name);
-      if (human?.peer === peer && human.registration === registration) {
+      if (registration && human?.peer === peer && human.registration === registration) {
         room.deletePeerHuman(name);
         res.json({ ok: true });
         return;

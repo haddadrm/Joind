@@ -39,14 +39,16 @@ describe("gate round 9, finding 1: chat_leave keeps the session when the departu
   it("a failed departure says so, keeps everything, and a plain retry leaves", async () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-g9-a-"));
     const members = new Map<string, string>();
+    const hostedOf = new Map<string, string>();
     let n = 0;
     const fetchImpl: FetchLike = async (url, init) => {
       const body = JSON.parse(init.body ?? "{}") as Record<string, string>;
       const ok = (o: unknown) => ({ status: 200, text: async () => JSON.stringify(o) });
       if (url.includes("/api/peer/rooms")) return ok({ server: "home", rooms: [{ id: "c-1", name: "ops", createdAt: 1, messageCount: 0, starred: false }] });
-      if (url.includes("/api/peer/register")) { const reg = `H${++n}`; members.set(body.name, reg); return ok({ ok: true, registration: reg, online: [] }); }
+      if (url.includes("/api/peer/register")) { const reg = `H${++n}`; members.set(body.name, reg); hostedOf.set(body.name, body.registration); return ok({ ok: true, registration: reg, online: [] }); }
       if (url.includes("/api/peer/leave")) {
-        if (members.get(body.name) !== body.registration) return { status: 404, text: async () => "{}" };
+        const match = body.hostedRegistration ? hostedOf.get(body.name) === body.hostedRegistration : members.get(body.name) === body.registration;
+        if (!members.has(body.name) || !match) return { status: 404, text: async () => "{}" };
         members.delete(body.name);
         return ok({ ok: true });
       }
@@ -64,7 +66,7 @@ describe("gate round 9, finding 1: chat_leave keeps the session when the departu
       await reg.get("home")!.discover();
       expect(await call("chat_join", { name: "Curzon", pid: 999_991, conversation: "home:c-1" })).toContain("Joined conversation");
       const m = manager.getRoom("home:c-1") as MirrorRoom;
-      const tmp = join(dir, "links", "home", "c-1.releases.json.tmp");
+      const tmp = join(dir, "links", "home", "c-1.members.json.tmp");
       mkdirSync(tmp, { recursive: true });                    // the release record cannot be written
       expect(await call("chat_leave", { name: "Curzon" })).toMatch(/^Curzon: not disconnected: /);
       expect(m.getAgent("Curzon")).toBeDefined();
@@ -102,7 +104,9 @@ describe("gate round 9, finding 2: member registrations are write-ahead", () => 
       },
       leave: async (b) => {
         if (st.down) throw new LinkDownError("down");
-        if (members.get(b.name)?.reg !== b.registration) throw new PeerRefusedError(404, "No such registration");
+        const held = members.get(b.name);
+        const match = b.hostedRegistration ? held?.hosted === b.hostedRegistration : held?.reg === b.registration;
+        if (!held || !match) throw new PeerRefusedError(404, "No such registration");
         members.delete(b.name);
       },
       send: async (): Promise<ChatMessage> => { throw new Error("unused"); },
@@ -115,21 +119,21 @@ describe("gate round 9, finding 2: member registrations are write-ahead", () => 
     try {
       m1.join("Curzon", 999_993, undefined, undefined, undefined, undefined, "reg-local");
       m1.setShadow("Curzon", { homeRegistration: "H1" });
-      members.set("Curzon", { reg: "H1", hosted: "reg-local-old" });
+      members.set("Curzon", { reg: "H1", hosted: "reg-local" });
       members.clear();                                         // the home restarts
       let release!: () => void;
       st.hold = new Promise<void>((r) => { release = r; });
       const recovering = m1.reregisterAll();                   // the home registers H2; the reply pauses
       await waitFor("H2 in flight", () => st.held);
       m1.leave("Curzon");                                      // departure: H1 recorded, member removed
-      mkdirSync(join(dir, "c-1.releases.json.tmp"));           // the disk becomes unwritable
+      mkdirSync(join(dir, "c-1.members.json.tmp"));           // the disk becomes unwritable
       st.down = true;                                          // and the release will fail
       st.hold = null;
       release();
       await recovering;
       expect(members.has("Curzon")).toBe(true);               // H2 is still held at the home
       m1.destroy();
-      rmSync(join(dir, "c-1.releases.json.tmp"), { recursive: true, force: true });
+      rmSync(join(dir, "c-1.members.json.tmp"), { recursive: true, force: true });
       st.down = false;
       m2 = new MirrorRoom({ server: "home", homeId: "c-1", name: "ops", queueFile: file, transport, selfName: "here" });  // restart
       await m2.reregisterAll();                                // production recovery
@@ -153,7 +157,7 @@ describe("gate round 9, finding 2: member registrations are write-ahead", () => 
     try {
       m.join("Curzon", 999_995, undefined, undefined, undefined, undefined, "reg-local");
       m.setShadow("Curzon", { homeRegistration: "H1" });
-      mkdirSync(join(dir, "c-1.releases.json.tmp"));
+      mkdirSync(join(dir, "c-1.members.json.tmp"));
       await m.reregisterAll();
       expect(registers).toBe(0);
       expect(m.homeRegistrationOf("Curzon")).toBe("H1");

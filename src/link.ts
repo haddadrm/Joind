@@ -242,7 +242,9 @@ export class LinkClient extends EventEmitter {
     for (const m of this.mirrors.values()) {
       // A room with nothing here but release debt (its last member left
       // offline) is recovered too (gate round 8, finding 1).
-      if (m.hasLocalMembers() || m.humanToRegister() || m.humanOwes() || m.pendingMemberReleases().length > 0) await m.reregisterAll();
+      // Any room with something recorded: a member here, a member record
+      // (live, unconfirmed or owed ids), or the viewer (gate round 10, finding 1).
+      if (m.hasLocalMembers() || m.hasMemberRecords() || m.humanToRegister() || m.humanOwes()) await m.reregisterAll();
       const sent = m.queuedCount() > 0 ? await m.drain() : 0;
       if (announce && m.downNoted && this.state === "up") {
         m.addLocalLine(`link to ${this.name} restored; ${sent} queued message${sent === 1 ? "" : "s"} sent`);
@@ -560,15 +562,15 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     // lock until it commits or abandons, so a restore can never land after
     // a newer join (gate round 2, finding 2).
     const release = await m.lockName(name);
+    // Recorded as unconfirmed before the request (write-ahead): whatever
+    // happens to the reply, the record says the home may hold this id.
     try {
-      // Written before the request (gate round 9, finding 2): whatever
-      // happens to the reply, a durable record says the home may hold it.
-      try {
-        m.noteMemberIntent(name, registration);
-      } catch (err) {
-        release();
-        return { ok: false, status: 503, error: (err as Error).message };
-      }
+      m.beginMemberRegistration(name, registration);
+    } catch (err) {
+      release();
+      return { ok: false, status: 503, error: (err as Error).message };
+    }
+    try {
       const res = await c.register({ room: r.room, name, host: this.selfName, registration, terminalSummary, ...(t.role ? { role: t.role } : {}) });
       // Nothing is kept here yet: the join may still be superseded (gate
       // round 1, finding 3). The caller commits or abandons.
@@ -576,11 +578,17 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
       this.joinLocks.set(out, release);
       return out;
     } catch (err) {
-      release();
       if (err instanceof PeerRefusedError) {
+        // Refused for good: the home holds nothing under this id, and the
+        // record forgets it at once (gate round 10, finding 4).
+        m.refusedMemberRegistration(name, registration);
+        release();
         const body = err.body as { candidates?: unknown } | undefined;
         return { ok: false, status: err.status, error: err.message, ...(body?.candidates ? { candidates: body.candidates } : {}) };
       }
+      // A link error: the id stays unconfirmed (the home may hold it) and
+      // recovery releases it unless a member here takes it.
+      release();
       return { ok: false, status: 503, error: `the link to ${r.server} is down (${(err as Error).message}); a remote room can be joined only while its home server answers` };
     }
   }
@@ -588,8 +596,8 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
   commitMember(convId: string, name: string, outcome: RemoteRegistered): void {
     const m = this.mirror(convId);
     if (!m) return;
-    m.setShadow(name, { homeRegistration: outcome.homeRegistration, role: outcome.role, terminalSummary: outcome.terminalSummary });
-    m.resolveMemberIntent(name, outcome.hostedRegistration, outcome.homeRegistration, true);
+    // The member was joined here just now: its id becomes the live one.
+    m.confirmMemberRegistration(name, outcome.hostedRegistration, outcome.homeRegistration, { role: outcome.role, terminalSummary: outcome.terminalSummary });
     this.joinLocks.get(outcome)?.();
     m.resumeAuthor(name);
   }
@@ -602,18 +610,18 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     // Still under this join's lock: the member captured here is the current one.
     const current = m.shadowsForRegister().find((s) => s.name === name);
     try {
-      // The abandoned registration is owed a release in any case (the home
-      // answers 404 once a newer registration replaced it).
-      m.resolveMemberIntent(name, outcome.hostedRegistration, outcome.homeRegistration, false);
+      // The abandoned id is owed a release (the home answers 404 once the
+      // live registration below replaced it).
+      m.abandonMemberRegistration(name, outcome.hostedRegistration);
       if (current) {
-        // The newer join of this name is the member here: the home must
-        // hold ITS registration, not the abandoned one (idempotent when it does).
-        m.noteMemberIntent(name, current.registration);
+        // The member here is the newer join: the home must hold ITS id (live
+        // on record already). A reply that lands after it left is debt
+        // (confirmMemberRegistration re-checks; gate round 10, finding 3).
         const res = await c.register({ room: r.room, name, host: this.selfName, registration: current.registration, terminalSummary: current.terminalSummary, ...(current.role ? { role: current.role } : {}) });
-        m.setShadow(name, { homeRegistration: res.registration, role: current.role, terminalSummary: current.terminalSummary });
-        m.resolveMemberIntent(name, current.registration, res.registration, true);
+        m.confirmMemberRegistration(name, current.registration, res.registration, { role: current.role, terminalSummary: current.terminalSummary });
       }
-      await m.releaseMembers();
+      // The live registration first, then every other id by id.
+      await m.releaseMemberIds(name);
     } catch (err) {
       console.log(`  [link ${r.server}] could not restore ${name} in ${convId} after a superseded join: ${(err as Error).message}`);
     } finally {

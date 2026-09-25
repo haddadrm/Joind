@@ -87,10 +87,13 @@ export interface PeerSendResult {
   message: ChatMessage;
 }
 
+/** A departure names either this server's registration (`registration`,
+ *  the home's id) or the peer's own (`hostedRegistration`). */
 export interface PeerLeaveBody {
   room: string;
   name: string;
-  registration: string;
+  registration?: string;
+  hostedRegistration?: string;
 }
 
 /** Everything else a hosted member does in a remote room, carried home.

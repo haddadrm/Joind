@@ -36,7 +36,10 @@ async function waitFor<T>(what: string, fn: () => T | undefined | false, ms = 5_
 
 /** A fake home of members: register holds on demand; leave needs the current registration. */
 function memberHome() {
+  // The home keeps each member's home id and the peer's (hosted) id; a
+  // release names either (round 10: the peer releases by its own id).
   const members = new Map<string, string>();
+  const hostedOf = new Map<string, string>();
   const st = { down: false, n: 1, hold: null as Promise<void> | null, held: false };
   const transport: MirrorTransport = {
     isUp: () => !st.down,
@@ -45,18 +48,21 @@ function memberHome() {
       const reg = `H${++st.n}`;
       if (st.hold) { st.held = true; await st.hold; }
       members.set(b.name, reg);
+      hostedOf.set(b.name, b.registration);
       return { ok: true, registration: reg, online: [] };
     },
     leave: async (b) => {
       if (st.down) throw new LinkDownError("down");
-      if (members.get(b.name) !== b.registration) throw new PeerRefusedError(404, "No such registration");
+      const match = b.hostedRegistration ? hostedOf.get(b.name) === b.hostedRegistration : members.get(b.name) === b.registration;
+      if (!members.has(b.name) || !match) throw new PeerRefusedError(404, "No such registration");
       members.delete(b.name);
+      hostedOf.delete(b.name);
     },
     send: async (): Promise<ChatMessage> => { throw new Error("unused"); },
     act: async () => undefined,
     failed: () => undefined,
   };
-  return { members, st, transport };
+  return { members, hostedOf, st, transport };
 }
 
 describe("gate round 7, finding 1: a departure during recovery releases what the home ends up holding", () => {
@@ -67,6 +73,7 @@ describe("gate round 7, finding 1: a departure during recovery releases what the
       m.join("Curzon", 999_971, undefined, undefined, undefined, undefined, "reg-local");
       m.setShadow("Curzon", { homeRegistration: "H1" });
       home.members.set("Curzon", "H1");
+      home.hostedOf.set("Curzon", "reg-local");
       home.members.clear();                               // the home restarts
       let release!: () => void;
       home.st.hold = new Promise<void>((r) => { release = r; });
@@ -91,13 +98,14 @@ describe("gate round 7, finding 1: a departure during recovery releases what the
       m1.join("Curzon", 999_973, undefined, undefined, undefined, undefined, "reg-local");
       m1.setShadow("Curzon", { homeRegistration: "H1" });
       home.members.set("Curzon", "H1");
+      home.hostedOf.set("Curzon", "reg-local");
       home.st.down = true;
       m1.leave("Curzon");
       await waitFor("the debt recorded", () => m1.pendingMemberReleases().length === 1);
       m1.destroy();
       home.st.down = false;
       m2 = new MirrorRoom({ server: "home", homeId: "c-1", name: "ops", queueFile: file, transport: home.transport, selfName: "here" });
-      expect(m2.pendingMemberReleases()).toEqual([{ name: "Curzon", registration: "H1" }]);
+      expect(m2.pendingMemberReleases()).toEqual([{ name: "Curzon", registration: "reg-local" }]);
       await m2.reregisterAll();
       expect(home.members.has("Curzon")).toBe(false);
       expect(m2.pendingMemberReleases()).toEqual([]);
