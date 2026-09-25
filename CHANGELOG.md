@@ -81,6 +81,11 @@ A Joind server can now link to peer servers, mirror their rooms, and host member
 - **A selection answers with its own room.** `/api/conversations/select` takes the metadata and the contents from the room the request selected, not from the active pointer that another selection may have moved while the remote fill ran.
 - 4 tests in `tests/linked-servers-gate7.test.ts`, one per finding plus the departure debt across a restart, all failing on b21bdc1. Suite 410.
 
+### Codex gate round 8 (2 Medium on the server side, closed)
+- **Recovery covers rooms that hold only release debt.** A mirror whose last member left while the home was unreachable (no member, no human state here, only `<room>.releases.json`) is included in recovery, and the recovery pass makes those releases with no live member.
+- **Member release debt is write-ahead.** A departure writes the home registration to the release record (atomically, and taken as state only once written) BEFORE the member and its shadow are removed. A record that cannot be written fails a deliberate departure: the member and its binding stay, REST leave and the UI leave answer 503, `chat_leave` says it did not disconnect. A timed-out departure in that case keeps the member and logs it, to be swept again. Clearing a settled debt that cannot be written leaves it owed (the retry gets 404 and clears it). The member record uses the same write-ahead rule as the human record, in its own file per room.
+- 2 tests in `tests/linked-servers-gate8.test.ts`, both failing on 54b9ec9: the last member leaves offline, this server restarts, and production recovery (discovery, link up, restore) releases the registration; and a departure with an unwritable record fails and keeps the member, then writes its debt before leaving once it can. Suite 412.
+
 ### Known limits
 - **Images are not carried to remote rooms** (refused with 400, above).
 - **A peer and this server may still share a human's name.** A peer's human may take any name that is not a local member or binding of the room, including this server's own web viewer name (the same person on both machines is the intended case).

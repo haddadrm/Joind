@@ -793,7 +793,12 @@ export function registerTools(
       if (!departureIsCurrent(target.room, name, target.entry.registration, registration)) {
         return { content: [{ type: "text" as const, text: `${name}: that registration was superseded by a later join; nothing removed` }] };
       }
-      if (target.room.getAgent(name)) target.room.leave(name);
+      try {
+        if (target.room.getAgent(name)) target.room.leave(name);
+      } catch (err) {
+        // A remote room whose release record cannot be written (gate round 8).
+        return { content: [{ type: "text" as const, text: `${name}: not disconnected: ${(err as Error).message}` }] };
+      }
       manager.unbindRegistration(name, target.entry.registration);
       return { content: [{ type: "text" as const, text: `${name} disconnected` }] };
     }

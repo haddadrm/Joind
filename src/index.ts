@@ -923,7 +923,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const room = convId ? manager.getRoom(convId) : undefined;
     if (!convId || !room) { res.status(404).json({ error: "Conversation not found" }); return; }
     manager.supersedeJoins(name);
-    room.leave(name);
+    try {
+      room.leave(name);
+    } catch (err) {
+      res.status(503).json({ error: (err as Error).message });
+      return;
+    }
     manager.unbindAgent(name, convId);
     res.json({ ok: true });
   });
@@ -1953,7 +1958,14 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       return;
     }
     manager.supersedeJoins(name);
-    if (room) room.leave(name);
+    try {
+      if (room) room.leave(name);
+    } catch (err) {
+      // A remote room whose release record cannot be written: the member
+      // stays, nothing is lost (gate round 8, finding 2).
+      res.status(503).json({ error: (err as Error).message });
+      return;
+    }
     if (entry) manager.unbindRegistration(name, entry.registration);
     res.json({ ok: true });
   });
