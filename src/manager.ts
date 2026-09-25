@@ -10,7 +10,7 @@ import { randomUUID } from "crypto";
 import { EventEmitter } from "events";
 import { join } from "path";
 import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } from "fs";
-import { ChatRoom, type ChatMessage, type Agent, type RoomEvent } from "./room.js";
+import { ChatRoom, type ChatMessage, type Agent, type RoomEvent, type HostedWaker } from "./room.js";
 import { ensureDir, loadMessages, maxId, appendMessage } from "./persist.js";
 import { ChoiceStore } from "./choices.js";
 import { PinStore } from "./pins.js";
@@ -53,13 +53,28 @@ export interface AgentBindingEntry {
   paneId?: number;
   weztermGui?: number;
   orcaTerminal?: string;
+  /** Linked servers: a hosted member's registration (its terminal lives on
+   *  this peer). It has no terminal alias here, never answers a name-only
+   *  lookup, and is reached only by its registration id. */
+  host?: string;
+}
+
+/** A remote room this server mirrors from a linked home server, addressed
+ *  here as "<server>:<home room id>". */
+export interface RemoteRoomEntry {
+  id: string;
+  server: string;
+  homeId: string;
+  room: ChatRoom;
+  meta: () => ConversationMeta;
 }
 
 /** A registration with no terminal alias at all: pid 0, no pane, no Orca
  *  handle (an interactive REPL agent that cannot name its terminal). Only
  *  its registration id identifies it. */
 export function isTerminalLess(e: AgentBindingEntry): boolean {
-  return !e.pid && e.paneId == null && e.orcaTerminal == null;
+  // A hosted registration has no terminal HERE; it is not the REPL case.
+  return !e.host && !e.pid && e.paneId == null && e.orcaTerminal == null;
 }
 
 /** A fresh registration id: opaque and unique per join. */
@@ -107,6 +122,13 @@ export class ConversationManager extends EventEmitter {
   private pinStore: PinStore;
   private tagStore: TagStore;
   private askStore: AskStore;
+  /** Remote rooms mirrored from linked servers, by "<server>:<room>" id.
+   *  Never in the index, never listed as local conversations. */
+  private remote = new Map<string, RemoteRoomEntry>();
+  /** The base URL wake prompts name (this server's own address). */
+  injectBaseUrl?: string;
+  /** Carries hosted members' wakes over the link (set by the server). */
+  hostedWaker?: HostedWaker;
 
   constructor(dataDir: string) {
     super();
@@ -261,6 +283,12 @@ export class ConversationManager extends EventEmitter {
         onTag: (messageId, tag, at) => tagStore.record(id, { messageId, tag, at }),
         onAskResolve: (messageId, by, at) => askStore.record(id, { messageId, resolvedBy: by, at }),
       });
+      room.homeId = id;
+      if (this.injectBaseUrl) room.injectBaseUrl = this.injectBaseUrl;
+      // Late-bound: the link layer may attach after rooms exist.
+      room.hostedWaker = (req) => this.hostedWaker
+        ? this.hostedWaker(req)
+        : Promise.resolve({ ok: false, kind: "unreachable" as const, attempts: 0, reason: `no link to ${req.host} is configured on this server` });
       // Replay any persisted choice resolutions onto the freshly loaded messages
       const persistedChoices = choiceStore.load(id);
       if (persistedChoices.length > 0) room.applyChoiceRecords(persistedChoices);
@@ -312,14 +340,62 @@ export class ConversationManager extends EventEmitter {
   }
 
   getRoom(id: string): ChatRoom | undefined {
+    const remote = this.remote.get(id);
+    if (remote) return remote.room;
     if (!this.meta.has(id)) return undefined; // Prevent ghost-room resurrection
     return this.getOrCreateRoom(id);
+  }
+
+  // -----------------------------------------------------------------------
+  // Remote rooms (linked servers)
+  // -----------------------------------------------------------------------
+
+  /** Register a mirror of a remote room. Its room events are forwarded with
+   *  conversationId = the remote id, exactly like a local room's. */
+  registerRemoteRoom(entry: RemoteRoomEntry): void {
+    if (this.remote.has(entry.id)) return;
+    this.remote.set(entry.id, entry);
+    entry.room.on("room", (event: RoomEvent) => {
+      this.emit("room", { ...event, conversationId: entry.id });
+    });
+    // The same per-room wiring as a local room (cursor provider for prompts).
+    this.emit("room-created", entry.room);
+  }
+
+  unregisterRemoteRoom(id: string): void {
+    const entry = this.remote.get(id);
+    if (!entry) return;
+    this.remote.delete(id);
+    entry.room.removeAllListeners("room");
+    entry.room.destroy();
+    for (const [agent, entries] of this.agentBindings) {
+      const filtered = entries.filter((e) => e.conversationId !== id);
+      if (filtered.length === 0) this.agentBindings.delete(agent);
+      else this.agentBindings.set(agent, filtered);
+    }
+  }
+
+  isRemote(id: string): boolean {
+    return this.remote.has(id);
+  }
+
+  getRemote(id: string): RemoteRoomEntry | undefined {
+    return this.remote.get(id);
+  }
+
+  listRemote(): RemoteRoomEntry[] {
+    return [...this.remote.values()];
+  }
+
+  /** Every room an agent-facing listing may cover: local ones, then mirrors. */
+  listAllRoomMetas(): ConversationMeta[] {
+    return [...this.listConversations(), ...this.listRemote().map((r) => r.meta())];
   }
 
   getRoomForAgent(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number): ChatRoom | undefined {
     const convId = this.getAgentBinding(agentName, pid, paneId, orcaTerminal, gui);
     if (!convId) return undefined;
-    return this.conversations.get(convId);
+    return this.getRoom(convId);
   }
 
   getAgentConversationId(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number): string | undefined {
@@ -335,20 +411,32 @@ export class ConversationManager extends EventEmitter {
   }
 
   setActive(id: string): boolean {
+    if (this.remote.has(id)) {
+      this.activeId = id;
+      this.saveIndex();
+      this.emit("active-changed", id);
+      return true;
+    }
     if (!this.meta.has(id)) return false;
     this.activeId = id;
     this.getOrCreateRoom(id); // ensure loaded
     this.saveIndex();
+    this.emit("active-changed", id);
     return true;
   }
 
   getActiveRoom(): ChatRoom | undefined {
     if (!this.activeId) return undefined;
+    const remote = this.remote.get(this.activeId);
+    if (remote) return remote.room;
+    if (!this.meta.has(this.activeId)) return undefined; // a remote id whose mirror is not registered (yet)
     return this.getOrCreateRoom(this.activeId);
   }
 
   getActiveMeta(): ConversationMeta | null {
     if (!this.activeId) return null;
+    const remote = this.remote.get(this.activeId);
+    if (remote) return remote.meta();
     return this.meta.get(this.activeId) ?? null;
   }
 
@@ -498,6 +586,14 @@ export class ConversationManager extends EventEmitter {
     return id;
   }
 
+  /** Register a hosted member's binding: reached by its id only, with no
+   *  terminal alias. One binding per (conversation, name), as bindAgent. */
+  bindHosted(agentName: string, conversationId: string, registration: string, host: string): void {
+    const entries = (this.agentBindings.get(agentName) ?? []).filter((e) => e.conversationId !== conversationId);
+    entries.push({ conversationId, registration, host });
+    this.agentBindings.set(agentName, entries);
+  }
+
   /** True when any binding of this name, or any room's registration of it,
    *  holds an Orca handle (a rejoin may have to clear it). Rooms count on
    *  their own: a binding that moved to another room leaves the old room's
@@ -528,8 +624,10 @@ export class ConversationManager extends EventEmitter {
    *  id, when given, is matched first and alone: an id that matches nothing
    *  falls back to the terminal aliases, never to "the only binding". */
   bindingEntryForTerminal(agentName: string, t: TerminalAliases, conversationId?: string): AgentBindingEntry | undefined {
-    const entries = this.agentBindings.get(agentName) ?? [];
-    const byId = t.registration != null ? entries.find((e) => e.registration === t.registration) : undefined;
+    const all = this.agentBindings.get(agentName) ?? [];
+    const byId = t.registration != null ? all.find((e) => e.registration === t.registration) : undefined;
+    // Terminal aliases never reach a hosted registration (it has none here).
+    const entries = all.filter((e) => !e.host);
     const own = conversationId != null ? entries.find((e) => e.conversationId === conversationId && bindingMatchesTerminal(e, t)) : undefined;
     const e = byId ?? own ?? entries.find((x) => bindingMatchesTerminal(x, t));
     return e ? { ...e } : undefined;
@@ -566,11 +664,14 @@ export class ConversationManager extends EventEmitter {
    * resolved binding as the agent's credential.
    */
   getAgentBinding(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number, registration?: string): string | undefined {
-    const entries = this.agentBindings.get(agentName);
-    if (!entries || entries.length === 0) return undefined;
+    const all = this.agentBindings.get(agentName);
+    if (!all || all.length === 0) return undefined;
     // A named registration is matched alone: an id that matches nothing is
     // not this caller's to fall back from (it left, or rejoined elsewhere).
-    if (registration != null) return entries.find(e => e.registration === registration)?.conversationId;
+    if (registration != null) return all.find(e => e.registration === registration)?.conversationId;
+    // A hosted registration (terminal on a linked peer) answers its id only.
+    const entries = all.filter((e) => !e.host);
+    if (entries.length === 0) return undefined;
     // Exact match by Orca handle (a handle-only registration has no pid or pane)
     if (orcaTerminal) {
       const match = entries.find(e => e.orcaTerminal === orcaTerminal);
@@ -662,6 +763,8 @@ export class ConversationManager extends EventEmitter {
   }
 
   getMeta(id: string): ConversationMeta | undefined {
+    const remote = this.remote.get(id);
+    if (remote) return remote.meta();
     return this.meta.get(id);
   }
 

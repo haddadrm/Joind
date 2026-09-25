@@ -12,6 +12,8 @@ import { z } from "zod";
 import { ConversationManager, isTerminalLess, newRegistrationId, type AgentBindingEntry, type TerminalAliases } from "./manager.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { visibleToViewer } from "./room.js";
+import { MirrorRoom, type WriteResult } from "./mirror.js";
+import type { RemoteRooms } from "./peer-types.js";
 import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
@@ -395,7 +397,18 @@ export function registerTools(
   reactionStore?: ReactionStore,
   cursorStore?: CursorStore,
   editStore?: EditStore,
+  remote?: RemoteRooms,
 ): void {
+  /** In a remote room, what only its home server can do is said, not faked. */
+  const remoteOnly = (target: SessionRoute, what: string) =>
+    target.room instanceof MirrorRoom
+      ? { content: [{ type: "text" as const, text: `${what} is not available in a remote room (${target.convId}); do it on its home server, ${target.room.server}.` }] }
+      : null;
+  /** Say the outcome of a write through a mirror. */
+  const writeText = (r: WriteResult, label: string): string =>
+    r.status === "sent"
+      ? `${label} #${r.message.id} sent`
+      : `${label} queued, not sent yet: ${r.reason}. It goes out in order when the link returns. clientId ${r.clientId}; chat_unsend with it deletes it before then.`;
 
   server.registerTool(
     "chat_join",
@@ -409,7 +422,7 @@ export function registerTools(
         name: z.string().describe("Your display name in the chat"),
         pid: z.number().describe("Your terminal process ID"),
         conversation: z.string().optional().describe(
-          "Conversation ID to join. Omit to join the active conversation."
+          "Conversation ID to join. Omit to join the active conversation. A room on a linked server is \"<server>:<room id>\": you join here, mentions there wake you here."
         ),
         weztermPaneId: z.number().optional().describe(
           "WezTerm pane ID (from $WEZTERM_PANE env var). Enables reliable @mention injection."
@@ -422,6 +435,10 @@ export function registerTools(
     async ({ name, pid, conversation, weztermPaneId, orcaTerminal }, extra) => {
       // Determine which conversation to join
       let convId = conversation || manager.getActiveId();
+      // A remote room ("<server>:<room>") resolves through its link first.
+      if (convId && remote?.isRemoteId(convId) && !(await remote.prepare(convId))) {
+        return { content: [{ type: "text" as const, text: `Conversation not found: ${convId} (its home server has no such room, or cannot be reached)` }] };
+      }
       if (!convId) {
         // No active conversation — create one and make it active for web UI
         const meta = manager.createConversation();
@@ -429,8 +446,13 @@ export function registerTools(
         manager.setActive(convId);
       }
 
-      if (!manager.getRoom(convId)) {
+      const found = manager.getRoom(convId);
+      if (!found) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
+      }
+      const hostedHere = found.getAgent(name)?.host;
+      if (hostedHere) {
+        return { content: [{ type: "text" as const, text: `${name} is a member of this room hosted on ${hostedHere}. Join from there, or pick another name.` }] };
       }
       const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId, requestedOrcaHandle(orcaTerminal));
 
@@ -450,12 +472,23 @@ export function registerTools(
       if (!room) {
         return { content: [{ type: "text" as const, text: "Conversation not found: " + convId }] };
       }
+      const persistedRole = getPersistedRole?.(name);
+      const registration = newRegistrationId();
+      if (room instanceof MirrorRoom && remote) {
+        // The home server registers this member as hosted here; its wakes
+        // come back to this server, where the terminal is.
+        const reg = await remote.registerMember(convId, name, registration, {
+          pid, paneId: resolvedPaneId ?? undefined, gui: paneResolution.gui, orcaTerminal: resolvedOrca ?? undefined, role: persistedRole,
+        });
+        if (!reg.ok) {
+          const cands = reg.candidates ? ` Candidates: ${JSON.stringify(reg.candidates)}` : "";
+          return { content: [{ type: "text" as const, text: `Could not join ${convId}: ${reg.error}.${cands}` }] };
+        }
+      }
       if (!manager.joinIsCurrent(joinToken, pid, resolvedPaneId ?? undefined, resolvedOrca ?? undefined, paneResolution.gui)) {
         return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
-      const persistedRole = getPersistedRole?.(name);
-      const registration = newRegistrationId();
       const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui, registration);
       manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca, paneResolution.gui, registration);
       sessionBindings.set(extra.sessionId, {
@@ -463,6 +496,7 @@ export function registerTools(
         paneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal,
       });
       room.touch(name);
+      if (room instanceof MirrorRoom && remote) await remote.joined(convId);
 
       // Name the WezTerm tab to just the agent name
       if (agent.weztermPaneId != null) {
@@ -494,6 +528,7 @@ export function registerTools(
           type: "text" as const,
           text:
             `Joined conversation "${meta?.name ?? convId}".\n` +
+            (room instanceof MirrorRoom ? `Remote room on ${room.server} (${convId}): you read and write here, mentions there wake you here; messages sent while the link is down are queued.\n` : "") +
             `Online: ${online.join(", ") || "just you"}` +
             `\nRegistration: ${registration} (pass it as \`registration\` when your name may be registered more than once, and after an MCP reconnect)` +
             (agent.weztermPaneId != null && agent.weztermGui != null ? `\nWezTerm pane: ${agent.weztermPaneId} in instance (weztermGui) ${agent.weztermGui}` : "") +
@@ -526,6 +561,16 @@ export function registerTools(
       }
       target.room.touch(sender);
       target.room.setTyping(sender, false);
+
+      if (target.room instanceof MirrorRoom) {
+        // The home server names the room, numbers the message and decides mentions.
+        try {
+          const r = await target.room.writeThrough(sender, text, { replyTo, choices, askFor });
+          return { content: [{ type: "text" as const, text: writeText(r, "Message") }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: `Not sent: ${(err as Error).message}` }] };
+        }
+      }
 
       // Auto-name conversation from first non-system message
       manager.autoName(target.convId, text);
@@ -572,7 +617,7 @@ export function registerTools(
     },
     async ({ sender, forName }) => {
       const lines: string[] = [];
-      for (const meta of manager.listConversations()) {
+      for (const meta of manager.listAllRoomMetas()) {
         const room = manager.getRoom(meta.id);
         if (!room) continue;
         for (const m of room.openAsks(forName)) {
@@ -811,7 +856,7 @@ export function registerTools(
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
-      const msg = target.room.tagMessage(messageId, tag);
+      const msg = target.room instanceof MirrorRoom ? target.room.tagAs(sender, messageId, tag) : target.room.tagMessage(messageId, tag);
       if (!msg) {
         return { content: [{ type: "text" as const, text: `Message #${messageId} not found` }] };
       }
@@ -837,7 +882,7 @@ export function registerTools(
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
-      const msg = target.room.pinMessage(messageId, pinned !== false);
+      const msg = target.room instanceof MirrorRoom ? target.room.pinAs(sender, messageId, pinned !== false) : target.room.pinMessage(messageId, pinned !== false);
       if (!msg) {
         return { content: [{ type: "text" as const, text: `Message #${messageId} not found` }] };
       }
@@ -863,6 +908,8 @@ export function registerTools(
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
+      const refused = remoteOnly(target, "A session marker");
+      if (refused) return refused;
       target.room.addSessionMarker(markerType, label);
       return { content: [{ type: "text" as const, text: `Session ${markerType} marker added${label ? ": " + label : ""}` }] };
     }
@@ -887,6 +934,8 @@ export function registerTools(
         if (!target) {
           return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
         }
+        const refused = remoteOnly(target, "Reacting");
+        if (refused) return refused;
         const result = reactionStore.toggle(target.convId, messageId, emoji, sender);
         return { content: [{ type: "text" as const, text: `Reaction ${result.action}: ${emoji} on message #${messageId}` }] };
       }
@@ -912,6 +961,8 @@ export function registerTools(
         if (!target) {
           return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
         }
+        const refused = remoteOnly(target, "Editing a message");
+        if (refused) return refused;
         const msg = target.room.getMessageById(messageId);
         if (!msg) {
           return { content: [{ type: "text" as const, text: `Message #${messageId} not found` }] };
@@ -1050,8 +1101,42 @@ export function registerTools(
       }
       target.room.touch(sender);
       target.room.setTyping(sender, false);
+      if (target.room instanceof MirrorRoom) {
+        try {
+          const r = await target.room.writeThrough(sender, text, { to });
+          return { content: [{ type: "text" as const, text: writeText(r, `DM to ${to.join(", ")}`) }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: `Not sent: ${(err as Error).message}` }] };
+        }
+      }
       const msg = target.room.send(sender, text, { to });
       return { content: [{ type: "text" as const, text: `DM #${msg.id} sent to ${to.join(", ")}` }] };
+    }
+  );
+
+  // --- Undelivered messages in a remote room ---
+
+  server.registerTool(
+    "chat_unsend",
+    {
+      title: "Delete an undelivered message",
+      description: "In a remote room (a room on a linked server), a message sent while the link is down waits in a queue. Its author may delete it with the clientId the send returned, until it is sent.",
+      inputSchema: z.object({
+        sender: z.string().describe("Your name (the message's author)"),
+        clientId: z.string().describe("The clientId your queued send returned"),
+        registration: registrationArg,
+      }),
+    },
+    async ({ sender, clientId, registration }, extra) => {
+      const target = getRoom(manager, extra, sender, registration);
+      if (!target) {
+        return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
+      }
+      if (!(target.room instanceof MirrorRoom)) {
+        return { content: [{ type: "text" as const, text: "Nothing to unsend: this room is on this server, so messages are never queued." }] };
+      }
+      const r = target.room.deleteUndelivered(clientId, sender);
+      return { content: [{ type: "text" as const, text: r.ok ? `Undelivered message ${clientId} deleted` : `Not deleted: ${r.error}` }] };
     }
   );
 
@@ -1119,7 +1204,8 @@ export function registerTools(
         const data = await resp.json() as { url: string; filename: string };
         if (message) {
           const text = `${message}\n\n📎 [${filename}](${data.url})`;
-          target.room.send(sender, text);
+          if (target.room instanceof MirrorRoom) await target.room.writeThrough(sender, text);
+          else target.room.send(sender, text);
         }
         return { content: [{ type: "text" as const, text: `File uploaded: ${data.url} (${content.length} bytes)` }] };
       } catch (err) {
@@ -1153,6 +1239,18 @@ export function registerTools(
       if (openQuestions) text += `**Open questions:** ${openQuestions}\n`;
       text += `**Next steps:** ${nextSteps}\n`;
       if (blockers) text += `**Blockers:** ${blockers}`;
+      if (target.room instanceof MirrorRoom) {
+        try {
+          const r = await target.room.writeThrough(sender, text);
+          if (r.status === "sent") {
+            target.room.tagAs(sender, r.message.id, "handoff");
+            target.room.pinAs(sender, r.message.id, true);
+          }
+          return { content: [{ type: "text" as const, text: writeText(r, "Handoff note") + (r.status === "sent" ? " (tag and pin asked of the home server)" : "") }] };
+        } catch (err) {
+          return { content: [{ type: "text" as const, text: `Not sent: ${(err as Error).message}` }] };
+        }
+      }
       const msg = target.room.send(sender, text);
       target.room.tagMessage(msg.id, "handoff");
       target.room.pinMessage(msg.id, true);
@@ -1183,6 +1281,8 @@ export function registerTools(
         if (!target) {
           return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
         }
+        const refused = remoteOnly(target, "Creating a task");
+        if (refused) return refused;
         const task = taskStore.create(target.convId, {
           title, description, creator: sender, assignee, priority,
         });
@@ -1220,6 +1320,8 @@ export function registerTools(
         if (!target) {
           return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
         }
+        const refused = remoteOnly(target, "Tasks");
+        if (refused) return refused;
 
         // Resolve a task
         if (id != null && response != null) {

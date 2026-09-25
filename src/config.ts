@@ -38,6 +38,59 @@ export interface JoindConfig {
   webToken: string;
   /** True when the token came from --web-token / JOIND_WEB_TOKEN (not generated+served). */
   webTokenUserSet: boolean;
+  /** Linked peer servers (JOIND_LINKS JSON, then repeatable --link name=url=token). */
+  links: LinkConfig[];
+}
+
+/** One linked peer: its server name (its own instance name), its base URL,
+ *  and the shared token both sides present as `Authorization: Bearer`. */
+export interface LinkConfig {
+  name: string;
+  url: string;
+  token: string;
+}
+
+/** A peer name is one path-safe segment: it prefixes remote room ids
+ *  ("<server>:<room>") and names a folder under data/links. */
+const LINK_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/** Validate one link; throws with the reason. */
+export function validLink(raw: unknown, where: string): LinkConfig {
+  const r = raw as { name?: unknown; url?: unknown; token?: unknown } | null;
+  if (!r || typeof r !== "object") throw new Error(`${where}: a link is an object { name, url, token }`);
+  const name = typeof r.name === "string" ? r.name.trim() : "";
+  const url = typeof r.url === "string" ? r.url.trim().replace(/\/+$/, "") : "";
+  const token = typeof r.token === "string" ? r.token.trim() : "";
+  if (!LINK_NAME.test(name)) throw new Error(`${where}: invalid link name ${JSON.stringify(name)} (letters, digits, dot, dash, underscore)`);
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error(`${where}: invalid link url for ${name}`); }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(`${where}: link url for ${name} must be http or https`);
+  if (token.length < 8) throw new Error(`${where}: link token for ${name} must be at least 8 characters`);
+  return { name, url, token };
+}
+
+/**
+ * Links from JOIND_LINKS (a JSON array of { name, url, token }) and every
+ * `--link name=url=token` flag. The url may itself contain "=" only in its
+ * query, so the flag is split at the first "=" and at the LAST "=".
+ * A later entry with the same name replaces an earlier one.
+ */
+export function parseLinks(argv: string[], envValue: string | undefined): LinkConfig[] {
+  const out = new Map<string, LinkConfig>();
+  if (envValue && envValue.trim()) {
+    let arr: unknown;
+    try { arr = JSON.parse(envValue); } catch { throw new Error("JOIND_LINKS is not valid JSON"); }
+    if (!Array.isArray(arr)) throw new Error("JOIND_LINKS must be a JSON array");
+    arr.forEach((raw, i) => { const l = validLink(raw, `JOIND_LINKS[${i}]`); out.set(l.name, l); });
+  }
+  for (const v of getFlags(argv, "link")) {
+    const first = v.indexOf("=");
+    const last = v.lastIndexOf("=");
+    if (first <= 0 || last <= first) throw new Error(`--link ${JSON.stringify(v.split("=")[0])}: expected name=url=token`);
+    const l = validLink({ name: v.slice(0, first), url: v.slice(first + 1, last), token: v.slice(last + 1) }, "--link");
+    out.set(l.name, l);
+  }
+  return [...out.values()];
 }
 
 function getFlag(argv: string[], name: string): string | undefined {
@@ -48,6 +101,18 @@ function getFlag(argv: string[], name: string): string | undefined {
     if (a.startsWith(eq)) return a.slice(eq.length);
   }
   return undefined;
+}
+
+/** Every value of a repeatable flag (`--name v` or `--name=v`). */
+function getFlags(argv: string[], name: string): string[] {
+  const eq = `--${name}=`;
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === `--${name}` && i + 1 < argv.length) { out.push(argv[i + 1]); i++; continue; }
+    if (a.startsWith(eq)) out.push(a.slice(eq.length));
+  }
+  return out;
 }
 
 export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig {
@@ -92,7 +157,10 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig 
   const logFile =
     getFlag(argv, "log-file") ?? process.env.JOIND_LOG_FILE ?? join(dataDir, "logs", "joind.log");
 
-  return { port, host, dataDir, instance, crewHome, humanNames, presenceGraceMs, logFile, webToken, webTokenUserSet };
+  const links = parseLinks(argv, process.env.JOIND_LINKS);
+  if (links.some((l) => l.name === instance)) throw new Error(`A link cannot carry this server's own name (${instance})`);
+
+  return { port, host, dataDir, instance, crewHome, humanNames, presenceGraceMs, logFile, webToken, webTokenUserSet, links };
 }
 
 /** Secrets live beside the data dir, not in it (the /data mount is scoped, but depth is safer). */
