@@ -57,6 +57,13 @@ printed on start. Open it in a browser. The web token is injected into
   page's clock offset changes), and only then holds the entry. The late 202
   then carries an older `waiting` snapshot, which the UI must ignore. With `then=none` the request just stays in flight, for composing
   a second draft meanwhile.
+- `GET /mock/flood?n=501` queues `n` waiting entries from the viewer in
+  `ramiy530:cpm-engine`.
+- `GET /mock/slow-select?ms=4000` makes the next room selection answer
+  after `ms` with a snapshot taken at request time. Meanwhile the first
+  queued entry is delivered (at 200 ms) and every socket drops (at 400 ms),
+  so the reconnect `init` carries the rest. With a flood of 501 this is the
+  gate's eviction case: the late snapshot still lists the delivered entry.
 - `GET /mock/state` shows the viewer, active room, link and queue.
 
 Screenshots go to `tools/link-mock/shots/` (gitignored).
@@ -124,12 +131,24 @@ can match these or tell the UI side to change them:
    (`pending` in select and `/api/conversations`) skip settled entries and
    keep the in-memory state of known entries. The `init` snapshot arrives
    in order on the socket and replaces known state, except settled entries.
-   The ledger is a Map in recency order, capped at the newest 500 records
-   and expired after 30 minutes (measured with `performance.now()`).
-   Updates are direct keyed operations and trimming starts from the oldest
-   record, so the cost does not grow with traffic. A record evicted by the
-   cap is forgotten: a 202 arriving later still than 500 newer settlements
-   would be treated as new.
+   The ledger is two Maps in recency order. Dispatched and deleted records
+   are exempt from the count cap and expire only after 30 minutes
+   (measured with `performance.now()`), so a flood of live entries can
+   never evict the record that stops an old snapshot resurrecting a
+   delivered one. Live-state records are capped at the newest 500 and
+   expire the same way. Updates are direct keyed operations, and trimming
+   starts from the oldest record.
+   **Generations.** A generation counter moves on every socket `init` and
+   on every trim pass that evicts anything. The select response, the
+   conversations fetch and the composer 202 note the generation when their
+   request starts. A response that returns in a newer generation is
+   ignored for pending state, since the socket already carries the truth.
+   Its links, rooms and messages still apply.
+   **Select overtaken by a reconnect.** If a socket `init` lands while a
+   selection request is in flight and the room is still the one selected,
+   the whole response is skipped. `init` already painted that room from
+   newer data, and applying the older message list would hide messages
+   delivered in between.
 9. **Pending states.** An entry's `state` is absent (queued: amber "queued,
    not delivered"), `waiting` (muted "waiting to register at home") or
    `held` (danger "held, not delivered" with a "Held: <reason>" line). The

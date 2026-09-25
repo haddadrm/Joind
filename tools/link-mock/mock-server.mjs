@@ -259,6 +259,8 @@ let waitingEntry = null; // turns back into an ordinary queued entry on restore
 let failNext = null; // { status, error } for the next composer send
 // { ms, then: 'dispatch' | 'held' | 'none' } for the next queued composer send
 let slowNext = null;
+// { ms } for the next room selection: see /mock/slow-select
+let slowSelect = null;
 const steps = [
   ['mirrored message', () => mirroredMessage(ROOM, 'jadzia', '@curzon the window 14 run finished. Critical path moved to the facade package.')],
   ['pending from the viewer (link up)', () => { flying = queue(ROOM, viewer, 'On it, reading the facade fragnet now.'); }],
@@ -335,6 +337,24 @@ async function api(req, res, u) {
     const b = await readBody(req);
     if (!metaOf(b.id)) return json(res, 404, { error: 'Conversation not found' });
     active = b.id;
+    if (slowSelect) {
+      // Snapshot now, answer late. Meanwhile the first queued entry is
+      // delivered and the socket reconnects, so the reconnect init carries
+      // the rest; the late snapshot still lists the delivered entry.
+      const ms = slowSelect.ms;
+      slowSelect = null;
+      const snapshot = {
+        conversation: metaOf(active),
+        messages: messages[active].slice(),
+        agents: agentsByConv[active] || [],
+        pending: (pending[active] || []).map((x) => Object.assign({ conversationId: active }, x)),
+      };
+      const first = (pending[active] || [])[0];
+      if (first) setTimeout(() => dispatch(active, first, true), 200);
+      setTimeout(() => dropAllSockets(), 400);
+      setTimeout(() => json(res, 200, snapshot), ms);
+      return;
+    }
     return json(res, 200, {
       conversation: metaOf(active),
       messages: messages[active],
@@ -444,6 +464,18 @@ const server = http.createServer(async (req, res) => {
     slowNext = { ms: Number(u.searchParams.get('ms') ?? 1500), then: u.searchParams.get('then') ?? 'none',
       skewMs: Number(u.searchParams.get('skewMs') ?? -3600000) };
     return json(res, 200, { armed: slowNext });
+  }
+  if (u.pathname === '/mock/flood') {
+    // n queued entries from the viewer in the remote room, all 'waiting'
+    const n = Number(u.searchParams.get('n') ?? 501);
+    for (let i = 0; i < n; i++) queue(ROOM, viewer, 'Flood entry ' + i, { state: 'waiting' });
+    return json(res, 200, { queued: n, total: (pending[ROOM] || []).length });
+  }
+  if (u.pathname === '/mock/slow-select') {
+    // The next room selection answers after `ms` with a snapshot taken at
+    // request time; see the select route for what happens meanwhile.
+    slowSelect = { ms: Number(u.searchParams.get('ms') ?? 3500) };
+    return json(res, 200, { armed: slowSelect });
   }
   if (u.pathname === '/mock/state') {
     return json(res, 200, { viewer, active, links, pending, step: stepIndex, of: steps.length });

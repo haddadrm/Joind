@@ -246,6 +246,10 @@ function connect() {
         allMessages = (event.data.messages || []).slice();
         activeConversation = event.data.activeConversation || null;
         conversationList = event.data.conversations || [];
+        // A (re)connect is a new generation: HTTP responses to requests made
+        // before it are ignored for pending state.
+        bumpPendingGeneration();
+        socketInitCount += 1;
         applyLinkPayload(event.data, true);
         initTaskCount = event.data.openTaskCount || 0;
         initHasUrgent = event.data.hasUrgentTask || false;
@@ -1327,6 +1331,7 @@ function postComposerSend(url, payload, draft) {
   // while the request is in flight takes a larger stamp, so it outranks
   // this response's snapshot whatever the clock does meanwhile.
   var requestSeq = nextPendingSeq();
+  var genAtStart = pendingGeneration;
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) })
     .then(function(r) {
@@ -1350,7 +1355,7 @@ function postComposerSend(url, payload, draft) {
       if (draft.image && pendingImage === draft.image) clearImagePreview();
       input.focus(); updateSendBtn();
       syncHighlight();
-      if (res.status === 202) onComposerQueued(res.body, payload, requestSeq);
+      if (res.status === 202 && genAtStart === pendingGeneration) onComposerQueued(res.body, payload, requestSeq);
     })
     .catch(function() {
       composerSendInFlight = false;
@@ -2371,10 +2376,11 @@ var lastRenderedDayKey = null; // calendar-date key of the last rendered message
 var dmUnread = {}; // per-partner unread DM counts, keyed by agent name
 
 function loadConversations() {
+  var genAtStart = pendingGeneration;
   fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).then(function(data) {
     activeConversation = data.active;
     conversationList = data.conversations || [];
-    applyLinkPayload(data, false);
+    applyLinkPayload(data, false, genAtStart !== pendingGeneration);
     renderConversationList();
   });
 }
@@ -2383,6 +2389,9 @@ function loadConversations() {
 // response from an earlier select can land after a newer one and clobber
 // the view (including any DM selection made in between).
 var convSelectSeq = 0;
+// Counts socket inits. An init that lands while a selection is in flight
+// already painted the active room from newer data than the response.
+var socketInitCount = 0;
 
 function selectConversation(id) {
   var mySelect = ++convSelectSeq;
@@ -2411,13 +2420,19 @@ function selectConversation(id) {
   loader.textContent = 'Loading...';
   c.appendChild(loader);
 
+  var genAtStart = pendingGeneration;
+  var initsAtStart = socketInitCount;
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.json(); }).then(function(data) {
       if (mySelect !== convSelectSeq) return; // superseded by a newer selection
+      // A reconnect during the request re-sent init for this same room: the
+      // screen already holds newer messages and queue than this response.
+      if (initsAtStart !== socketInitCount && activeConversation && activeConversation.id === id) return;
       if (data.conversation) {
         activeConversation = data.conversation;
-        if (Array.isArray(data.pending)) {
-          // A server snapshot of this room's queue replaces the local copy
+        if (Array.isArray(data.pending) && genAtStart === pendingGeneration) {
+          // A server snapshot of this room's queue replaces the local copy,
+          // unless a reconnect or an eviction happened since the request
           mergePendingSnapshot(id, data.pending, true);
         }
         allMessages = (data.messages || []).slice();
@@ -2836,12 +2851,26 @@ var PENDING_AWAIT_MS = 15000;
 // clock, so a clock-offset change on reconnect cannot reorder anything.
 // `t` (performance.now(), monotonic) serves only the age-based expiry.
 //
-// The Map is kept in recency order (an update re-inserts its key), so the
-// oldest record is always first: expiry and the count cap trim from the
-// front, and every update is a direct keyed operation.
+// Two Maps, each kept in recency order (an update re-inserts its key), so
+// the oldest record is always first and trimming stops at the first record
+// it keeps; every update is a direct keyed operation.
+//   settledLedger: dispatched or deleted. Exempt from the count cap, expired
+//     only by age, so a live-state flood can never evict the record that
+//     stops an old snapshot resurrecting a delivered entry.
+//   stateLedger: the latest live state. Capped at the newest 500, and also
+//     expired by age.
+//
+// pendingGeneration moves on every socket init and on every trim pass that
+// evicts anything. Each HTTP request notes it at start; a response that
+// comes back in a newer generation is ignored for pending state, because
+// the socket already carries the truth and the records that would have
+// judged the snapshot may be gone.
 var pendingSeq = 0;
 function nextPendingSeq() { pendingSeq += 1; return pendingSeq; }
-var pendingLedger = new Map();
+var pendingGeneration = 0;
+function bumpPendingGeneration() { pendingGeneration += 1; }
+var settledLedger = new Map();
+var stateLedger = new Map();
 var PENDING_LEDGER_TTL_MS = 30 * 60 * 1000;
 var PENDING_LEDGER_MAX = 500;
 
@@ -2850,7 +2879,8 @@ function monotonicNow() {
 }
 
 function ledgerGet(clientId) {
-  return clientId ? pendingLedger.get(clientId) : undefined;
+  if (!clientId) return undefined;
+  return settledLedger.get(clientId) || stateLedger.get(clientId);
 }
 
 function isSettledKind(rec) {
@@ -2861,25 +2891,41 @@ function isSettledKind(rec) {
 // event arriving now); a 202 passes the stamp its request took at start.
 function notePendingLedger(clientId, kind, seq) {
   if (!clientId) return;
-  var prev = pendingLedger.get(clientId);
+  var prev = ledgerGet(clientId);
   // A final outcome is never downgraded back to a live state
   if (isSettledKind(prev) && kind === 'state') return;
   var stamp = seq == null ? nextPendingSeq() : seq;
   // Never move a record backwards: a stale stamp keeps the newer one
   if (prev && prev.seq > stamp && prev.kind === kind) stamp = prev.seq;
-  pendingLedger.delete(clientId);
-  pendingLedger.set(clientId, { kind: kind, seq: stamp, t: monotonicNow() });
+  var rec = { kind: kind, seq: stamp, t: monotonicNow() };
+  if (kind === 'state') {
+    stateLedger.delete(clientId);
+    stateLedger.set(clientId, rec);
+  } else {
+    stateLedger.delete(clientId);
+    settledLedger.delete(clientId);
+    settledLedger.set(clientId, rec);
+  }
   trimPendingLedger();
 }
 
+// Trim from the oldest record; any eviction starts a new generation.
 function trimPendingLedger() {
   var cutoff = monotonicNow() - PENDING_LEDGER_TTL_MS;
-  var it = pendingLedger.keys();
+  var evicted = trimLedgerMap(settledLedger, Infinity, cutoff) +
+    trimLedgerMap(stateLedger, PENDING_LEDGER_MAX, cutoff);
+  if (evicted > 0) bumpPendingGeneration();
+}
+
+function trimLedgerMap(map, max, cutoff) {
+  var evicted = 0;
+  var it = map.keys();
   for (var step = it.next(); !step.done; step = it.next()) {
-    var rec = pendingLedger.get(step.value);
-    if (pendingLedger.size <= PENDING_LEDGER_MAX && rec.t >= cutoff) break;
-    pendingLedger.delete(step.value);
+    if (map.size <= max && map.get(step.value).t >= cutoff) break;
+    map.delete(step.value);
+    evicted += 1;
   }
+  return evicted;
 }
 
 // Whether an HTTP snapshot whose request started at `seq` may still create
@@ -2918,11 +2964,13 @@ function mergePendingSnapshot(conv, list, keepKnown) {
 
 // Accept links, remote rooms and (optionally) queued messages from any
 // payload that carries them: init (fromSocket) and /api/conversations.
-function applyLinkPayload(data, fromSocket) {
+// skipPending: the response predates the current generation, so its
+// queue snapshot is ignored (links and rooms still apply).
+function applyLinkPayload(data, fromSocket, skipPending) {
   if (!data) return;
   if (Array.isArray(data.links)) links = data.links.slice();
   if (Array.isArray(data.remoteConversations)) remoteConversations = data.remoteConversations.slice();
-  if (Array.isArray(data.pending)) mergePendingSnapshot(null, data.pending, !fromSocket);
+  if (Array.isArray(data.pending) && !skipPending) mergePendingSnapshot(null, data.pending, !fromSocket);
 }
 
 function linkByName(name) {
