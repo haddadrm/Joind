@@ -1293,25 +1293,84 @@ function sendMessage() {
       dmPayload.replyTo = replyingTo.id;
       dmPayload.replyConversationId = replyingTo.conversationId || (activeConversation && activeConversation.id);
     }
-    input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
-    syncHighlight();
-    clearReply();
-    clearImagePreview();
-    fetch('/api/dm/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(dmPayload) });
     // The rendered echo arrives over the WebSocket like every other send.
+    postComposerSend('/api/dm/send', dmPayload, text);
     return;
   }
 
   var payload = { sender: sender.value || 'human', text: text || '[image]', token: webToken() };
   if (replyingTo) payload.replyTo = replyingTo.id;
   if (pendingImage) payload.image = pendingImage.url;
-  input.value = ''; input.style.height = 'auto'; input.focus(); updateSendBtn();
-  syncHighlight();
-  clearReply();
-  clearImagePreview();
-  fetch('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload) });
+  postComposerSend('/api/send', payload, text);
+}
+
+// One composer send in flight at a time: a second Enter while the first is
+// unanswered would post the same text twice.
+var composerSendInFlight = false;
+
+// Post a composer message and clear the composer only when the server took
+// it: 200 (sent) or 202 (queued for a remote room). On any failure the
+// typed text, reply target and image stay put and a one-line error shows.
+function postComposerSend(url, payload, sentText) {
+  if (composerSendInFlight) return;
+  composerSendInFlight = true;
+  showComposerError('');
+  var input = document.getElementById('message-input');
+  fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload) })
+    .then(function(r) {
+      return r.json().catch(function() { return {}; }).then(function(body) {
+        return { ok: r.ok, status: r.status, body: body || {} };
+      });
+    })
+    .then(function(res) {
+      composerSendInFlight = false;
+      if (!res.ok) {
+        var why = (res.body && typeof res.body.error === 'string' && res.body.error) || ('HTTP ' + res.status);
+        showComposerError('Not sent: ' + why + '. Your text is still in the box.');
+        return;
+      }
+      // Clear only what was sent: text typed during the request survives.
+      if (input.value.trim() === sentText) {
+        input.value = ''; input.style.height = 'auto';
+      }
+      input.focus(); updateSendBtn();
+      syncHighlight();
+      clearReply();
+      clearImagePreview();
+      if (res.status === 202) onComposerQueued(res.body, payload);
+    })
+    .catch(function() {
+      composerSendInFlight = false;
+      showComposerError('Not sent: the server could not be reached. Your text is still in the box.');
+    });
+}
+
+function showComposerError(text) {
+  var el = document.getElementById('composer-error');
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+// 202: the message is queued for a remote room. Render the entry the
+// server returned; the matching `pending` event is deduplicated by clientId.
+function onComposerQueued(body, payload) {
+  var entry = (body.pending && typeof body.pending === 'object') ? body.pending : null;
+  var clientId = (entry && entry.clientId) || body.clientId;
+  var conv = (entry && entry.conversationId) || body.conversationId ||
+    (activeConversation && !activeDm ? activeConversation.id : null);
+  if (!clientId || !conv) return;
+  var p = {
+    clientId: clientId,
+    sender: (entry && entry.sender) || myName(),
+    text: (entry && entry.text) || payload.text,
+    queuedAt: (entry && entry.queuedAt) || serverNow(),
+    to: (entry && entry.to) || (payload.to ? (Array.isArray(payload.to) ? payload.to : [payload.to]) : undefined),
+    state: (entry && entry.state) || body.state,
+    reason: (entry && (entry.reason || entry.heldReason)) || body.reason,
+  };
+  onPendingEvent({ type: 'pending', conversationId: conv, data: p });
 }
 
 // --- Decision cards ---
@@ -1821,6 +1880,7 @@ function setupInput() {
       if (e.key === 'Escape') { hideMentionMenu(); return; }
     }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    else if (e.key.length === 1 || e.key === 'Backspace') showComposerError('');
   });
   input.addEventListener('input', function() {
     this.style.height = 'auto';
@@ -2315,6 +2375,7 @@ function selectConversation(id) {
   if (isMobileView()) closeMobileDrawer();
   activeDm = null;
   lastRenderedDayKey = null;
+  showComposerError('');
   // A reply target or draft image from another view must not leak into this channel
   clearReply();
   clearImagePreview();
@@ -2603,6 +2664,7 @@ function mergeDmThread(existing, incoming) {
 function selectDm(name) {
   activeDm = name;
   delete dmUnread[name];
+  showComposerError('');
   dmThread = [];
   lastSender = null;
   lastRenderedDayKey = null;
@@ -2741,7 +2803,10 @@ function syncChannelHeader() {
 var links = []; // [{ name, state: 'up' | 'down', since }]
 var remoteConversations = []; // [{ id, server, name, messageCount, starred, state }]
 // Undelivered messages per remote room, in queue order:
-// { clientId, sender, text, queuedAt, to? } where `to` marks a queued DM
+// { clientId, sender, text, queuedAt, to?, state?, reason? } where `to`
+// marks a queued DM and state is undefined (queued), 'waiting' (its author
+// has no live registration at home yet) or 'held' (home refused it; the
+// reason says why)
 var pendingByConv = {};
 // clientId -> { conv, id } for dispatched entries whose real message has
 // not been rendered yet; the row stays until that message lands.
@@ -2956,13 +3021,63 @@ function pendingConvOf(event) {
 function addPendingEntry(conv, p) {
   if (!conv || !p || !p.clientId) return false;
   var list = pendingByConv[conv] || (pendingByConv[conv] = []);
-  if (list.some(function(x) { return x.clientId === p.clientId; })) return false;
-  var entry = { clientId: p.clientId, sender: p.sender, text: p.text, queuedAt: p.queuedAt };
+  var existing = list.find(function(x) { return x.clientId === p.clientId; });
+  if (existing) {
+    // A repeat for a known entry updates its state (queued, waiting, held)
+    var nextState = pendingStateOf(p);
+    var nextReason = p.reason || p.heldReason;
+    if (existing.state === nextState && existing.reason === nextReason) return false;
+    existing.state = nextState;
+    existing.reason = nextReason;
+    var shown = pendingElement(conv, p.clientId);
+    if (shown) applyPendingState(shown, existing);
+    return false;
+  }
+  var entry = { clientId: p.clientId, sender: p.sender, text: p.text, queuedAt: p.queuedAt,
+    state: pendingStateOf(p), reason: p.reason || p.heldReason };
   // A queued DM keeps its recipients so it routes to the mailbox, never
   // the channel (the same view rule as a real message).
   if (Array.isArray(p.to) && p.to.length > 0) entry.to = p.to.slice();
   list.push(entry);
   return true;
+}
+
+function pendingStateOf(p) {
+  return p && (p.state === 'waiting' || p.state === 'held') ? p.state : undefined;
+}
+
+var PENDING_LABELS = {
+  queued: 'queued, not delivered',
+  waiting: 'waiting to register at home',
+  held: 'held, not delivered',
+};
+
+// Marker text, marker style and the reason line of a pending row, from its
+// entry. Called on first render and whenever the state changes.
+function applyPendingState(el, p) {
+  var state = p.state || 'queued';
+  el.classList.remove('pending-queued', 'pending-waiting', 'pending-held');
+  el.classList.add('pending-' + state);
+  var txt = el.querySelector('.pending-marker-text');
+  if (txt && !el.classList.contains('dispatched')) txt.textContent = PENDING_LABELS[state];
+  var marker = el.querySelector('.pending-marker');
+  if (marker) {
+    marker.title = state === 'held' ? 'The home server refused this message' + (p.reason ? ': ' + p.reason : '')
+      : state === 'waiting' ? 'Goes out once its author is registered with the home server'
+      : 'Goes out in order when the link is up';
+  }
+  var reasonEl = el.querySelector('.pending-reason');
+  if (state === 'held' && p.reason) {
+    if (!reasonEl) {
+      reasonEl = document.createElement('div');
+      reasonEl.className = 'pending-reason';
+      var tw = el.querySelector('.msg-text-wrap');
+      if (tw && tw.parentNode) tw.parentNode.insertBefore(reasonEl, tw.nextSibling);
+    }
+    reasonEl.textContent = 'Held: ' + p.reason;
+  } else if (reasonEl) {
+    reasonEl.remove();
+  }
 }
 
 function removePendingEntry(conv, clientId) {
@@ -3086,6 +3201,7 @@ function appendPending(conv, p) {
 
   el.appendChild(av);
   el.appendChild(body);
+  applyPendingState(el, p);
   c.appendChild(el);
   lastSender = null; // a pending row never groups with the next real message
   if (window.lucide) lucide.createIcons({ root: el });
