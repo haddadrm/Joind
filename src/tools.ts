@@ -782,23 +782,28 @@ export function registerTools(
       // leave must win over that join.
       manager.supersedeJoins(name);
       const target = routeSessionRoom(manager, sessionBindings.get(extra.sessionId), name, registration);
-      sessionBindings.delete(extra.sessionId);
       if (!target) {
         // This session's registration is already gone, or nothing names one:
         // another registration of the name is not this session's to remove.
+        sessionBindings.delete(extra.sessionId);
         return { content: [{ type: "text" as const, text: `${name}: no registration of this session to leave (already left, or pass registration)` }] };
       }
       // Exactly the registration it reaches, and only while it is the room's
       // current member of that name (gate round 5).
       if (!departureIsCurrent(target.room, name, target.entry.registration, registration)) {
+        sessionBindings.delete(extra.sessionId);
         return { content: [{ type: "text" as const, text: `${name}: that registration was superseded by a later join; nothing removed` }] };
       }
       try {
         if (target.room.getAgent(name)) target.room.leave(name);
       } catch (err) {
-        // A remote room whose release record cannot be written (gate round 8).
+        // A remote room whose release record cannot be written (gate round
+        // 8): nothing was removed, and the session keeps its record so a
+        // plain retry reaches the same registration (gate round 9, finding 1).
         return { content: [{ type: "text" as const, text: `${name}: not disconnected: ${(err as Error).message}` }] };
       }
+      // The departure happened: only now does the session forget it.
+      sessionBindings.delete(extra.sessionId);
       manager.unbindRegistration(name, target.entry.registration);
       return { content: [{ type: "text" as const, text: `${name} disconnected` }] };
     }

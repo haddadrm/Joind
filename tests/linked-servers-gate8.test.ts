@@ -109,7 +109,7 @@ describe("gate round 8: member release debt", () => {
       rmSync(tmp, { recursive: true, force: true });
       m.leave("Curzon");
       expect(m.getAgent("Curzon")).toBeUndefined();
-      expect(JSON.parse(readFileSync(join(dir, "links", "home", "c-1.releases.json"), "utf-8"))).toEqual([{ name: "Curzon", registration: "H1" }]);
+      expect(JSON.parse(readFileSync(join(dir, "links", "home", "c-1.releases.json"), "utf-8"))).toMatchObject({ releases: [{ name: "Curzon", registration: "H1" }] });
     } finally { r.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 });

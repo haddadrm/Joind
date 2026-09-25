@@ -159,6 +159,8 @@ export interface RemoteRegistered {
   ok: true;
   online: string[];
   homeRegistration: string;
+  /** This server's registration id the home holds as the hosted one. */
+  hostedRegistration: string;
   role?: string;
   terminalSummary: string;
 }
