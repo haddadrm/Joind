@@ -64,6 +64,15 @@ printed on start. Open it in a browser. The web token is injected into
   queued entry is delivered (at 200 ms) and every socket drops (at 400 ms),
   so the reconnect `init` carries the rest. With a flood of 501 this is the
   gate's eviction case: the late snapshot still lists the delivered entry.
+  With `mode=hold` nothing else happens: the snapshot is simply late, so a
+  message queued meanwhile is missing from it (the round 7 case).
+- `GET /mock/slow-conversations?ms=3000` does the same for the next
+  `GET /api/conversations`, which now also carries `pending`.
+  `GET /mock/touch-conversations` broadcasts `conversation-renamed`, which
+  makes the page refetch it.
+- `GET /mock/silent-drop?text=...` removes queued entries with that text on
+  the mock with no event, as a control. The next snapshot must remove
+  such an entry from the page.
 - Tasks per room: `general` and `ramiy530:cpm-engine` each have a task
   `#1` (ids are per room). `/api/tasks`, `/api/tasks/count` and
   `/api/tasks/update` work per room, and `/mock/state` lists every task
@@ -146,6 +155,16 @@ can match these or tell the UI side to change them:
    delivered one. Live-state records are capped at the newest 500 and
    expire the same way. Updates are direct keyed operations, and trimming
    starts from the oldest record.
+   **Entries missing from a snapshot.** The select response and the
+   conversations fetch take a page-local stamp when their request starts.
+   A known entry that the snapshot does not list is dropped only when
+   nothing newer vouches for it. If its latest event or 202 is stamped
+   after the request started, it was queued after the server took the
+   snapshot, so it stays with its Delete control. The conversations fetch
+   does not repaint the pane, so its snapshot is followed by a
+   reconciliation of the visible pending rows. Rows whose entry is gone are
+   removed, except dispatched rows awaiting their real message, and rows
+   for entries now visible are added.
    **Generations.** A generation counter moves on every socket `init` and
    on every trim pass that evicts anything. The select response, the
    conversations fetch and the composer 202 note the generation when their
