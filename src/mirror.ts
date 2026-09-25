@@ -332,8 +332,16 @@ export class MirrorRoom extends ChatRoom {
     if (!(err instanceof PeerRefusedError)) return false;
     if (err.status === 404) return true;
     if (err.status !== 409) return false;
-    const candidates = (err.body as { candidates?: Array<{ host?: unknown }> } | undefined)?.candidates ?? [];
-    return !candidates.some((c) => c.host === this.selfName);
+    // Definitive only when the home names the owners: a nonempty array of
+    // candidates, each with a host string, none of them this server. Any
+    // other shape (missing, empty, null, not an array, an entry without a
+    // host) proves nothing: the stray is kept and retried later, as after a
+    // link error (gate round 6).
+    const candidates: unknown = (err.body as { candidates?: unknown } | null | undefined)?.candidates;
+    if (!Array.isArray(candidates) || candidates.length === 0) return false;
+    const hosts = candidates.map((c: unknown) => (c && typeof c === "object" ? (c as { host?: unknown }).host : undefined));
+    if (!hosts.every((h): h is string => typeof h === "string" && h.length > 0)) return false;
+    return !hosts.includes(this.selfName);
   }
 
   private async registerHuman(name: string): Promise<string> {

@@ -71,6 +71,10 @@ A Joind server can now link to peer servers, mirror their rooms, and host member
 - **A stray the home refuses for good no longer blocks the next viewer.** When the home answers the re-registration of an unconfirmed viewer with a definitive "not yours" (404, or 409 whose candidates do not name this server), `unconfirmed` is cleared in the record (written like every other step) and the transition goes on to the chosen viewer; only link errors keep it for a retry. The same answer for the target itself clears its `unconfirmed` too, while the choice stays for a later attempt.
 - 2 tests in `tests/linked-servers-gate5.test.ts`, both failing on 2cb76e4: Alice, then Bob refused with 409 because a home member holds the name, then Carol (registered, her waiting message sent); and a lost reply for Bob, then a home restart with Bob taken there, then Carol. Suite 405.
 
+### Codex gate round 6 (1 Low, closed)
+- **Only a well-formed 409 is definitive.** A 409 clears a stray only when its candidates are a nonempty array, every entry has a nonempty host string, and none is this server. Missing, null, empty, non-array, `[null]`, `[{}]`, and entries without a valid host prove nothing: the stray is kept and retried later, as after a link error (no swallowed TypeError).
+- 1 test in `tests/linked-servers-gate5.test.ts` over eleven candidate shapes (including a candidate naming this server), failing on 9365651. Suite 406.
+
 ### Known limits
 - **A peer and this server may still share a human's name.** A peer's human may take any name that is not a local member or binding of the room, including this server's own web viewer name (the same person on both machines is the intended case).
 - **A linked peer is trusted with names.** It can register any name that is not a member of the room now, as a member or as its human, and then read what that name may read, as a local join can today. Tokens authenticate servers, not people.
