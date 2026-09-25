@@ -412,6 +412,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const msg = JSON.stringify({ type: "link", data: info });
     for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(msg);
   });
+  linkRegistry.on("rooms", (e: { type: string; data: unknown }) => {
+    const msg = JSON.stringify(e);
+    for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(msg);
+  });
   linkRegistry.on("notice", (n: MirrorNotice) => {
     const msg = JSON.stringify(n);
     for (const client of wss.clients) {
@@ -1453,6 +1457,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/rename", express.json(), (req, res) => {
+    if (typeof req.body?.id === "string" && (manager.isRemote(req.body.id) || linkRegistry.isRemoteId(req.body.id))) {
+      res.status(400).json({ error: "A remote room is administered on its home server" }); return;
+    }
     const { id, name } = req.body as { id?: string; name?: string };
     if (!id || !name) { res.status(400).json({ error: "id and name required" }); return; }
     const ok = manager.renameConversation(id, name);
@@ -1460,6 +1467,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/star", express.json(), (req, res) => {
+    if (typeof req.body?.id === "string" && (manager.isRemote(req.body.id) || linkRegistry.isRemoteId(req.body.id))) {
+      res.status(400).json({ error: "A remote room is administered on its home server" }); return;
+    }
     const { id, starred } = req.body as { id?: string; starred?: boolean };
     if (!id) { res.status(400).json({ error: "id required" }); return; }
     const ok = manager.starConversation(id, starred ?? true);
@@ -1467,6 +1477,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/delete", express.json(), (req, res) => {
+    if (typeof req.body?.id === "string" && (manager.isRemote(req.body.id) || linkRegistry.isRemoteId(req.body.id))) {
+      res.status(400).json({ error: "A remote room is administered on its home server" }); return;
+    }
     const { id } = req.body as { id?: string };
     if (!id) { res.status(400).json({ error: "id required" }); return; }
     const ok = manager.deleteConversation(id);

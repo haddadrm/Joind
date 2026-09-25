@@ -24,6 +24,14 @@ vi.mock("../src/inject.js", async () => {
   };
 });
 
+// The joins here use fake pids and no pane or handle: the process
+// enumeration each join runs has nothing to find, so it is stubbed (it spawns
+// a system query per join, load that slows other timing-bound tests).
+vi.mock("../src/terminals.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/terminals.js")>("../src/terminals.js");
+  return { ...actual, processTreeOnce: () => () => Promise.resolve(new Map()) };
+});
+
 import { startJoind, type JoindHandle } from "../src/index.js";
 import type { JoindConfig } from "../src/config.js";
 import type { FetchLike } from "../src/link.js";
@@ -319,6 +327,60 @@ describe("linked servers: two servers in one process", () => {
     expect(await call("chat_leave", { name: "Kira" })).toBe("Kira disconnected");
     await waitFor("Kira gone on A", () => !A.manager.getRoom(room)!.getAgent("Kira"));
   }, 30_000);
+
+  it("web contract: pending with both ids, dispatch and message both sent, pending in list, select and init, discovery refetch events, no remote admin", async () => {
+    const { default: WebSocket } = await import("ws");
+    expect((await post(B.baseUrl, "/api/web/register", { token: WEB, name: "Rami" })).status).toBe(200);
+    const events: Array<{ type: string; conversationId?: string; data?: Record<string, unknown> }> = [];
+    const wsUrl = `${B.baseUrl.replace("http", "ws")}/ws?token=${WEB}&name=Rami`;
+    const ws = new WebSocket(wsUrl);
+    ws.on("message", (raw) => events.push(JSON.parse(String(raw))));
+    await waitFor("ws init", () => events.find((e) => e.type === "init"));
+    try {
+      netB.cut(true);
+      await waitFor("down", () => B.links.get("alpha")!.info().state === "down");
+      const q = await post(B.baseUrl, "/api/agent/send", { sender: "Curzon", text: "queued for the web contract", pid: PID });
+      expect(q.status).toBe(202);
+      const clientId = q.json.clientId as string;
+      const pending = await waitFor("pending event", () => events.find((e) => e.type === "pending" && e.data?.clientId === clientId));
+      expect(pending.conversationId).toBe(remote);
+      expect(pending.data?.conversationId).toBe(remote);
+      expect(events.some((e) => e.type === "link" && e.data?.state === "down")).toBe(true);
+
+      const list = await get(B.baseUrl, `/api/conversations?token=${WEB}`);
+      expect(list.json.links).toEqual([expect.objectContaining({ name: "alpha", state: "down" })]);
+      expect(list.json.remoteConversations).toEqual(expect.arrayContaining([expect.objectContaining({ id: remote, server: "alpha", name: "ops", state: "down" })]));
+      expect(list.json.pending).toEqual([expect.objectContaining({ conversationId: remote, clientId, sender: "Curzon", text: "queued for the web contract" })]);
+      const sel = await post(B.baseUrl, "/api/conversations/select", { id: remote, token: WEB });
+      expect(sel.status).toBe(200);
+      expect(sel.json.pending).toEqual([expect.objectContaining({ clientId, queuedAt: expect.any(Number) })]);
+      const ws2 = new WebSocket(wsUrl);
+      const init = await new Promise<{ data: Record<string, unknown> }>((resolve) => ws2.once("message", (raw) => resolve(JSON.parse(String(raw)))));
+      ws2.close();
+      expect(init.data.pending).toEqual([expect.objectContaining({ clientId })]);
+      expect(init.data.links).toBeDefined();
+      expect(init.data.remoteConversations).toBeDefined();
+      // The viewer is not the author.
+      expect((await post(B.baseUrl, "/api/pending/delete", { conversation: remote, clientId, token: WEB })).status).toBe(403);
+
+      netB.cut(false);
+      const dispatched = await waitFor("pending-dispatched", () => events.find((e) => e.type === "pending-dispatched" && e.data?.clientId === clientId), 10_000);
+      expect(dispatched.conversationId).toBe(remote);
+      await waitFor("the real message on B's socket", () => events.find((e) => e.type === "message" && e.conversationId === remote && e.data?.id === dispatched.data?.id));
+
+      // A room created on A after startup reaches B's UI as a refetch signal.
+      const later = A.manager.createConversation("later").id;
+      await B.links.get("alpha")!.discover();
+      await waitFor("conversation-created for the new remote room", () => events.find((e) => e.type === "conversation-created" && e.data?.id === `alpha:${later}`));
+
+      for (const route of ["rename", "star", "delete"]) {
+        expect((await post(B.baseUrl, `/api/conversations/${route}`, { id: remote, name: "x", starred: true })).status).toBe(400);
+      }
+    } finally {
+      ws.close();
+      netB.cut(false);
+    }
+  }, 40_000);
 
   it("the member leaves from B and is removed on A", async () => {
     const r = await post(B.baseUrl, "/api/agent/leave", { name: "Curzon", pid: PID });
