@@ -86,9 +86,9 @@ describe("linked servers, gate round 3", { timeout: 20_000 }, () => {
       await waitFor("Alice released at the home", () => !home.humans.has("Alice"));
       expect([...home.humans.keys()]).toEqual(["Bob"]);
       // Nothing owed any more, and the record on disk says so.
-      const saved = JSON.parse(readFileSync(join(dir, "links", "home", "c-1.human.json"), "utf-8")) as { human: { name: string }; releases: unknown[] };
-      expect(saved.human.name).toBe("Bob");
-      expect(saved.releases).toEqual([]);
+      const saved = JSON.parse(readFileSync(join(dir, "links", "home", "c-1.human.json"), "utf-8")) as { current: { name: string }; releasesOwed: unknown[] };
+      expect(saved.current.name).toBe("Bob");
+      expect(saved.releasesOwed).toEqual([]);
     } finally { done(); }
   });
 

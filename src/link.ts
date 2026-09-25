@@ -625,7 +625,9 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     if (!r || !c || !m || !viewer || (m.humanName() === viewer && !m.humanOwes())) return;
     // One transition: owed releases first, then this viewer, the former one
     // released (kept and retried at recovery when that fails).
-    await m.settleHuman(viewer);
+    // A record that cannot be written stops the change; the viewer keeps
+    // reading public messages and its sends answer with the error.
+    await m.settleHuman(viewer).catch((err: unknown) => console.log(`  [link ${r.server}] ${(err as Error).message}`));
   }
 
   /** The web UI opened a remote room: fill it now (bounded), then subscribe. */
