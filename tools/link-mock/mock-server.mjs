@@ -269,8 +269,15 @@ let waitingEntry = null; // turns back into an ordinary queued entry on restore
 let failNext = null; // { status, error } for the next composer send
 // { ms, then: 'dispatch' | 'held' | 'none' } for the next queued composer send
 let slowNext = null;
-// { ms } for the next room selection: see /mock/slow-select
+// { ms, mode } for the next room selection: see /mock/slow-select
 let slowSelect = null;
+// { ms } for the next conversations fetch: see /mock/slow-conversations
+let slowConversations = null;
+function allPendingList() {
+  const out = [];
+  for (const conv of Object.keys(pending)) for (const x of pending[conv]) out.push(Object.assign({ conversationId: conv }, x));
+  return out;
+}
 const steps = [
   ['mirrored message', () => mirroredMessage(ROOM, 'jadzia', '@curzon the window 14 run finished. Critical path moved to the facade package.')],
   ['pending from the viewer (link up)', () => { flying = queue(ROOM, viewer, 'On it, reading the facade fragnet now.'); }],
@@ -341,7 +348,15 @@ async function api(req, res, u) {
   }
   if (p === '/api/notifications/read') return json(res, 200, { ok: true, unread: 0 });
   if (p === '/api/conversations' && m === 'GET') {
-    return json(res, 200, { conversations, active: metaOf(active) || null, links, remoteConversations });
+    const body = { conversations, active: metaOf(active) || null, links, remoteConversations, pending: allPendingList() };
+    if (slowConversations) {
+      // Snapshot now, answer late (anything queued meanwhile is missing)
+      const ms = slowConversations.ms;
+      slowConversations = null;
+      setTimeout(() => json(res, 200, JSON.parse(JSON.stringify(body))), ms);
+      return;
+    }
+    return json(res, 200, body);
   }
   if (p === '/api/conversations/select') {
     const b = await readBody(req);
@@ -352,6 +367,7 @@ async function api(req, res, u) {
       // delivered and the socket reconnects, so the reconnect init carries
       // the rest; the late snapshot still lists the delivered entry.
       const ms = slowSelect.ms;
+      const mode = slowSelect.mode;
       slowSelect = null;
       const snapshot = {
         conversation: metaOf(active),
@@ -359,9 +375,11 @@ async function api(req, res, u) {
         agents: agentsByConv[active] || [],
         pending: (pending[active] || []).map((x) => Object.assign({ conversationId: active }, x)),
       };
-      const first = (pending[active] || [])[0];
-      if (first) setTimeout(() => dispatch(active, first, true), 200);
-      setTimeout(() => dropAllSockets(), 400);
+      if (mode !== 'hold') {
+        const first = (pending[active] || [])[0];
+        if (first) setTimeout(() => dispatch(active, first, true), 200);
+        setTimeout(() => dropAllSockets(), 400);
+      }
       setTimeout(() => json(res, 200, snapshot), ms);
       return;
     }
@@ -500,8 +518,31 @@ const server = http.createServer(async (req, res) => {
   if (u.pathname === '/mock/slow-select') {
     // The next room selection answers after `ms` with a snapshot taken at
     // request time; see the select route for what happens meanwhile.
-    slowSelect = { ms: Number(u.searchParams.get('ms') ?? 3500) };
+    slowSelect = { ms: Number(u.searchParams.get('ms') ?? 3500), mode: u.searchParams.get('mode') ?? 'reconnect' };
     return json(res, 200, { armed: slowSelect });
+  }
+  if (u.pathname === '/mock/slow-conversations') {
+    // The next GET /api/conversations answers after `ms` with a snapshot
+    // taken at request time
+    slowConversations = { ms: Number(u.searchParams.get('ms') ?? 3000) };
+    return json(res, 200, { armed: slowConversations });
+  }
+  if (u.pathname === '/mock/touch-conversations') {
+    // Makes the page refetch /api/conversations (it does on this event)
+    broadcast({ type: 'conversation-renamed', data: {} });
+    return json(res, 200, { ok: true });
+  }
+  if (u.pathname === '/mock/silent-drop') {
+    // Remove queued entries with this text server-side, with no event (the
+    // next snapshot is then the only way the page learns of it)
+    const text = u.searchParams.get('text') || '';
+    let n = 0;
+    for (const conv of Object.keys(pending)) {
+      const before = pending[conv].length;
+      pending[conv] = pending[conv].filter((x) => x.text !== text);
+      n += before - pending[conv].length;
+    }
+    return json(res, 200, { dropped: n });
   }
   if (u.pathname === '/mock/state') {
     return json(res, 200, { viewer, active, links, pending, step: stepIndex, of: steps.length, taskUpdates });

@@ -2381,10 +2381,11 @@ var dmUnread = {}; // per-partner unread DM counts, keyed by agent name
 
 function loadConversations() {
   var genAtStart = pendingGeneration;
+  var seqAtStart = nextPendingSeq();
   fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).then(function(data) {
     activeConversation = data.active;
     conversationList = data.conversations || [];
-    applyLinkPayload(data, false, genAtStart !== pendingGeneration);
+    applyLinkPayload(data, false, genAtStart !== pendingGeneration, seqAtStart);
     renderConversationList();
   });
 }
@@ -2427,6 +2428,7 @@ function selectConversation(id) {
   c.appendChild(loader);
 
   var genAtStart = pendingGeneration;
+  var seqAtStart = nextPendingSeq();
   var initsAtStart = socketInitCount;
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.json(); }).then(function(data) {
@@ -2444,7 +2446,7 @@ function selectConversation(id) {
         if (Array.isArray(data.pending) && genAtStart === pendingGeneration) {
           // A server snapshot of this room's queue replaces the local copy,
           // unless a reconnect or an eviction happened since the request
-          mergePendingSnapshot(id, data.pending, true);
+          mergePendingSnapshot(id, data.pending, true, seqAtStart);
         }
         allMessages = (data.messages || []).slice();
         agents = data.agents || [];
@@ -2953,33 +2955,71 @@ function pendingSnapshotIsCurrent(clientId, seq) {
 // state, since the WebSocket may have applied newer events than the
 // snapshot. Without it (init, which arrives in order on the socket) the
 // snapshot is the newest truth and replaces the known state.
-function mergePendingSnapshot(conv, list, keepKnown) {
+//
+// sinceSeq (HTTP snapshots): the page-local stamp taken when the request
+// started. A known entry missing from the snapshot is dropped only if
+// nothing newer than the request vouches for it; an entry whose latest
+// event or 202 is stamped after the request started was queued after the
+// server took the snapshot, so it stays.
+function mergePendingSnapshot(conv, list, keepKnown, sinceSeq) {
   var previous = {};
   Object.keys(pendingByConv).forEach(function(c) {
     if (conv !== null && c !== conv) return;
-    pendingByConv[c].forEach(function(x) { previous[x.clientId] = x; });
+    pendingByConv[c].forEach(function(x) { previous[x.clientId] = { conv: c, entry: x }; });
   });
   if (conv === null) pendingByConv = {};
   else delete pendingByConv[conv];
+  var listed = {};
   list.forEach(function(p) {
     if (!p || !p.clientId) return;
+    listed[p.clientId] = true;
     if (isSettledKind(ledgerGet(p.clientId))) return;
     // The socket's snapshot is an event arriving now: stamp it, so a 202
     // whose request predates the reconnect cannot restate the entry.
     if (!keepKnown) notePendingLedger(p.clientId, 'state');
-    addPendingEntry(conv === null ? p.conversationId : conv, (keepKnown && previous[p.clientId]) || p);
+    var known = keepKnown && previous[p.clientId];
+    addPendingEntry(conv === null ? p.conversationId : conv, known ? known.entry : p);
   });
+  if (sinceSeq == null) return;
+  Object.keys(previous).forEach(function(clientId) {
+    if (listed[clientId]) return;
+    var rec = ledgerGet(clientId);
+    if (rec && rec.kind === 'state' && rec.seq > sinceSeq) {
+      addPendingEntry(previous[clientId].conv, previous[clientId].entry);
+    }
+  });
+}
+
+// Bring the visible pending rows in line with the queue after a snapshot
+// that does not repaint the pane (the conversations fetch): drop rows whose
+// entry is gone (rows already dispatched and awaiting their real message
+// stay), then add rows for entries now visible.
+function reconcilePendingRows() {
+  var els = document.querySelectorAll('.message.pending');
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
+    if (el.classList.contains('dispatched')) continue;
+    var list = pendingByConv[el.dataset.conv] || [];
+    var id = el.dataset.clientId;
+    if (!list.some(function(x) { return x.clientId === id; })) el.remove();
+  }
+  renderPendingForActive();
 }
 
 // Accept links, remote rooms and (optionally) queued messages from any
 // payload that carries them: init (fromSocket) and /api/conversations.
 // skipPending: the response predates the current generation, so its
 // queue snapshot is ignored (links and rooms still apply).
-function applyLinkPayload(data, fromSocket, skipPending) {
+// sinceSeq: for an HTTP response, the stamp taken when its request started.
+function applyLinkPayload(data, fromSocket, skipPending, sinceSeq) {
   if (!data) return;
   if (Array.isArray(data.links)) links = data.links.slice();
   if (Array.isArray(data.remoteConversations)) remoteConversations = data.remoteConversations.slice();
-  if (Array.isArray(data.pending) && !skipPending) mergePendingSnapshot(null, data.pending, !fromSocket);
+  if (Array.isArray(data.pending) && !skipPending) {
+    mergePendingSnapshot(null, data.pending, !fromSocket, fromSocket ? null : sinceSeq);
+    // init repaints the pane itself; an HTTP snapshot does not
+    if (!fromSocket) reconcilePendingRows();
+  }
 }
 
 function linkByName(name) {
