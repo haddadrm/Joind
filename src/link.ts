@@ -240,7 +240,9 @@ export class LinkClient extends EventEmitter {
    *  every queue drained in order, then the restore line where "down" was said. */
   private async restore(announce: boolean): Promise<void> {
     for (const m of this.mirrors.values()) {
-      if (m.hasLocalMembers() || m.humanToRegister() || m.humanOwes()) await m.reregisterAll();
+      // A room with nothing here but release debt (its last member left
+      // offline) is recovered too (gate round 8, finding 1).
+      if (m.hasLocalMembers() || m.humanToRegister() || m.humanOwes() || m.pendingMemberReleases().length > 0) await m.reregisterAll();
       const sent = m.queuedCount() > 0 ? await m.drain() : 0;
       if (announce && m.downNoted && this.state === "up") {
         m.addLocalLine(`link to ${this.name} restored; ${sent} queued message${sent === 1 ? "" : "s"} sent`);

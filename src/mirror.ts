@@ -672,7 +672,13 @@ export class MirrorRoom extends ChatRoom {
         } else {
           // The member left while this was in flight: the home now holds a
           // registration nobody here owns. It is owed a release (finding 1).
-          this.oweMemberRelease(name, r.registration);
+          try {
+            this.oweMemberRelease(name, r.registration);
+          } catch (err) {
+            // Cannot be recorded durably; still owed for this run.
+            console.log(`  [link ${this.server}] ${(err as Error).message}`);
+            this.memberReleases = [...this.memberReleases, { name, registration: r.registration }];
+          }
           await this.releaseMembers();
         }
       } catch (err) {
@@ -687,21 +693,37 @@ export class MirrorRoom extends ChatRoom {
     }
   }
 
+  /**
+   * A local member leaves the remote room. Its home registration is written
+   * to the release record FIRST (write-ahead, gate round 8, finding 2); only
+   * then is the member removed here. A record that cannot be written stops a
+   * deliberate departure with an error (the member stays, nothing is lost);
+   * a timed-out one keeps the member and says so in the log, to be swept
+   * again. The release itself waits for the name's lock, so a registration
+   * in flight finishes first (gate round 7, finding 1).
+   */
   override leave(name: string, reason: "deliberate" | "timeout" = "deliberate"): void {
     const had = this.agents.has(name);
+    const reg = had ? this.shadows.get(name)?.homeRegistration : undefined;
+    if (reg) {
+      try {
+        this.oweMemberRelease(name, reg);
+      } catch (err) {
+        if (reason === "timeout") {
+          console.log(`  [link ${this.server}] ${name} not dropped from ${this.id}: ${(err as Error).message}`);
+          return;
+        }
+        throw err;
+      }
+    }
     super.leave(name, reason);
     this.lastTouchSent.delete(name);
     if (!had) return;
-    // The home side waits for the name's lock, so a registration in flight
-    // (a recovery, a join) finishes first and its registration is the one
-    // released (gate round 7, finding 1).
     void (async () => {
       const release = await this.lockName(name);
       try {
-        if (this.agents.has(name)) return; // rejoined meanwhile: that join owns the home registration
-        const reg = this.shadows.get(name)?.homeRegistration;
-        this.shadows.delete(name);
-        if (reg) this.oweMemberRelease(name, reg);
+        // Rejoined meanwhile: that join owns the name at the home now.
+        if (!this.agents.has(name)) this.shadows.delete(name);
         await this.releaseMembers();
       } finally {
         release();
@@ -709,22 +731,36 @@ export class MirrorRoom extends ChatRoom {
     })();
   }
 
-  private saveMemberReleases(): void {
-    if (!this.releasesFile) return;
-    try {
-      ensureDir(dirname(this.releasesFile));
-      const tmp = `${this.releasesFile}.tmp`;
-      writeFileSync(tmp, JSON.stringify(this.memberReleases), "utf-8");
-      renameSync(tmp, this.releasesFile);
-    } catch (err) {
-      console.log(`  [link ${this.server}] member releases of ${this.id} not saved: ${(err as Error).message}`);
+  /** Write the member release record, then take it as the state; a write
+   *  that fails throws HumanStateError and changes nothing (the same
+   *  write-ahead rule as the human record). */
+  private writeMemberReleases(next: Array<{ name: string; registration: string }>): void {
+    if (this.releasesFile) {
+      try {
+        ensureDir(dirname(this.releasesFile));
+        const tmp = `${this.releasesFile}.tmp`;
+        writeFileSync(tmp, JSON.stringify(next), "utf-8");
+        renameSync(tmp, this.releasesFile);
+      } catch (err) {
+        throw new HumanStateError(`the member release record could not be saved (${(err as Error).message}); nothing was changed`);
+      }
     }
+    this.memberReleases = next;
   }
 
   private oweMemberRelease(name: string, registration: string): void {
     if (this.memberReleases.some((r) => r.name === name && r.registration === registration)) return;
-    this.memberReleases.push({ name, registration });
-    this.saveMemberReleases();
+    this.writeMemberReleases([...this.memberReleases, { name, registration }]);
+  }
+
+  /** Clear a settled debt; if that cannot be written it stays (a retry
+   *  then gets 404 and clears it). */
+  private clearMemberRelease(r: { name: string; registration: string }): void {
+    try {
+      this.writeMemberReleases(this.memberReleases.filter((x) => !(x.name === r.name && x.registration === r.registration)));
+    } catch (err) {
+      console.log(`  [link ${this.server}] ${(err as Error).message}`);
+    }
   }
 
   /** Home registrations of departed members still to release. */
@@ -738,8 +774,7 @@ export class MirrorRoom extends ChatRoom {
     for (const r of [...this.memberReleases]) {
       // A member of that name here again may own the name at the home now.
       if (this.agents.has(r.name) && this.shadows.get(r.name)?.homeRegistration === r.registration) {
-        this.memberReleases = this.memberReleases.filter((x) => x !== r);
-        this.saveMemberReleases();
+        this.clearMemberRelease(r);
         continue;
       }
       try {
@@ -751,8 +786,7 @@ export class MirrorRoom extends ChatRoom {
           continue;
         }
       }
-      this.memberReleases = this.memberReleases.filter((x) => x !== r);
-      this.saveMemberReleases();
+      this.clearMemberRelease(r);
     }
   }
 
