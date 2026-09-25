@@ -48,11 +48,14 @@ printed on start. Open it in a browser. The web token is injected into
 - `GET /mock/fail-next?status=403&error=...` makes the next composer send
   fail with that status and `{ error }` body (default 403, "viewer is not
   registered with ramiy530 yet").
-- `GET /mock/slow-next?ms=1500&then=dispatch|held|none` delays the 202 of
-  the next queued composer send. With `then=dispatch` the entry is
-  dispatched over the socket first, and with `then=held` it is held first.
-  The late 202 then carries an older `waiting` snapshot, which the UI must
-  ignore. With `then=none` the request just stays in flight, for composing
+- `GET /mock/slow-next?ms=1500&then=dispatch|held|reconnect-held|none`
+  delays the 202 of the next queued composer send. With `then=dispatch` the
+  entry is dispatched over the socket first, and with `then=held` it is held
+  first. With `then=reconnect-held&skewMs=-3600000` (use `ms` of 4000 or
+  more, since the page reconnects after 2 s) the mock drops every socket,
+  answers the reconnect with `init.serverNow` shifted by `skewMs` (so the
+  page's clock offset changes), and only then holds the entry. The late 202
+  then carries an older `waiting` snapshot, which the UI must ignore. With `then=none` the request just stays in flight, for composing
   a second draft meanwhile.
 - `GET /mock/state` shows the viewer, active room, link and queue.
 
@@ -109,17 +112,24 @@ can match these or tell the UI side to change them:
    success only what still belongs to that snapshot is cleared, so a second
    draft composed while the first send is in flight keeps its text, image
    and reply target.
-   **Stale responses.** The UI keeps a ledger per `clientId` in server time:
-   `dispatched`, `deleted`, or the latest `state` and when it was applied.
-   Socket events are stamped on arrival (or with `updatedAt` when the
-   payload carries a number), and a 202 with the time its request started
-   (or its entry's `updatedAt`). A 202 is ignored when the entry was
-   already dispatched or deleted, or when an event set its state at or
-   after the request started. So a late 202 never recreates a delivered
+   **Stale responses.** The UI keeps a ledger per `clientId`:
+   `dispatched`, `deleted`, or the latest `state`, each with an order stamp.
+   Stamps come from one counter local to the page, never from a clock:
+   every socket event takes the next stamp as it arrives (entries in an
+   `init` included), and every composer request takes one as it starts.
+   So a reconnect that changes the clock offset cannot reorder anything.
+   A 202 is ignored when the entry was already dispatched or deleted, or
+   when an event set its state after the request started. So a late 202 never recreates a delivered
    entry, and never overwrites a newer held state or reason. HTTP snapshots
    (`pending` in select and `/api/conversations`) skip settled entries and
    keep the in-memory state of known entries. The `init` snapshot arrives
    in order on the socket and replaces known state, except settled entries.
+   The ledger is a Map in recency order, capped at the newest 500 records
+   and expired after 30 minutes (measured with `performance.now()`).
+   Updates are direct keyed operations and trimming starts from the oldest
+   record, so the cost does not grow with traffic. A record evicted by the
+   cap is forgotten: a 202 arriving later still than 500 newer settlements
+   would be treated as new.
 9. **Pending states.** An entry's `state` is absent (queued: amber "queued,
    not delivered"), `waiting` (muted "waiting to register at home") or
    `held` (danger "held, not delivered" with a "Held: <reason>" line). The

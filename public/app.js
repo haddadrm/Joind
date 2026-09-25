@@ -1323,9 +1323,10 @@ function postComposerSend(url, payload, draft) {
   composerSendInFlight = true;
   showComposerError('');
   var input = document.getElementById('message-input');
-  // Server time at request start: any pending event that arrives while the
-  // request is in flight is newer than this response's snapshot.
-  var requestedAt = serverNow();
+  // Local order stamp at request start: any pending event that arrives
+  // while the request is in flight takes a larger stamp, so it outranks
+  // this response's snapshot whatever the clock does meanwhile.
+  var requestSeq = nextPendingSeq();
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) })
     .then(function(r) {
@@ -1349,7 +1350,7 @@ function postComposerSend(url, payload, draft) {
       if (draft.image && pendingImage === draft.image) clearImagePreview();
       input.focus(); updateSendBtn();
       syncHighlight();
-      if (res.status === 202) onComposerQueued(res.body, payload, requestedAt);
+      if (res.status === 202) onComposerQueued(res.body, payload, requestSeq);
     })
     .catch(function() {
       composerSendInFlight = false;
@@ -1368,7 +1369,7 @@ function showComposerError(text) {
 // server returned, unless the WebSocket already said something newer about
 // it (dispatched, deleted, or a later state): a response can arrive after
 // the events it predates, and must never undo them.
-function onComposerQueued(body, payload, requestedAt) {
+function onComposerQueued(body, payload, requestSeq) {
   var entry = (body.pending && typeof body.pending === 'object') ? body.pending : null;
   var clientId = (entry && entry.clientId) || body.clientId;
   var conv = (entry && entry.conversationId) || body.conversationId ||
@@ -1383,9 +1384,8 @@ function onComposerQueued(body, payload, requestedAt) {
     state: (entry && entry.state) || body.state,
     reason: (entry && (entry.reason || entry.heldReason)) || body.reason,
   };
-  var at = (entry && typeof entry.updatedAt === 'number') ? entry.updatedAt : requestedAt;
-  if (!pendingSnapshotIsCurrent(p.clientId, at)) return;
-  applyPendingUpsert(conv, p, at);
+  if (!pendingSnapshotIsCurrent(p.clientId, requestSeq)) return;
+  applyPendingUpsert(conv, p, requestSeq);
 }
 
 // --- Decision cards ---
@@ -2827,36 +2827,69 @@ var pendingByConv = {};
 var pendingAwaiting = {};
 var PENDING_AWAIT_MS = 15000;
 // Settlement ledger, clientId -> { kind: 'state' | 'dispatched' | 'deleted',
-// at } in server time. WebSocket events are ordered and authoritative; HTTP
-// snapshots (a 202, a select or conversations fetch) may be older than
-// events already applied, so they consult this before touching an entry.
-var pendingLedger = {};
+// seq, t }. WebSocket events are ordered and authoritative; HTTP snapshots
+// (a 202, a select or conversations fetch) may be older than events already
+// applied, so they consult this before touching an entry.
+//
+// Ordering uses pendingSeq, a counter local to this page, stamped on every
+// event as it arrives and on every request as it starts. It never reads a
+// clock, so a clock-offset change on reconnect cannot reorder anything.
+// `t` (performance.now(), monotonic) serves only the age-based expiry.
+//
+// The Map is kept in recency order (an update re-inserts its key), so the
+// oldest record is always first: expiry and the count cap trim from the
+// front, and every update is a direct keyed operation.
+var pendingSeq = 0;
+function nextPendingSeq() { pendingSeq += 1; return pendingSeq; }
+var pendingLedger = new Map();
 var PENDING_LEDGER_TTL_MS = 30 * 60 * 1000;
+var PENDING_LEDGER_MAX = 500;
 
-function notePendingLedger(clientId, kind, at) {
+function monotonicNow() {
+  return (window.performance && typeof performance.now === 'function') ? performance.now() : 0;
+}
+
+function ledgerGet(clientId) {
+  return clientId ? pendingLedger.get(clientId) : undefined;
+}
+
+function isSettledKind(rec) {
+  return !!rec && (rec.kind === 'dispatched' || rec.kind === 'deleted');
+}
+
+// Record what is known about an entry. `seq` defaults to a fresh stamp (an
+// event arriving now); a 202 passes the stamp its request took at start.
+function notePendingLedger(clientId, kind, seq) {
   if (!clientId) return;
-  var prev = pendingLedger[clientId];
+  var prev = pendingLedger.get(clientId);
   // A final outcome is never downgraded back to a live state
-  if (prev && (prev.kind === 'dispatched' || prev.kind === 'deleted') && kind === 'state') return;
-  pendingLedger[clientId] = { kind: kind, at: at };
-  var cutoff = serverNow() - PENDING_LEDGER_TTL_MS;
-  Object.keys(pendingLedger).forEach(function(k) {
-    if (pendingLedger[k].at < cutoff) delete pendingLedger[k];
-  });
+  if (isSettledKind(prev) && kind === 'state') return;
+  var stamp = seq == null ? nextPendingSeq() : seq;
+  // Never move a record backwards: a stale stamp keeps the newer one
+  if (prev && prev.seq > stamp && prev.kind === kind) stamp = prev.seq;
+  pendingLedger.delete(clientId);
+  pendingLedger.set(clientId, { kind: kind, seq: stamp, t: monotonicNow() });
+  trimPendingLedger();
 }
 
-// Whether an HTTP snapshot taken at `at` may still create or restate the
-// entry: not once it was dispatched or deleted, and not over a state that
-// an event set at or after the snapshot.
-function pendingSnapshotIsCurrent(clientId, at) {
-  var rec = pendingLedger[clientId];
+function trimPendingLedger() {
+  var cutoff = monotonicNow() - PENDING_LEDGER_TTL_MS;
+  var it = pendingLedger.keys();
+  for (var step = it.next(); !step.done; step = it.next()) {
+    var rec = pendingLedger.get(step.value);
+    if (pendingLedger.size <= PENDING_LEDGER_MAX && rec.t >= cutoff) break;
+    pendingLedger.delete(step.value);
+  }
+}
+
+// Whether an HTTP snapshot whose request started at `seq` may still create
+// or restate the entry: not once it was dispatched or deleted, and not over
+// a state that an event set after the request started.
+function pendingSnapshotIsCurrent(clientId, seq) {
+  var rec = ledgerGet(clientId);
   if (!rec) return true;
-  if (rec.kind === 'dispatched' || rec.kind === 'deleted') return false;
-  return rec.at < at;
-}
-
-function eventTimeOf(p) {
-  return (p && typeof p.updatedAt === 'number') ? p.updatedAt : serverNow();
+  if (isSettledKind(rec)) return false;
+  return rec.seq < seq;
 }
 
 // Replace the queue (all rooms when conv is null, else one room) with a
@@ -2875,8 +2908,10 @@ function mergePendingSnapshot(conv, list, keepKnown) {
   else delete pendingByConv[conv];
   list.forEach(function(p) {
     if (!p || !p.clientId) return;
-    var rec = pendingLedger[p.clientId];
-    if (rec && (rec.kind === 'dispatched' || rec.kind === 'deleted')) return;
+    if (isSettledKind(ledgerGet(p.clientId))) return;
+    // The socket's snapshot is an event arriving now: stamp it, so a 202
+    // whose request predates the reconnect cannot restate the entry.
+    if (!keepKnown) notePendingLedger(p.clientId, 'state');
     addPendingEntry(conv === null ? p.conversationId : conv, (keepKnown && previous[p.clientId]) || p);
   });
 }
@@ -3281,7 +3316,7 @@ function deletePending(conv, clientId, el, btn) {
     .then(function(r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       // The pending-deleted event normally lands first; this is idempotent.
-      notePendingLedger(clientId, 'deleted', serverNow());
+      notePendingLedger(clientId, 'deleted');
       dropPending(conv, clientId);
     })
     .catch(function() {
@@ -3305,13 +3340,13 @@ function onPendingEvent(event) {
   var p = event.data;
   if (!conv || !p || !p.clientId) return;
   // A repeat event after dispatch or delete (a replay) must not resurrect it
-  var rec = pendingLedger[p.clientId];
-  if (rec && (rec.kind === 'dispatched' || rec.kind === 'deleted')) return;
-  applyPendingUpsert(conv, p, eventTimeOf(p));
+  if (isSettledKind(ledgerGet(p.clientId))) return;
+  applyPendingUpsert(conv, p);
 }
 
-function applyPendingUpsert(conv, p, at) {
-  notePendingLedger(p.clientId, 'state', at);
+// seq: the 202's request stamp, or omitted for an event arriving now
+function applyPendingUpsert(conv, p, seq) {
+  notePendingLedger(p.clientId, 'state', seq);
   if (!addPendingEntry(conv, p)) return;
   var stored = (pendingByConv[conv] || []).find(function(x) { return x.clientId === p.clientId; });
   if (stored && pendingVisibleNow(conv, stored) && !pendingElement(conv, p.clientId)) appendPending(conv, stored);
@@ -3321,7 +3356,7 @@ function applyPendingUpsert(conv, p, at) {
 function onPendingDeleted(event) {
   var conv = pendingConvOf(event);
   if (!conv || !event.data || !event.data.clientId) return;
-  notePendingLedger(event.data.clientId, 'deleted', eventTimeOf(event.data));
+  notePendingLedger(event.data.clientId, 'deleted');
   dropPending(conv, event.data.clientId);
 }
 
@@ -3332,7 +3367,7 @@ function onPendingDispatched(event) {
   var conv = pendingConvOf(event);
   var d = event.data;
   if (!conv || !d || !d.clientId) return;
-  notePendingLedger(d.clientId, 'dispatched', eventTimeOf(d));
+  notePendingLedger(d.clientId, 'dispatched');
   removePendingEntry(conv, d.clientId);
   renderRemoteSections();
   var el = pendingElement(conv, d.clientId);
@@ -3367,7 +3402,7 @@ function settlePendingFor(conv, msg) {
     }
   });
   if (msg.clientId) {
-    notePendingLedger(msg.clientId, 'dispatched', serverNow());
+    notePendingLedger(msg.clientId, 'dispatched');
     removePendingEntry(conv, msg.clientId);
     delete pendingAwaiting[msg.clientId];
     var echoed = pendingElement(conv, msg.clientId);

@@ -83,6 +83,15 @@ let active = HOME + ':cpm-engine';
 
 // ---------- WebSocket (RFC 6455, text frames only) ----------
 const sockets = new Set();
+// Added to Date.now() in init's serverNow; /mock/slow-next?then=reconnect-held
+// changes it to simulate a reconnect that corrects the page's clock offset.
+let skewMs = 0;
+// Callbacks run once after the next WebSocket connection has received init
+let onNextConnect = [];
+function dropAllSockets() {
+  for (const s of sockets) { try { s.end(Buffer.from([0x88, 0])); } catch { /* already gone */ } }
+  sockets.clear();
+}
 
 function wsFrame(text) {
   const payload = Buffer.from(text, 'utf8');
@@ -139,7 +148,7 @@ function initPayload() {
   return {
     type: 'init',
     data: {
-      serverNow: Date.now(),
+      serverNow: Date.now() + skewMs,
       agents: agentsByConv[active] || [],
       messages: messages[active] || [],
       conversations,
@@ -187,6 +196,9 @@ function onUpgrade(req, sock) {
   sock.on('close', () => sockets.delete(sock));
   sock.on('error', () => sockets.delete(sock));
   send(sock, initPayload());
+  const hooks = onNextConnect;
+  onNextConnect = [];
+  hooks.forEach((fn) => fn());
   startScript();
 }
 
@@ -353,6 +365,16 @@ async function api(req, res, u) {
         const snapshot = Object.assign({ conversationId: conv }, q, { state: 'waiting', reason: undefined });
         if (slow.then === 'dispatch') dispatch(conv, q, true);
         else if (slow.then === 'held') restate(conv, q, 'held', 'home refused: ' + sender + ' is not a member of ' + meta(conv));
+        else if (slow.then === 'reconnect-held') {
+          // Drop the socket and come back with a shifted server clock; the
+          // held event lands after the reconnect, before the late 202.
+          setTimeout(() => {
+            skewMs = slow.skewMs;
+            onNextConnect.push(() => setTimeout(() =>
+              restate(conv, q, 'held', 'home refused after reconnect: ' + sender + ' is not a member of ' + meta(conv)), 300));
+            dropAllSockets();
+          }, 100);
+        }
         setTimeout(() => json(res, 202, { queued: true, clientId: q.clientId, conversationId: conv,
           reason: 'author not registered at home', state: 'waiting', pending: snapshot }), slow.ms);
         return;
@@ -416,8 +438,11 @@ const server = http.createServer(async (req, res) => {
   if (u.pathname === '/mock/slow-next') {
     // The next queued composer send answers its 202 after `ms`; with
     // then=dispatch the entry is dispatched first, with then=held it is
-    // held first, and the late 202 carries an older 'waiting' snapshot.
-    slowNext = { ms: Number(u.searchParams.get('ms') ?? 1500), then: u.searchParams.get('then') ?? 'none' };
+    // held first, with then=reconnect-held the socket drops, init comes back
+    // with serverNow shifted by skewMs, and only then is the entry held. The
+    // late 202 carries an older 'waiting' snapshot in every case.
+    slowNext = { ms: Number(u.searchParams.get('ms') ?? 1500), then: u.searchParams.get('then') ?? 'none',
+      skewMs: Number(u.searchParams.get('skewMs') ?? -3600000) };
     return json(res, 200, { armed: slowNext });
   }
   if (u.pathname === '/mock/state') {
