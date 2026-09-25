@@ -49,6 +49,12 @@ export interface QueuedMessage extends PeerWriteOptions {
   text: string;
   queuedAt: number;
   attempts: number;
+  /** "waiting": its author has no live registration here (both servers
+   *  restarted, say); it goes when the author rejoins. "held": the home
+   *  refused it; it stays, shown as pending, until its author deletes it.
+   *  Only the author's delete or a successful send removes an entry. */
+  state?: "waiting" | "held";
+  heldReason?: string;
 }
 
 /** The pending payload the web UI receives. */
@@ -115,6 +121,14 @@ export class UndeliveredQueue {
     const [e] = this.entries.splice(i, 1);
     this.save();
     return e;
+  }
+
+  mark(clientId: string, state: "waiting" | "held" | undefined, heldReason?: string): void {
+    const e = this.entries.find((x) => x.clientId === clientId);
+    if (!e) return;
+    if (state) e.state = state; else delete e.state;
+    if (heldReason) e.heldReason = heldReason; else delete e.heldReason;
+    this.save();
   }
 
   bump(clientId: string): void {
@@ -233,15 +247,34 @@ export class MirrorRoom extends ChatRoom {
   // The home server's view
   // ---------------------------------------------------------------------
 
-  /** Replace the mirror with a home snapshot (initial fill or refill). */
-  fill(snap: PeerMessagesResult): void {
+  /**
+   * Reconcile the mirror with a home snapshot (initial fill or refill). The
+   * snapshot is authoritative over its range: from its oldest message on, or
+   * over everything when it is `complete`. A cached message in that range
+   * that the snapshot lacks is gone on the home (deleted, or no longer
+   * visible here), and is dropped (gate round 1, finding 6).
+   *
+   * `announce` (a refill after an outage or a reset): what changed is
+   * emitted as room events, deletions and then new messages in id order, so
+   * open browsers and the bell see what arrived while the link was down
+   * (finding 5). A first fill announces nothing: it is history, not news.
+   */
+  fill(snap: PeerMessagesResult, announce = false): void {
+    const incoming = snap.messages.filter((m) => typeof m.id === "number").sort((a, b) => a.id - b.id);
+    const snapIds = new Set(incoming.map((m) => m.id));
+    const floor = snap.complete === true ? -Infinity : incoming.length > 0 ? incoming[0].id : Infinity;
+    const gone = this.messages.filter((m) => m.id >= floor && !snapIds.has(m.id));
+    const had = new Set(this.messages.map((m) => m.id));
     const byId = new Map<number, ChatMessage>();
-    for (const m of this.messages) byId.set(m.id, m);
-    for (const m of snap.messages) if (typeof m.id === "number") byId.set(m.id, m);
+    for (const m of this.messages) if (!(m.id >= floor && !snapIds.has(m.id))) byId.set(m.id, m);
+    for (const m of incoming) byId.set(m.id, m);
     this.messages = [...byId.values()].sort((a, b) => a.id - b.id);
     this.roster = new Map(snap.members.map((a) => [a.name, a]));
     if (snap.name) this.name = snap.name;
     this.homeMessageCount = Math.max(this.homeMessageCount, this.messages.length);
+    if (!announce) return;
+    for (const m of gone) this.emitMirrored("message-deleted", { id: m.id });
+    for (const m of incoming) if (!had.has(m.id)) this.emitMirrored("message", m);
   }
 
   /** Insert a home message by id; false when it is already here. */
@@ -507,10 +540,11 @@ export class MirrorRoom extends ChatRoom {
       ...(opts.askFor ? { askFor: opts.askFor } : {}),
       ...(opts.choices && opts.choices.length > 0 ? { choices: opts.choices } : {}),
     };
-    if (!this.transport.isUp() || this.queue.size() > 0 || this.draining) {
+    // Order is kept per author: queue behind this author's own older entries.
+    if (!this.transport.isUp() || this.queue.list().some((e) => e.sender === sender)) {
       this.enqueue(entry);
       if (this.transport.isUp()) void this.drain();
-      return { status: "queued", clientId: entry.clientId, reason: this.transport.isUp() ? "older messages are still being sent" : `the link to ${this.server} is down` };
+      return { status: "queued", clientId: entry.clientId, reason: this.transport.isUp() ? "your older messages here are still queued" : `the link to ${this.server} is down` };
     }
     try {
       const message = await this.dispatch(entry);
@@ -569,33 +603,67 @@ export class MirrorRoom extends ChatRoom {
       .map((e) => ({ conversationId: this.id, clientId: e.clientId, sender: e.sender, text: e.text, queuedAt: e.queuedAt, ...(e.to ? { to: e.to } : {}) }));
   }
 
-  /** Send the queue home in order while the link is up. Resolves with the
-   *  number sent. A message the home refuses is dropped from the queue with
-   *  a local line; a link failure stops the drain and keeps the rest. */
+  /** The author rejoined: its waiting messages may go now. */
+  resumeAuthor(name: string): void {
+    let any = false;
+    for (const e of this.queue.list()) {
+      if (e.sender === name && e.state === "waiting") { this.queue.mark(e.clientId, undefined); any = true; }
+    }
+    if (any && this.transport.isUp()) void this.drain();
+  }
+
+  /**
+   * Send the queue home while the link is up, in order per author. Resolves
+   * with the number sent. Nothing is ever dropped here (gate round 1,
+   * finding 7): an entry whose author has no live registration waits for the
+   * author to rejoin, one the home refuses is held with a local line, and in
+   * both cases that author's later entries wait behind it. A link failure
+   * stops the drain and keeps everything.
+   */
   drain(): Promise<number> {
     if (this.draining) return this.draining;
     const run = async (): Promise<number> => {
       let sent = 0;
-      while (this.transport.isUp() && !this.destroyed) {
-        const e = this.queue.first();
-        if (!e) break;
-        this.dispatching = e.clientId;
-        try {
-          const message = await this.dispatch(e);
-          this.queue.remove(e.clientId);
-          this.notice({ type: "pending-dispatched", conversationId: this.id, data: { conversationId: this.id, clientId: e.clientId, id: message.id } });
-          sent++;
-        } catch (err) {
-          if (err instanceof LinkDownError) {
-            this.queue.bump(e.clientId);
-            this.transport.failed(err.message);
-            break;
+      let progress = true;
+      // Entries added while draining are picked up by the next pass.
+      while (progress && this.transport.isUp() && !this.destroyed) {
+        progress = false;
+        const blocked = new Set<string>();
+        for (const e of this.queue.list()) {
+          if (!this.transport.isUp() || this.destroyed) break;
+          if (!this.queue.get(e.clientId)) continue; // deleted meanwhile
+          // A waiting entry goes again once its author is registered here.
+          if (blocked.has(e.sender) || e.state === "held" || (e.state === "waiting" && !this.registrationFor(e.sender))) { blocked.add(e.sender); continue; }
+          if (!this.registrationFor(e.sender)) {
+            this.queue.mark(e.clientId, "waiting");
+            blocked.add(e.sender);
+            continue;
           }
-          this.queue.remove(e.clientId);
-          this.notice({ type: "pending-deleted", conversationId: this.id, data: { conversationId: this.id, clientId: e.clientId } });
-          this.addLocalLine(`A queued message from ${e.sender} was not delivered: ${(err as Error).message}`);
-        } finally {
-          this.dispatching = null;
+          this.dispatching = e.clientId;
+          try {
+            const message = await this.dispatch(e);
+            this.queue.remove(e.clientId);
+            this.notice({ type: "pending-dispatched", conversationId: this.id, data: { conversationId: this.id, clientId: e.clientId, id: message.id } });
+            sent++;
+            progress = true;
+          } catch (err) {
+            if (err instanceof LinkDownError) {
+              this.queue.bump(e.clientId);
+              this.transport.failed(err.message);
+              return sent;
+            }
+            blocked.add(e.sender);
+            if (err instanceof PeerRefusedError && err.code === "not-registered") {
+              // The home does not know the author (and re-registering did not
+              // help): it waits for the author to rejoin.
+              this.queue.mark(e.clientId, "waiting");
+            } else {
+              this.queue.mark(e.clientId, "held", (err as Error).message);
+              this.addLocalLine(`A queued message from ${e.sender} was refused by ${this.server}: ${(err as Error).message}. It stays queued until its author deletes it.`);
+            }
+          } finally {
+            this.dispatching = null;
+          }
         }
       }
       return sent;

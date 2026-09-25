@@ -429,6 +429,38 @@ export class ChatRoom extends EventEmitter {
     return agent;
   }
 
+  /** Names a linked peer registered here for its human web viewer: no
+   *  member, never woken, but the name is the peer's in this room (it reads
+   *  that name's DMs and posts as it). Kept here, beside the members, so a
+   *  local join checks one owner for both. */
+  private peerHumans = new Map<string, { peer: string; registration: string }>();
+
+  setPeerHuman(name: string, peer: string, registration: string): void {
+    this.peerHumans.set(name, { peer, registration });
+  }
+
+  peerHumanOf(name: string): { peer: string; registration: string } | undefined {
+    const h = this.peerHumans.get(name);
+    return h ? { ...h } : undefined;
+  }
+
+  deletePeerHuman(name: string): void {
+    this.peerHumans.delete(name);
+  }
+
+  peerHumanNames(peer: string): string[] {
+    return [...this.peerHumans].filter(([, h]) => h.peer === peer).map(([n]) => n);
+  }
+
+  /** The linked peer that owns `name` in this room: its hosted member, or
+   *  its human. A local join of that name is refused while it does. */
+  peerOwnerOf(name: string): { peer: string; human: boolean } | undefined {
+    const host = this.agents.get(name)?.host;
+    if (host) return { peer: host, human: false };
+    const h = this.peerHumans.get(name);
+    return h ? { peer: h.peer, human: true } : undefined;
+  }
+
   /** The host's registration id of a hosted member (never served to clients). */
   hostedRegistrationOf(name: string): string | undefined {
     const agent = this.agents.get(name);

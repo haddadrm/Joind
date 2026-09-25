@@ -33,6 +33,9 @@ export interface PeerMessagesResult {
   members: Agent[];
   /** The room's event sequence when the snapshot was taken: subscribe from here. */
   cursor: number;
+  /** The snapshot holds every visible message after `since` (none was cut
+   *  by the limit): a cached message absent from it is gone on the home. */
+  complete?: boolean;
 }
 
 export interface PeerRoomsResult {
@@ -137,14 +140,31 @@ export interface RemoteRooms {
    *  False when the home server has no such room, or it cannot be reached
    *  and the room was never seen. */
   prepare(convId: string): Promise<boolean>;
-  /** Register a local member with the remote room's home server. */
+  /** Register a local member with the remote room's home server. Nothing
+   *  changes on this server: the caller commits (commitMember) only when its
+   *  join is still current, and abandons (abandonMember) otherwise. */
   registerMember(convId: string, name: string, registration: string, terminal: { pid?: number; paneId?: number; gui?: number; orcaTerminal?: string; role?: string }): Promise<RemoteRegisterOutcome>;
+  /** The join is current and joined locally: keep its home registration,
+   *  resume any queued messages of that author. */
+  commitMember(convId: string, name: string, outcome: RemoteRegistered): void;
+  /** The join was superseded after it registered with the home server: put
+   *  the home back to the member that is current here (or remove the
+   *  abandoned registration when none is). */
+  abandonMember(convId: string, name: string, outcome: RemoteRegistered): Promise<void>;
   /** The member is joined locally: subscribe (again, with the new viewer) and fill. */
   joined(convId: string): Promise<void>;
 }
 
+export interface RemoteRegistered {
+  ok: true;
+  online: string[];
+  homeRegistration: string;
+  role?: string;
+  terminalSummary: string;
+}
+
 export type RemoteRegisterOutcome =
-  | { ok: true; online: string[] }
+  | RemoteRegistered
   | { ok: false; status: number; error: string; candidates?: unknown };
 
 /** "<server>:<room>" */

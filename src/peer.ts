@@ -53,8 +53,6 @@ const SEQ_RESTART_GAP = 100_000;
 const CLIENT_IDS_KEPT = 5_000;
 const SUBSCRIBE_MAX_MS = 60_000;
 
-interface HumanRegistration { peer: string; registration: string }
-
 interface Waiter { wake: () => void }
 
 type Req = express.Request & { peer?: LinkConfig };
@@ -69,7 +67,6 @@ export class PeerHub {
   private buffers = new Map<string, PeerEvent[]>();
   private waiters = new Map<string, Set<Waiter>>();
   private clientIds = new Map<string, Map<string, ChatMessage>>();
-  private humans = new Map<string, Map<string, HumanRegistration>>();
   private lastContact = new Map<string, number>();
   private announcedGone = new Set<string>();
   private monitor: ReturnType<typeof setInterval> | null = null;
@@ -163,7 +160,7 @@ export class PeerHub {
     const room = this.opts.manager.getRoom(roomId);
     const allowed = new Set<string>();
     for (const a of room?.who() ?? []) if (a.host === peer) allowed.add(a.name);
-    for (const [name, h] of this.humans.get(roomId) ?? []) if (h.peer === peer) allowed.add(name);
+    for (const name of room?.peerHumanNames(peer) ?? []) allowed.add(name);
     if (!requested) return [...allowed];
     return requested.filter((n) => allowed.has(n));
   }
@@ -317,9 +314,10 @@ export class PeerHub {
       const since = Number.isSafeInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : undefined;
       const limitRaw = Number(req.query.limit ?? 200);
       const limit = Number.isSafeInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 5_000) : 200;
-      const messages = room.readAll(1_000_000).filter((m) => (since == null || m.id > since) && this.visibleToAny(m, viewers)).slice(-limit);
+      const visible = room.readAll(1_000_000).filter((m) => (since == null || m.id > since) && this.visibleToAny(m, viewers));
+      const messages = visible.slice(-limit);
       const meta = manager.getMeta(roomId);
-      res.json({ server: this.opts.selfName, room: roomId, name: meta?.name ?? roomId, messages, members: room.who(), cursor });
+      res.json({ server: this.opts.selfName, room: roomId, name: meta?.name ?? roomId, messages, members: room.who(), cursor, complete: since == null && visible.length <= limit });
     });
 
     r.post("/register", express.json(), (req: Req, res) => {
@@ -333,24 +331,31 @@ export class PeerHub {
       if (!name || name.length > 64 || !hostedRegistration) { res.status(400).json({ error: "room, name, host and registration required" }); return; }
       if (str(body.host) !== peer) { res.status(403).json({ error: `host must be the calling server (${peer})` }); return; }
       const existing = room.getAgent(name);
-      const human = this.humans.get(roomId)?.get(name);
+      const human = room.peerHumanOf(name);
+      // A name bound locally in this room (a member that timed out keeps its
+      // binding until it rejoins or leaves) is local too.
+      const localBinding = manager.bindingsOf(name).some((e) => e.conversationId === roomId && !e.host);
       const conflict = (): void => {
         const candidates = existing
           ? [{ conversation: roomId, host: existing.host ?? this.opts.selfName, ...(existing.host ? {} : existing.pid ? { pid: existing.pid } : {}) }]
-          : human ? [{ conversation: roomId, host: human.peer, human: true }] : [];
+          : human ? [{ conversation: roomId, host: human.peer, human: true }]
+          : localBinding ? [{ conversation: roomId, host: this.opts.selfName }] : [];
         res.status(409).json({ error: `${name} is already registered in this room from another host`, code: "name-conflict", candidates });
       };
+      // One owner per name in a room: a local member or binding, a hosted
+      // member of one peer, or one peer's human (gate round 1, finding 1).
       if (body.human === true) {
-        if (existing || (human && human.peer !== peer)) { conflict(); return; }
+        if (existing || localBinding || (human && human.peer !== peer)) { conflict(); return; }
         const registration = human?.registration ?? newRegistrationId();
-        let map = this.humans.get(roomId);
-        if (!map) { map = new Map(); this.humans.set(roomId, map); }
-        map.set(name, { peer, registration });
+        room.setPeerHuman(name, peer, registration);
+        // A local join of this name still validating is superseded (finding 4).
+        manager.supersedeRoomJoins(roomId, name);
         res.json({ ok: true, registration, online: room.whoNames() });
         return;
       }
       if (human) { conflict(); return; }
       if (existing && existing.host !== peer) { conflict(); return; }
+      if (!existing && localBinding) { conflict(); return; }
       if (existing && room.hostedRegistrationOf(name) === hostedRegistration) {
         // The same host and the same hosted registration: idempotent.
         const registration = room.registrationOf(name) ?? newRegistrationId();
@@ -361,6 +366,8 @@ export class PeerHub {
       // Prefixed with this server's name: ids stay unique across links.
       const registration = `reg-${this.opts.selfName}-${randomUUID()}`;
       const role = str(body.role) ?? this.opts.getPersistedRole?.(name);
+      // A local join of this name still validating is superseded (finding 4).
+      manager.supersedeRoomJoins(roomId, name);
       room.joinHosted(name, peer, registration, hostedRegistration, role);
       manager.bindHosted(name, roomId, registration, peer);
       res.json({ ok: true, registration, online: room.whoNames() });
@@ -371,7 +378,7 @@ export class PeerHub {
     const authorized = (peer: string, roomId: string, room: ChatRoom, name: string, registration: string | undefined, allowHuman: boolean): boolean => {
       const member = room.getAgent(name);
       if (member?.host === peer) return registration == null || room.registrationOf(name) === registration;
-      const human = this.humans.get(roomId)?.get(name);
+      const human = room.peerHumanOf(name);
       return allowHuman && human?.peer === peer && (registration == null || human.registration === registration);
     };
 
@@ -385,13 +392,18 @@ export class PeerHub {
       const text = typeof body.text === "string" ? body.text : undefined;
       const clientId = str(body.clientId);
       if (!sender || !text || !clientId || clientId.length > 100) { res.status(400).json({ error: "room, sender, text and clientId required" }); return; }
-      let seen = this.clientIds.get(roomId);
-      const dup = seen?.get(clientId);
-      if (dup) { res.json({ ok: true, duplicate: true, message: dup }); return; }
+      // Authorize first: a retry is answered only to the sender that made the
+      // original, from the peer that sent it (gate round 1, finding 2). The
+      // key is the sender's name, not its registration id, so a retry after
+      // a re-registration (the home forgot it) still finds its first copy.
       if (!authorized(peer, roomId, room, sender, str(body.registration), true)) {
         res.status(403).json({ error: `${sender} is not registered in this room from ${peer}`, code: "not-registered" });
         return;
       }
+      const dedupeKey = `${peer}\n${sender}\n${clientId}`;
+      let seen = this.clientIds.get(roomId);
+      const dup = seen?.get(dedupeKey);
+      if (dup) { res.json({ ok: true, duplicate: true, message: dup }); return; }
       let to: string[] | undefined;
       if (body.to !== undefined) {
         if (!Array.isArray(body.to) || !body.to.every((t) => typeof t === "string" && t.trim() !== "")) { res.status(400).json({ error: "to must be an array of names" }); return; }
@@ -405,7 +417,7 @@ export class PeerHub {
       if (room.getAgent(sender)) { room.touch(sender); room.setTyping(sender, false); }
       const message = room.send(sender, text, { replyTo, to, choices, askFor: str(body.askFor) });
       if (!seen) { seen = new Map(); this.clientIds.set(roomId, seen); }
-      seen.set(clientId, message);
+      seen.set(dedupeKey, message);
       if (seen.size > CLIENT_IDS_KEPT) seen.delete(seen.keys().next().value as string);
       res.json({ ok: true, message });
     });
@@ -426,9 +438,9 @@ export class PeerHub {
         res.json({ ok: true });
         return;
       }
-      const human = this.humans.get(roomId)?.get(name);
+      const human = room.peerHumanOf(name);
       if (human?.peer === peer && human.registration === registration) {
-        this.humans.get(roomId)?.delete(name);
+        room.deletePeerHuman(name);
         res.json({ ok: true });
         return;
       }
