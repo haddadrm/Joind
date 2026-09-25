@@ -246,7 +246,7 @@ function connect() {
         allMessages = (event.data.messages || []).slice();
         activeConversation = event.data.activeConversation || null;
         conversationList = event.data.conversations || [];
-        applyLinkPayload(event.data);
+        applyLinkPayload(event.data, true);
         initTaskCount = event.data.openTaskCount || 0;
         initHasUrgent = event.data.hasUrgentTask || false;
         if (event.data.turnGuard) initTurnGuard(event.data.turnGuard);
@@ -1294,14 +1294,21 @@ function sendMessage() {
       dmPayload.replyConversationId = replyingTo.conversationId || (activeConversation && activeConversation.id);
     }
     // The rendered echo arrives over the WebSocket like every other send.
-    postComposerSend('/api/dm/send', dmPayload, text);
+    postComposerSend('/api/dm/send', dmPayload, composerDraftSnapshot(text));
     return;
   }
 
   var payload = { sender: sender.value || 'human', text: text || '[image]', token: webToken() };
   if (replyingTo) payload.replyTo = replyingTo.id;
   if (pendingImage) payload.image = pendingImage.url;
-  postComposerSend('/api/send', payload, text);
+  postComposerSend('/api/send', payload, composerDraftSnapshot(text));
+}
+
+// The draft as submitted: its text and the exact image and reply-target
+// objects. A newer draft composed while the send is in flight holds other
+// objects, so identity comparison tells the two apart.
+function composerDraftSnapshot(text) {
+  return { text: text, image: pendingImage, reply: replyingTo };
 }
 
 // One composer send in flight at a time: a second Enter while the first is
@@ -1311,11 +1318,14 @@ var composerSendInFlight = false;
 // Post a composer message and clear the composer only when the server took
 // it: 200 (sent) or 202 (queued for a remote room). On any failure the
 // typed text, reply target and image stay put and a one-line error shows.
-function postComposerSend(url, payload, sentText) {
+function postComposerSend(url, payload, draft) {
   if (composerSendInFlight) return;
   composerSendInFlight = true;
   showComposerError('');
   var input = document.getElementById('message-input');
+  // Server time at request start: any pending event that arrives while the
+  // request is in flight is newer than this response's snapshot.
+  var requestedAt = serverNow();
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) })
     .then(function(r) {
@@ -1330,15 +1340,16 @@ function postComposerSend(url, payload, sentText) {
         showComposerError('Not sent: ' + why + '. Your text is still in the box.');
         return;
       }
-      // Clear only what was sent: text typed during the request survives.
-      if (input.value.trim() === sentText) {
+      // Clear only what belongs to the submitted draft: text, an image or a
+      // reply target chosen during the request survive.
+      if (input.value.trim() === draft.text) {
         input.value = ''; input.style.height = 'auto';
       }
+      if (draft.reply && replyingTo === draft.reply) clearReply();
+      if (draft.image && pendingImage === draft.image) clearImagePreview();
       input.focus(); updateSendBtn();
       syncHighlight();
-      clearReply();
-      clearImagePreview();
-      if (res.status === 202) onComposerQueued(res.body, payload);
+      if (res.status === 202) onComposerQueued(res.body, payload, requestedAt);
     })
     .catch(function() {
       composerSendInFlight = false;
@@ -1354,8 +1365,10 @@ function showComposerError(text) {
 }
 
 // 202: the message is queued for a remote room. Render the entry the
-// server returned; the matching `pending` event is deduplicated by clientId.
-function onComposerQueued(body, payload) {
+// server returned, unless the WebSocket already said something newer about
+// it (dispatched, deleted, or a later state): a response can arrive after
+// the events it predates, and must never undo them.
+function onComposerQueued(body, payload, requestedAt) {
   var entry = (body.pending && typeof body.pending === 'object') ? body.pending : null;
   var clientId = (entry && entry.clientId) || body.clientId;
   var conv = (entry && entry.conversationId) || body.conversationId ||
@@ -1370,7 +1383,9 @@ function onComposerQueued(body, payload) {
     state: (entry && entry.state) || body.state,
     reason: (entry && (entry.reason || entry.heldReason)) || body.reason,
   };
-  onPendingEvent({ type: 'pending', conversationId: conv, data: p });
+  var at = (entry && typeof entry.updatedAt === 'number') ? entry.updatedAt : requestedAt;
+  if (!pendingSnapshotIsCurrent(p.clientId, at)) return;
+  applyPendingUpsert(conv, p, at);
 }
 
 // --- Decision cards ---
@@ -2359,7 +2374,7 @@ function loadConversations() {
   fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).then(function(data) {
     activeConversation = data.active;
     conversationList = data.conversations || [];
-    applyLinkPayload(data);
+    applyLinkPayload(data, false);
     renderConversationList();
   });
 }
@@ -2403,8 +2418,7 @@ function selectConversation(id) {
         activeConversation = data.conversation;
         if (Array.isArray(data.pending)) {
           // A server snapshot of this room's queue replaces the local copy
-          delete pendingByConv[id];
-          data.pending.forEach(function(p) { addPendingEntry(id, p); });
+          mergePendingSnapshot(id, data.pending, true);
         }
         allMessages = (data.messages || []).slice();
         agents = data.agents || [];
@@ -2812,17 +2826,68 @@ var pendingByConv = {};
 // not been rendered yet; the row stays until that message lands.
 var pendingAwaiting = {};
 var PENDING_AWAIT_MS = 15000;
+// Settlement ledger, clientId -> { kind: 'state' | 'dispatched' | 'deleted',
+// at } in server time. WebSocket events are ordered and authoritative; HTTP
+// snapshots (a 202, a select or conversations fetch) may be older than
+// events already applied, so they consult this before touching an entry.
+var pendingLedger = {};
+var PENDING_LEDGER_TTL_MS = 30 * 60 * 1000;
+
+function notePendingLedger(clientId, kind, at) {
+  if (!clientId) return;
+  var prev = pendingLedger[clientId];
+  // A final outcome is never downgraded back to a live state
+  if (prev && (prev.kind === 'dispatched' || prev.kind === 'deleted') && kind === 'state') return;
+  pendingLedger[clientId] = { kind: kind, at: at };
+  var cutoff = serverNow() - PENDING_LEDGER_TTL_MS;
+  Object.keys(pendingLedger).forEach(function(k) {
+    if (pendingLedger[k].at < cutoff) delete pendingLedger[k];
+  });
+}
+
+// Whether an HTTP snapshot taken at `at` may still create or restate the
+// entry: not once it was dispatched or deleted, and not over a state that
+// an event set at or after the snapshot.
+function pendingSnapshotIsCurrent(clientId, at) {
+  var rec = pendingLedger[clientId];
+  if (!rec) return true;
+  if (rec.kind === 'dispatched' || rec.kind === 'deleted') return false;
+  return rec.at < at;
+}
+
+function eventTimeOf(p) {
+  return (p && typeof p.updatedAt === 'number') ? p.updatedAt : serverNow();
+}
+
+// Replace the queue (all rooms when conv is null, else one room) with a
+// snapshot. Dispatched or deleted entries are never resurrected. With
+// keepKnown (HTTP snapshots) an entry already known here keeps its current
+// state, since the WebSocket may have applied newer events than the
+// snapshot. Without it (init, which arrives in order on the socket) the
+// snapshot is the newest truth and replaces the known state.
+function mergePendingSnapshot(conv, list, keepKnown) {
+  var previous = {};
+  Object.keys(pendingByConv).forEach(function(c) {
+    if (conv !== null && c !== conv) return;
+    pendingByConv[c].forEach(function(x) { previous[x.clientId] = x; });
+  });
+  if (conv === null) pendingByConv = {};
+  else delete pendingByConv[conv];
+  list.forEach(function(p) {
+    if (!p || !p.clientId) return;
+    var rec = pendingLedger[p.clientId];
+    if (rec && (rec.kind === 'dispatched' || rec.kind === 'deleted')) return;
+    addPendingEntry(conv === null ? p.conversationId : conv, (keepKnown && previous[p.clientId]) || p);
+  });
+}
 
 // Accept links, remote rooms and (optionally) queued messages from any
-// payload that carries them: init and /api/conversations.
-function applyLinkPayload(data) {
+// payload that carries them: init (fromSocket) and /api/conversations.
+function applyLinkPayload(data, fromSocket) {
   if (!data) return;
   if (Array.isArray(data.links)) links = data.links.slice();
   if (Array.isArray(data.remoteConversations)) remoteConversations = data.remoteConversations.slice();
-  if (Array.isArray(data.pending)) {
-    pendingByConv = {};
-    data.pending.forEach(function(p) { addPendingEntry(p.conversationId, p); });
-  }
+  if (Array.isArray(data.pending)) mergePendingSnapshot(null, data.pending, !fromSocket);
 }
 
 function linkByName(name) {
@@ -3216,6 +3281,7 @@ function deletePending(conv, clientId, el, btn) {
     .then(function(r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       // The pending-deleted event normally lands first; this is idempotent.
+      notePendingLedger(clientId, 'deleted', serverNow());
       dropPending(conv, clientId);
     })
     .catch(function() {
@@ -3237,6 +3303,15 @@ function dropPending(conv, clientId) {
 function onPendingEvent(event) {
   var conv = pendingConvOf(event);
   var p = event.data;
+  if (!conv || !p || !p.clientId) return;
+  // A repeat event after dispatch or delete (a replay) must not resurrect it
+  var rec = pendingLedger[p.clientId];
+  if (rec && (rec.kind === 'dispatched' || rec.kind === 'deleted')) return;
+  applyPendingUpsert(conv, p, eventTimeOf(p));
+}
+
+function applyPendingUpsert(conv, p, at) {
+  notePendingLedger(p.clientId, 'state', at);
   if (!addPendingEntry(conv, p)) return;
   var stored = (pendingByConv[conv] || []).find(function(x) { return x.clientId === p.clientId; });
   if (stored && pendingVisibleNow(conv, stored) && !pendingElement(conv, p.clientId)) appendPending(conv, stored);
@@ -3246,6 +3321,7 @@ function onPendingEvent(event) {
 function onPendingDeleted(event) {
   var conv = pendingConvOf(event);
   if (!conv || !event.data || !event.data.clientId) return;
+  notePendingLedger(event.data.clientId, 'deleted', eventTimeOf(event.data));
   dropPending(conv, event.data.clientId);
 }
 
@@ -3256,6 +3332,7 @@ function onPendingDispatched(event) {
   var conv = pendingConvOf(event);
   var d = event.data;
   if (!conv || !d || !d.clientId) return;
+  notePendingLedger(d.clientId, 'dispatched', eventTimeOf(d));
   removePendingEntry(conv, d.clientId);
   renderRemoteSections();
   var el = pendingElement(conv, d.clientId);
@@ -3290,6 +3367,7 @@ function settlePendingFor(conv, msg) {
     }
   });
   if (msg.clientId) {
+    notePendingLedger(msg.clientId, 'dispatched', serverNow());
     removePendingEntry(conv, msg.clientId);
     delete pendingAwaiting[msg.clientId];
     var echoed = pendingElement(conv, msg.clientId);

@@ -49,6 +49,7 @@ const remoteConversations = [
 ];
 const allMetas = () => conversations.concat(remoteConversations);
 const metaOf = (id) => allMetas().find((c) => c.id === id);
+const meta = (id) => (metaOf(id) ? metaOf(id).name : id);
 const isRemote = (id) => remoteConversations.some((c) => c.id === id);
 
 const messages = {};
@@ -244,6 +245,8 @@ const ROOM = HOME + ':cpm-engine';
 let flying = null; // the one message queued while the link is up
 let waitingEntry = null; // turns back into an ordinary queued entry on restore
 let failNext = null; // { status, error } for the next composer send
+// { ms, then: 'dispatch' | 'held' | 'none' } for the next queued composer send
+let slowNext = null;
 const steps = [
   ['mirrored message', () => mirroredMessage(ROOM, 'jadzia', '@curzon the window 14 run finished. Critical path moved to the facade package.')],
   ['pending from the viewer (link up)', () => { flying = queue(ROOM, viewer, 'On it, reading the facade fragnet now.'); }],
@@ -341,6 +344,19 @@ async function api(req, res, u) {
     // A DM routes to the room of the pair's last DM; the mock uses the remote room
     const conv = isDm ? ROOM : active;
     if (isRemote(conv) && links[0].state !== 'up') {
+      const slow = slowNext;
+      slowNext = null;
+      if (slow) {
+        // The event stream moves on before the 202 lands; the response then
+        // carries an older snapshot ('waiting') that must not win.
+        const q = queue(conv, sender, b.text, { to });
+        const snapshot = Object.assign({ conversationId: conv }, q, { state: 'waiting', reason: undefined });
+        if (slow.then === 'dispatch') dispatch(conv, q, true);
+        else if (slow.then === 'held') restate(conv, q, 'held', 'home refused: ' + sender + ' is not a member of ' + meta(conv));
+        setTimeout(() => json(res, 202, { queued: true, clientId: q.clientId, conversationId: conv,
+          reason: 'author not registered at home', state: 'waiting', pending: snapshot }), slow.ms);
+        return;
+      }
       const q = queue(conv, sender, b.text, { to, echoDelayMs: 200 });
       return json(res, 202, { queued: true, clientId: q.clientId, conversationId: conv,
         reason: 'link to ' + HOME + ' is down', pending: Object.assign({ conversationId: conv }, q) });
@@ -396,6 +412,13 @@ const server = http.createServer(async (req, res) => {
     failNext = { status: Number(u.searchParams.get('status') ?? 403),
       error: u.searchParams.get('error') ?? 'viewer is not registered with ' + HOME + ' yet' };
     return json(res, 200, { armed: failNext });
+  }
+  if (u.pathname === '/mock/slow-next') {
+    // The next queued composer send answers its 202 after `ms`; with
+    // then=dispatch the entry is dispatched first, with then=held it is
+    // held first, and the late 202 carries an older 'waiting' snapshot.
+    slowNext = { ms: Number(u.searchParams.get('ms') ?? 1500), then: u.searchParams.get('then') ?? 'none' };
+    return json(res, 200, { armed: slowNext });
   }
   if (u.pathname === '/mock/state') {
     return json(res, 200, { viewer, active, links, pending, step: stepIndex, of: steps.length });
