@@ -16,7 +16,7 @@ import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
-import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, getWeztermSocket, weztermEnvForGui, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, socketForGui, socketGuiPid, weztermGuiOf, type ProcessEntry } from "./terminals.js";
+import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, liveServerSocket, weztermEnvForGui, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, socketForGui, socketGuiPid, weztermGuiOf, type ProcessEntry } from "./terminals.js";
 import { listOrcaTerminals, ORCA_HANDLE, type OrcaTerminalState } from "./orca.js";
 
 const execFileAsync = promisify(execFile);
@@ -160,7 +160,7 @@ export function defaultPaneResolverDeps(manager: ConversationManager, tree: Proc
     autoDetect: () => autoDetectWezTermPane(manager),
     guiOf: (pid) => weztermGuiOf(pid, tree),
     socketForGui: (gui) => socketForGui(gui),
-    serverSocket: getWeztermSocket,
+    serverSocket: liveServerSocket,
   };
 }
 

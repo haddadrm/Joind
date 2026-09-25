@@ -419,7 +419,12 @@ export interface SocketFinderDeps {
 /**
  * The WezTerm GUI socket the server talks to when it runs outside WezTerm.
  * WEZTERM_UNIX_SOCKET wins when set. Otherwise the gui-sock-<pid> files are
- * candidates only while their GUI process is alive, newest first. A GUI that
+ * candidates only while their GUI process is alive, newest first where the
+ * file's time can be read. On Windows a LIVE GUI's socket cannot be stat'ed
+ * at all (stat and lstat fail with EACCES, existsSync says false; measured
+ * 25 Sep 2026), so existence comes from the directory listing, and among
+ * several live GUIs the order is the listing's. That only decides the
+ * default: a join whose GUI instance is known uses that instance's socket. A GUI that
  * closed leaves its socket file behind, and the old rule (the alphabetically
  * last file) picked such a leftover whenever its pid sorted last: the server
  * then reported "WezTerm not found" next to a live GUI (seen 25 Sep 2026 with
@@ -445,12 +450,22 @@ export function findWeztermSocket(deps: SocketFinderDeps = {}): string | undefin
 }
 
 /** The socket of one GUI instance, when that GUI is alive and its socket
- *  file exists. */
-export function socketForGui(guiPid: number, deps: { dir?: string; exists?: (p: string) => boolean; alive?: (pid: number) => boolean } = {}): string | undefined {
-  const path = join(deps.dir ?? weztermSocketDir(), `gui-sock-${guiPid}`);
-  const exists = deps.exists ?? existsSync;
+ *  file is listed in the socket directory (a listing, not existsSync: see
+ *  findWeztermSocket, a live socket file cannot be stat'ed on Windows). */
+export function socketForGui(guiPid: number, deps: { dir?: string; list?: (dir: string) => string[]; alive?: (pid: number) => boolean } = {}): string | undefined {
+  const dir = deps.dir ?? weztermSocketDir();
+  const name = `gui-sock-${guiPid}`;
+  const list = deps.list ?? ((d: string) => { try { return readdirSync(d); } catch { return []; } });
   const alive = deps.alive ?? pidAlive;
-  return alive(guiPid) && exists(path) ? path : undefined;
+  return alive(guiPid) && list(dir).includes(name) ? join(dir, name) : undefined;
+}
+
+/** The server's socket, but only while its GUI is alive: a GUI that closed
+ *  is no "other instance" to compare against. */
+export function liveServerSocket(): string | undefined {
+  const s = weztermEnv.WEZTERM_UNIX_SOCKET;
+  const gui = socketGuiPid(s);
+  return gui === null || pidAlive(gui) ? s : undefined;
 }
 
 /** Environment for `wezterm cli` PROBES (list): WEZTERM_LOG=off, because

@@ -80,14 +80,20 @@ describe("b: the server's socket is a live GUI's, newest first, never a dead lef
     expect(findWeztermSocket(deps([]))).toBeUndefined();
   });
 
+  it("live sockets whose time cannot be read (Windows: stat fails with EACCES) are still candidates", () => {
+    const unreadable = { ...deps([22222]), mtimeMs: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } };
+    expect(findWeztermSocket(unreadable)).toBe(join(dir, "gui-sock-22222"));
+  });
+
   it("WEZTERM_UNIX_SOCKET still wins", () => {
     expect(findWeztermSocket({ ...deps([22222]), env: { WEZTERM_UNIX_SOCKET: "/x/sock" } })).toBe("/x/sock");
   });
 
   it("a GUI's own socket: only while that GUI is alive and its file exists", () => {
-    expect(socketForGui(60924, { dir, exists: () => true, alive: () => true })).toBe(join(dir, "gui-sock-60924"));
-    expect(socketForGui(60924, { dir, exists: () => true, alive: () => false })).toBeUndefined();
-    expect(socketForGui(60924, { dir, exists: () => false, alive: () => true })).toBeUndefined();
+    // Existence comes from the listing: a live socket cannot be stat'ed on Windows.
+    expect(socketForGui(60924, { dir, list: () => ["gui-sock-60924"], alive: () => true })).toBe(join(dir, "gui-sock-60924"));
+    expect(socketForGui(60924, { dir, list: () => ["gui-sock-60924"], alive: () => false })).toBeUndefined();
+    expect(socketForGui(60924, { dir, list: () => ["gui-sock-69000"], alive: () => true })).toBeUndefined();
     expect(socketGuiPid(join(dir, "gui-sock-69000"))).toBe(69000);
     expect(socketGuiPid("/x/sock")).toBeNull();
   });
