@@ -561,10 +561,18 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     // a newer join (gate round 2, finding 2).
     const release = await m.lockName(name);
     try {
+      // Written before the request (gate round 9, finding 2): whatever
+      // happens to the reply, a durable record says the home may hold it.
+      try {
+        m.noteMemberIntent(name, registration);
+      } catch (err) {
+        release();
+        return { ok: false, status: 503, error: (err as Error).message };
+      }
       const res = await c.register({ room: r.room, name, host: this.selfName, registration, terminalSummary, ...(t.role ? { role: t.role } : {}) });
       // Nothing is kept here yet: the join may still be superseded (gate
       // round 1, finding 3). The caller commits or abandons.
-      const out: RemoteRegistered = { ok: true, online: res.online ?? [], homeRegistration: res.registration, role: t.role, terminalSummary };
+      const out: RemoteRegistered = { ok: true, online: res.online ?? [], homeRegistration: res.registration, hostedRegistration: registration, role: t.role, terminalSummary };
       this.joinLocks.set(out, release);
       return out;
     } catch (err) {
@@ -581,6 +589,7 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     const m = this.mirror(convId);
     if (!m) return;
     m.setShadow(name, { homeRegistration: outcome.homeRegistration, role: outcome.role, terminalSummary: outcome.terminalSummary });
+    m.resolveMemberIntent(name, outcome.hostedRegistration, outcome.homeRegistration, true);
     this.joinLocks.get(outcome)?.();
     m.resumeAuthor(name);
   }
@@ -593,15 +602,18 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     // Still under this join's lock: the member captured here is the current one.
     const current = m.shadowsForRegister().find((s) => s.name === name);
     try {
+      // The abandoned registration is owed a release in any case (the home
+      // answers 404 once a newer registration replaced it).
+      m.resolveMemberIntent(name, outcome.hostedRegistration, outcome.homeRegistration, false);
       if (current) {
         // The newer join of this name is the member here: the home must
         // hold ITS registration, not the abandoned one (idempotent when it does).
+        m.noteMemberIntent(name, current.registration);
         const res = await c.register({ room: r.room, name, host: this.selfName, registration: current.registration, terminalSummary: current.terminalSummary, ...(current.role ? { role: current.role } : {}) });
         m.setShadow(name, { homeRegistration: res.registration, role: current.role, terminalSummary: current.terminalSummary });
-      } else {
-        // No member of that name here any more: remove what was registered.
-        await c.leave({ room: r.room, name, registration: outcome.homeRegistration });
+        m.resolveMemberIntent(name, current.registration, res.registration, true);
       }
+      await m.releaseMembers();
     } catch (err) {
       console.log(`  [link ${r.server}] could not restore ${name} in ${convId} after a superseded join: ${(err as Error).message}`);
     } finally {
