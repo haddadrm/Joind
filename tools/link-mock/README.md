@@ -70,6 +70,16 @@ printed on start. Open it in a browser. The web token is injected into
   `GET /api/conversations`, which now also carries `pending`.
   `GET /mock/touch-conversations` broadcasts `conversation-renamed`, which
   makes the page refetch it.
+- `GET /mock/silent-queue?text=...` queues an entry from the viewer in
+  `ramiy530:cpm-engine` with no event, so only a snapshot reveals it.
+- `GET /mock/next-send-echo?ms=6000` delays the `pending` event of the next
+  queued composer send, so for that long its 202 is the page's only news
+  of it.
+- Round 8 cases. Overlapping fetches: arm `slow-conversations`, touch, then
+  `silent-queue` P, then touch again. The newer fetch lands first with P,
+  and the older one lands later without it. The inverse uses `silent-drop`
+  between the two fetches. For a 202 after a fetch starts: arm
+  `next-send-echo` and `slow-conversations`, touch, then send.
 - `GET /mock/silent-drop?text=...` removes queued entries with that text on
   the mock with no event, as a control. The next snapshot must remove
   such an entry from the page.
@@ -165,6 +175,18 @@ can match these or tell the UI side to change them:
    reconciliation of the visible pending rows. Rows whose entry is gone are
    removed, except dispatched rows awaiting their real message, and rows
    for entries now visible are added.
+   **Overlapping fetches.** Each conversations fetch takes a number, and a
+   response is ignored once a newer fetch's response has been applied. It
+   is fetched with `cache: 'no-store'`. Chrome otherwise serializes
+   identical GETs behind its HTTP cache lock, so the responses could not
+   overtake each other at all in Chrome. The guard covers browsers and
+   proxies that do reorder them.
+   **Stamps for HTTP news.** Entries an HTTP snapshot lists are stamped
+   with the moment the snapshot is applied, so a snapshot of another kind
+   whose request started earlier cannot drop them. A 202 is still judged
+   stale against the moment its request started. Once it passes, it is
+   recorded with the moment it is applied, so a fetch that started before
+   the 202 landed cannot erase the acknowledged entry.
    **Generations.** A generation counter moves on every socket `init` and
    on every trim pass that evicts anything. The select response, the
    conversations fetch and the composer 202 note the generation when their
