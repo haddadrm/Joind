@@ -3008,3 +3008,140 @@ body {
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 14%, transparent);
 }
+
+/* ================================================================
+   LINKED SERVERS: remote channel groups, link state, queued messages.
+   Token-only colours, so any future theme block restyles them too.
+   ================================================================ */
+.remote-sections:empty { display: none; }
+.remote-section { margin-top: 6px; }
+.remote-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  user-select: none;
+}
+.remote-heading > i, .remote-heading > svg { flex-shrink: 0; }
+.remote-heading-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.link-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  white-space: nowrap;
+}
+.link-badge.up {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: var(--success-border);
+}
+.link-badge.down {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
+
+/* A down link greys its rooms; they stay clickable (the mirror is readable
+   and sends queue), so only the colour changes, never the pointer. */
+.conversation-item.remote.link-down { color: var(--text-muted); }
+.conversation-item.remote.link-down .conv-name { opacity: 0.7; }
+.conversation-item.remote.link-down .conv-count { background: var(--border-strong); }
+.conversation-item.remote.link-down.active { color: var(--text-bright); }
+.conversation-item.remote.link-down.active .conv-name { opacity: 1; }
+
+.conv-queued {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+/* Header suffix: "on <server>" plus the link badge */
+.remote-header-state { white-space: nowrap; }
+.remote-header-state .link-badge { vertical-align: 1px; }
+
+/* One-line composer hint while the active room's link is down */
+.link-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Undelivered (queued) messages */
+.message.pending { animation: none; }
+.message.pending .msg-avatar { opacity: 0.55; }
+.message.pending .msg-text-wrap { color: var(--text-dim); font-style: italic; }
+.message.pending.deleting { opacity: 0.4; }
+.pending-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  border: 1px dashed var(--warn-border);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  white-space: nowrap;
+}
+.message.pending.dispatched .pending-marker {
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+.pending-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-bright);
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  width: fit-content;
+  transition: color var(--dur-fast), background var(--dur-fast), border-color var(--dur-fast);
+}
+.pending-delete:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+.pending-delete:disabled { cursor: default; opacity: 0.6; }
+
+/* Long system lines (the link down and restored lines among them) wrap
+   inside the pane instead of overflowing it on narrow screens. */
+.message.system .msg-text-wrap { max-width: 100%; overflow-wrap: anywhere; }
+
+@media (max-width: 560px) {
+  .link-hint { font-size: 11px; white-space: normal; }
+}
