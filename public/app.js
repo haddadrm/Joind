@@ -269,6 +269,10 @@ function connect() {
             renderPendingForActive();
           }
           renderTaskBadgeFromCount(initTaskCount, initHasUrgent);
+          // Task ids are per room: a reconnect that lands in a room other
+          // than the one the task list belongs to must not keep its cards.
+          if (tasksConvId === null) tasksConvId = activeConversation.id;
+          else if (tasksConvId !== activeConversation.id) resetRoomTasks(activeConversation.id);
         } else {
           showNoConversation();
           renderTaskBadgeFromCount(0, false);
@@ -2407,6 +2411,8 @@ function selectConversation(id) {
   var meta = findConversationMeta(id);
   if (meta) {
     activeConversation = meta;
+    // The previous room's task cards go at once (task ids are per room)
+    resetRoomTasks(id);
     renderConversationList();
     renderDmList();
   }
@@ -2427,7 +2433,12 @@ function selectConversation(id) {
       if (mySelect !== convSelectSeq) return; // superseded by a newer selection
       // A reconnect during the request re-sent init for this same room: the
       // screen already holds newer messages and queue than this response.
-      if (initsAtStart !== socketInitCount && activeConversation && activeConversation.id === id) return;
+      // Only the snapshot is stale: room-scoped state that init does not
+      // reset (the task list and panel) still switches to this room.
+      if (initsAtStart !== socketInitCount && activeConversation && activeConversation.id === id) {
+        resetRoomTasks(id);
+        return;
+      }
       if (data.conversation) {
         activeConversation = data.conversation;
         if (Array.isArray(data.pending) && genAtStart === pendingGeneration) {
@@ -2441,9 +2452,7 @@ function selectConversation(id) {
         renderPills();
         renderChannelView();
         // Refresh tasks for the new conversation
-        tasks = [];
-        loadTaskCount(activeConversation.id);
-        if (taskPanelOpen) loadTasks(activeConversation.id);
+        resetRoomTasks(activeConversation.id);
       }
     });
 }
@@ -3751,10 +3760,29 @@ function renderTaskBadgeFromCount(count, hasUrgent) {
   badge.classList.toggle('has-urgent', hasUrgent);
 }
 
+// The room the `tasks` array and the task panel belong to. Task ids are per
+// room, so a card must never be answered against a different room.
+var tasksConvId = null;
+
+function taskRoomIsCurrent(convId) {
+  return !!(activeConversation && activeConversation.id === convId);
+}
+
+// Switch the task list, badge and open panel to this room: clear at once so
+// no card of the previous room stays clickable, then fetch.
+function resetRoomTasks(convId) {
+  tasks = [];
+  tasksConvId = convId;
+  if (taskPanelOpen) renderTaskPanel();
+  loadTaskCount(convId);
+  if (taskPanelOpen) loadTasks(convId);
+}
+
 function loadTaskCount(convId) {
   fetch('/api/tasks/count?conversation=' + encodeURIComponent(convId))
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (!taskRoomIsCurrent(convId)) return; // the room changed meanwhile
       renderTaskBadgeFromCount(data.count || 0, data.hasUrgent || false);
     })
     .catch(function() { /* leave badge as-is on failure */ });
@@ -3765,7 +3793,9 @@ function loadTasks(convId) {
   fetch('/api/tasks?conversation=' + encodeURIComponent(convId) + '&status=' + status)
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (!taskRoomIsCurrent(convId)) return; // the room changed meanwhile
       tasks = data || [];
+      tasksConvId = convId;
       renderTaskBadge();
       renderTaskPanel();
     });
@@ -3909,6 +3939,8 @@ function renderTaskCard(task) {
 
 function submitTaskResponse(taskId, response) {
   if (!activeConversation) return;
+  // A card from another room's list must not be answered here (ids are per room)
+  if (tasksConvId !== activeConversation.id) return;
   var text = (response || '').trim();
   if (!text) {
     // Focus the input to hint the user should type something

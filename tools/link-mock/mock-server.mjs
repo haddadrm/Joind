@@ -81,6 +81,16 @@ addMessage(HOME + ':cpm-engine', 'curzon', 'DM: I have the W14 inputs locally.',
 addMessage(HOME + ':scratch', 'codex', 'Scratch room on the home server.', { timestamp: now - 300000 });
 let active = HOME + ':cpm-engine';
 
+// Tasks per room. Ids are per room, so both rooms have a task #1: answering
+// one room's card against the other room is the gate's round 6 case.
+const tasksByConv = {};
+function task(id, title, description, creator) {
+  return { id, title, description, status: 'open', priority: 'normal', creator, assignee: 'human', createdAt: now - 900000 };
+}
+tasksByConv[conversations[0].id] = [task(1, 'general: approve the facade RFI', 'Room A task #1 (local room general).', 'claude')];
+tasksByConv[HOME + ':cpm-engine'] = [task(1, 'cpm-engine: confirm W14 window dates', 'Room B task #1 (remote room cpm-engine).', 'jadzia')];
+const taskUpdates = []; // { conversation, id, response } as the UI submitted them
+
 // ---------- WebSocket (RFC 6455, text frames only) ----------
 const sockets = new Set();
 // Added to Date.now() in init's serverNow; /mock/slow-next?then=reconnect-held
@@ -432,8 +442,24 @@ async function api(req, res, u) {
     return json(res, 200, { partners });
   }
   if (p === '/api/decisions') return json(res, 200, { decisions: [], for: viewer, state: 'open' });
-  if (p === '/api/tasks/count') return json(res, 200, { count: 0, hasUrgent: false });
-  if (p === '/api/tasks') return json(res, 200, []);
+  if (p === '/api/tasks/count') {
+    const list = tasksByConv[u.searchParams.get('conversation') || active] || [];
+    return json(res, 200, { count: list.filter((t) => t.status === 'open').length, hasUrgent: false });
+  }
+  if (p === '/api/tasks' && m === 'GET') {
+    const status = u.searchParams.get('status') || 'open';
+    const list = tasksByConv[u.searchParams.get('conversation') || active] || [];
+    return json(res, 200, status === 'all' ? list : list.filter((t) => t.status === status));
+  }
+  if (p === '/api/tasks/update') {
+    const b = await readBody(req);
+    taskUpdates.push({ conversation: b.conversation, id: b.id, response: b.response });
+    const t = (tasksByConv[b.conversation] || []).find((x) => x.id === b.id);
+    if (!t) return json(res, 404, { error: 'no such task in ' + b.conversation });
+    Object.assign(t, { status: b.status || t.status, response: b.response, respondedBy: b.respondedBy });
+    broadcast({ type: 'task-updated', conversationId: b.conversation, data: t });
+    return json(res, 200, t);
+  }
   if (p === '/api/templates' || p === '/api/sessions' || p === '/api/terminals' || p === '/api/crew' ||
       p === '/api/launcher/terminals' || p === '/api/harnesses') return json(res, 200, []);
   if (p === '/api/roles') return json(res, 200, { preset: [], custom: [] });
@@ -478,7 +504,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { armed: slowSelect });
   }
   if (u.pathname === '/mock/state') {
-    return json(res, 200, { viewer, active, links, pending, step: stepIndex, of: steps.length });
+    return json(res, 200, { viewer, active, links, pending, step: stepIndex, of: steps.length, taskUpdates });
   }
   if (u.pathname.startsWith('/api/')) return api(req, res, u);
   let rel = u.pathname === '/' ? '/index.html' : decodeURIComponent(u.pathname);
