@@ -100,6 +100,10 @@ export class LinkClient extends EventEmitter {
   private stopped = false;
   private discoverTimer: ReturnType<typeof setInterval> | null = null;
   private probing = false;
+  /** Bumped at every "down": a reply to a request that started before the
+   *  link went down does not prove it is back (a long-poll in flight at the
+   *  moment of the drop can still answer). */
+  private downEpoch = 0;
   private readonly onActive = (id: string): void => {
     const r = parseRemoteRoomId(id);
     if (r && r.server === this.name) this.ensureLoop(r.room);
@@ -205,8 +209,9 @@ export class LinkClient extends EventEmitter {
   // Link state
   // ---------------------------------------------------------------------
 
-  private markUp(): void {
+  private markUp(startedEpoch: number): void {
     if (this.state === "up") return;
+    if (this.state === "down" && startedEpoch !== this.downEpoch) return;
     const was = this.state;
     this.state = "up";
     this.since = Date.now();
@@ -218,6 +223,7 @@ export class LinkClient extends EventEmitter {
   /** The link failed under a request (any of ours). */
   markDown(reason: string): void {
     if (this.stopped || this.state === "down") return;
+    this.downEpoch++;
     this.state = "down";
     this.since = Date.now();
     console.log(`  [link ${this.name}] down: ${reason}`);
@@ -267,6 +273,7 @@ export class LinkClient extends EventEmitter {
 
   async discover(): Promise<void> {
     let r: PeerRoomsResult;
+    const epoch = this.downEpoch;
     try {
       r = await this.request<PeerRoomsResult>("GET", "/api/peer/rooms");
     } catch (err) {
@@ -277,8 +284,14 @@ export class LinkClient extends EventEmitter {
     for (const room of r.rooms ?? []) {
       if (typeof room.id !== "string" || room.id.includes(":")) continue;
       seen.add(room.id);
+      const isNew = !this.mirrors.has(room.id);
       const m = this.mirrorFor(room.id, room.name, room.createdAt, room.messageCount);
+      const renamed = !isNew && m.name !== room.name;
       m.name = room.name;
+      // The web UI refetches its room list on these (a room found or renamed
+      // by a later discovery shows up without a reconnect).
+      if (isNew) this.emit("rooms", { type: "conversation-created", data: { id: m.id, remote: true } });
+      else if (renamed) this.emit("rooms", { type: "conversation-renamed", data: { id: m.id, remote: true } });
       m.homeMessageCount = Math.max(m.homeMessageCount, room.messageCount ?? 0);
     }
     // A room gone from its home: drop the mirror unless someone is in it
@@ -288,8 +301,9 @@ export class LinkClient extends EventEmitter {
       this.loops.get(id)?.abort();
       this.mirrors.delete(id);
       this.opts.manager.unregisterRemoteRoom(m.id);
+      this.emit("rooms", { type: "conversation-deleted", data: { id: m.id, remote: true } });
     }
-    this.markUp();
+    this.markUp(epoch);
     const active = this.opts.manager.getActiveId();
     if (active) this.onActive(active);
   }
@@ -386,11 +400,12 @@ export class LinkClient extends EventEmitter {
     let filled = false;
     let cursor = this.readCursor(m.homeRoomId);
     while (!this.stopped && !ac.signal.aborted && this.matters(m)) {
+      const epoch = this.downEpoch;
       try {
         if (!filled) {
           cursor = await this.fill(m, ac.signal);
           filled = true;
-          this.markUp();
+          this.markUp(epoch);
         }
         const r = await this.request<PeerSubscribeResult>("GET", "/api/peer/subscribe", {
           query: { room: m.homeRoomId, since: String(cursor), viewers: m.viewerNames().join(","), timeoutMs: String(this.opts.pollTimeoutMs) },
@@ -398,7 +413,7 @@ export class LinkClient extends EventEmitter {
           signal: ac.signal,
         });
         if (ac.signal.aborted) break;
-        this.markUp();
+        this.markUp(epoch);
         if (r.reset) { filled = false; continue; }
         for (const ev of r.events ?? []) m.applyEvent(ev);
         if (typeof r.cursor === "number") { cursor = r.cursor; this.writeCursor(m.homeRoomId, cursor); }
@@ -423,9 +438,10 @@ export class LinkClient extends EventEmitter {
   // ---------------------------------------------------------------------
 
   private async call<T>(method: "GET" | "POST", path: string, body?: unknown, timeoutMs?: number): Promise<T> {
+    const epoch = this.downEpoch;
     try {
       const out = await this.request<T>(method, path, { body, timeoutMs });
-      this.markUp();
+      this.markUp(epoch);
       return out;
     } catch (err) {
       if (err instanceof LinkDownError) this.markDown(err.message);
@@ -439,8 +455,9 @@ export class LinkClient extends EventEmitter {
 
   async send(body: PeerSendBody): Promise<ChatMessage> {
     // No markDown here on failure: the mirror decides (it queues first).
+    const epoch = this.downEpoch;
     const r = await this.request<PeerSendResult>("POST", "/api/peer/send", { body });
-    this.markUp();
+    this.markUp(epoch);
     return r.message;
   }
 
@@ -478,6 +495,7 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
       const c = new LinkClient({ ...base, link });
       c.on("link", (info: LinkInfo) => this.emit("link", info));
       c.on("notice", (n: MirrorNotice) => this.emit("notice", n));
+      c.on("rooms", (e: { type: string; data: unknown }) => this.emit("rooms", e));
       this.clients.set(link.name, c);
     }
   }

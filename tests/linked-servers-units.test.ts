@@ -458,6 +458,31 @@ describe("LinkClient", () => {
     }
   });
 
+  it("a reply to a request that started before the link went down does not bring it back up", async () => {
+    const dir = tmp("joind-linkep-");
+    const manager = new ConversationManager(join(dir, "data"));
+    let release!: () => void;
+    let hold: Promise<void> | null = new Promise<void>((r) => { release = r; });
+    const fetchImpl: FetchLike = async () => {
+      if (hold) await hold;
+      return { status: 200, text: async () => JSON.stringify({ server: "y530", rooms: [] }) };
+    };
+    const c = new LinkClient({ link: { name: "y530", url: "http://127.0.0.1:1", token: "tok-12345678" }, selfName: "here", linksDir: join(dir, "links"), manager, fetchImpl, backoffMinMs: 60_000 });
+    try {
+      const old = c.discover();          // in flight
+      c.markDown("dropped");             // the link drops meanwhile
+      hold = null;
+      release();
+      await old;
+      expect(c.info().state).toBe("down");
+      await c.discover();                // a request started after the drop
+      expect(c.info().state).toBe("up");
+    } finally {
+      c.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the subscription cursor on disk", async () => {
     const dir = tmp("joind-linkcur-");
     const manager = new ConversationManager(join(dir, "data"));
