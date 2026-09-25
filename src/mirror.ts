@@ -55,6 +55,10 @@ export interface QueuedMessage extends PeerWriteOptions {
    *  Only the author's delete or a successful send removes an entry. */
   state?: "waiting" | "held";
   heldReason?: string;
+  /** Written by this server's web viewer before it was registered with the
+   *  home: the viewer is registered as this server's human when the link
+   *  allows, and the entry goes then (gate round 2, finding 8). */
+  asHuman?: boolean;
 }
 
 /** The pending payload the web UI receives. */
@@ -65,6 +69,11 @@ export interface PendingPayload {
   text: string;
   queuedAt: number;
   to?: string[];
+  /** "queued": goes when the link allows; "waiting": its author must be
+   *  registered with the home first; "held": the home refused it (`reason`),
+   *  it stays until its author deletes it (gate round 2, finding 7). */
+  state: "queued" | "waiting" | "held";
+  reason?: string;
 }
 
 /** What a mirror tells the server beside its room events. The envelope
@@ -169,6 +178,8 @@ interface ShadowInfo {
 }
 
 const LOCAL_LINES_KEPT = 50;
+/** The lock key of this server's human (a name cannot contain NUL). */
+export const HUMAN_LOCK = "\u0000human";
 const TOUCH_FORWARD_MS = 30_000;
 
 export class MirrorRoom extends ChatRoom {
@@ -192,6 +203,13 @@ export class MirrorRoom extends ChatRoom {
   private dispatching: string | null = null;
   private draining: Promise<number> | null = null;
   private lastTouchSent = new Map<string, number>();
+  private nameLocks = new Map<string, Promise<void>>();
+  /** A viewer that queued before it was registered here (finding 8). */
+  private humanWanted: string | null = null;
+  /** Order of insertion of each cached message: a snapshot requested at a
+   *  mark never removes what was inserted after it (finding 4). */
+  private insertSeq = 0;
+  private insertedAt = new Map<number, number>();
 
   constructor(opts: MirrorOptions) {
     super({});
@@ -205,6 +223,43 @@ export class MirrorRoom extends ChatRoom {
     this.transport = opts.transport;
     this.selfName = opts.selfName;
     this.queue = new UndeliveredQueue(opts.queueFile);
+    // After a restart the reasons of held entries are said again, and a
+    // viewer who queued before registering is registered when the link allows.
+    for (const e of this.queue.list()) {
+      if (e.state === "held") this.addLocalLine(this.refusalLine(e.sender, e.heldReason ?? "refused"));
+      if (e.asHuman && !this.humanWanted) this.humanWanted = e.sender;
+    }
+  }
+
+  private refusalLine(sender: string, reason: string): string {
+    return `A queued message from ${sender} was refused by ${this.server}: ${reason}. It stays queued until its author deletes it.`;
+  }
+
+  /**
+   * Serialize registration transitions of one name (a join's register then
+   * commit or abandon, recovery re-registration, a change of the human):
+   * a transition that awaited the home can never overwrite a newer one
+   * (gate round 2, finding 2). Resolves with the release; a holder that
+   * never releases is released after 30 s.
+   */
+  async lockName(name: string): Promise<() => void> {
+    const prev = this.nameLocks.get(name) ?? Promise.resolve();
+    let open!: () => void;
+    const mine = new Promise<void>((r) => { open = r; });
+    const chain = prev.then(() => mine);
+    this.nameLocks.set(name, chain);
+    await prev;
+    let done = false;
+    const release = (): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      open();
+      if (this.nameLocks.get(name) === chain) this.nameLocks.delete(name);
+    };
+    const timer = setTimeout(release, 30_000);
+    timer.unref?.();
+    return release;
   }
 
   // ---------------------------------------------------------------------
@@ -259,15 +314,23 @@ export class MirrorRoom extends ChatRoom {
    * open browsers and the bell see what arrived while the link was down
    * (finding 5). A first fill announces nothing: it is history, not news.
    */
-  fill(snap: PeerMessagesResult, announce = false): void {
+  fill(snap: PeerMessagesResult, announce = false, mark = Infinity): void {
     const incoming = snap.messages.filter((m) => typeof m.id === "number").sort((a, b) => a.id - b.id);
     const snapIds = new Set(incoming.map((m) => m.id));
     const floor = snap.complete === true ? -Infinity : incoming.length > 0 ? incoming[0].id : Infinity;
-    const gone = this.messages.filter((m) => m.id >= floor && !snapIds.has(m.id));
+    // Only what was here before the snapshot was requested (`mark`) can be
+    // judged gone by it: a message a send inserted meanwhile is newer than
+    // the snapshot (gate round 2, finding 4).
+    const isGone = (m: ChatMessage): boolean => m.id >= floor && !snapIds.has(m.id) && (this.insertedAt.get(m.id) ?? 0) <= mark;
+    const gone = this.messages.filter(isGone);
     const had = new Set(this.messages.map((m) => m.id));
     const byId = new Map<number, ChatMessage>();
-    for (const m of this.messages) if (!(m.id >= floor && !snapIds.has(m.id))) byId.set(m.id, m);
-    for (const m of incoming) byId.set(m.id, m);
+    for (const m of this.messages) if (!isGone(m)) byId.set(m.id, m);
+    for (const m of gone) this.insertedAt.delete(m.id);
+    for (const m of incoming) {
+      byId.set(m.id, m);
+      if (!this.insertedAt.has(m.id)) this.insertedAt.set(m.id, ++this.insertSeq);
+    }
     this.messages = [...byId.values()].sort((a, b) => a.id - b.id);
     this.roster = new Map(snap.members.map((a) => [a.name, a]));
     if (snap.name) this.name = snap.name;
@@ -278,8 +341,14 @@ export class MirrorRoom extends ChatRoom {
   }
 
   /** Insert a home message by id; false when it is already here. */
+  /** The insertion mark a snapshot request is judged against (finding 4). */
+  snapshotMark(): number {
+    return this.insertSeq;
+  }
+
   private insertMessage(m: ChatMessage): boolean {
     if (typeof m.id !== "number" || this.messages.some((x) => x.id === m.id)) return false;
+    this.insertedAt.set(m.id, ++this.insertSeq);
     const last = this.messages[this.messages.length - 1];
     if (!last || last.id < m.id) this.messages.push(m);
     else this.messages.splice(this.messages.findIndex((x) => x.id > m.id), 0, m);
@@ -383,6 +452,19 @@ export class MirrorRoom extends ChatRoom {
 
   setHuman(name: string, registration: string): void {
     this.human = { name, registration };
+    if (this.humanWanted === name) this.humanWanted = null;
+    // Its waiting messages go now, as for a member's commit (finding 6).
+    this.resumeAuthor(name);
+  }
+
+  humanRegistration(): { name: string; registration: string } | undefined {
+    return this.human ? { ...this.human } : undefined;
+  }
+
+  /** The viewer name to register as this server's human: the current one,
+   *  or one that queued before it was registered (finding 8). */
+  humanToRegister(): string | undefined {
+    return this.human?.name ?? this.humanWanted ?? undefined;
   }
 
   humanName(): string | undefined {
@@ -414,20 +496,36 @@ export class MirrorRoom extends ChatRoom {
   /** Register (again) every local member and the human with the home
    *  server: idempotent there, and needed after the home restarted. */
   async reregisterAll(): Promise<void> {
-    for (const s of this.shadowsForRegister()) {
+    for (const name of [...this.agents.keys()]) {
+      // Under the name's lock, and with the member as it is NOW: a join that
+      // committed meanwhile is never replaced by an older registration.
+      const release = await this.lockName(name);
       try {
-        const r = await this.transport.register({ room: this.homeRoomId, name: s.name, host: this.selfName, registration: s.registration, terminalSummary: s.terminalSummary, role: s.role });
-        this.shadows.set(s.name, { homeRegistration: r.registration, role: s.role, terminalSummary: s.terminalSummary });
+        const registration = this.registrationOf(name);
+        if (!this.agents.has(name) || !registration) continue;
+        const info = this.shadows.get(name);
+        const r = await this.transport.register({ room: this.homeRoomId, name, host: this.selfName, registration, terminalSummary: info?.terminalSummary, role: info?.role });
+        if (this.registrationOf(name) === registration) {
+          this.shadows.set(name, { homeRegistration: r.registration, role: info?.role, terminalSummary: info?.terminalSummary });
+        }
       } catch (err) {
         if (err instanceof LinkDownError) return;
-        console.log(`  [link ${this.server}] re-register ${s.name} in ${this.id} refused: ${(err as Error).message}`);
+        console.log(`  [link ${this.server}] re-register ${name} in ${this.id} refused: ${(err as Error).message}`);
+      } finally {
+        release();
       }
     }
-    if (this.human) {
+    const human = this.humanToRegister();
+    if (human) {
+      const release = await this.lockName(HUMAN_LOCK);
       try {
-        const r = await this.transport.register({ room: this.homeRoomId, name: this.human.name, host: this.selfName, registration: `human:${this.selfName}`, human: true });
-        this.human = { name: this.human.name, registration: r.registration };
-      } catch { /* retried at the next restore */ }
+        if (this.humanToRegister() === human) {
+          const r = await this.transport.register({ room: this.homeRoomId, name: human, host: this.selfName, registration: `human:${this.selfName}`, human: true });
+          this.setHuman(human, r.registration);
+        }
+      } catch { /* retried at the next restore */ } finally {
+        release();
+      }
     }
   }
 
@@ -529,8 +627,9 @@ export class MirrorRoom extends ChatRoom {
    * server refuses the message itself (for instance, the sender is not a
    * member there).
    */
-  async writeThrough(sender: string, text: string, opts: PeerWriteOptions = {}): Promise<WriteResult> {
-    if (!this.registrationFor(sender)) {
+  async writeThrough(sender: string, text: string, opts: PeerWriteOptions = {}, how: { asHuman?: boolean } = {}): Promise<WriteResult> {
+    const unregisteredViewer = !this.registrationFor(sender) && how.asHuman === true;
+    if (!this.registrationFor(sender) && !unregisteredViewer) {
       throw new PeerRefusedError(403, `${sender} is not registered in ${this.id}; join it first`, "not-registered");
     }
     const entry: QueuedMessage = {
@@ -540,6 +639,14 @@ export class MirrorRoom extends ChatRoom {
       ...(opts.askFor ? { askFor: opts.askFor } : {}),
       ...(opts.choices && opts.choices.length > 0 ? { choices: opts.choices } : {}),
     };
+    if (unregisteredViewer) {
+      // This server's own web viewer (authenticated here) writes before the
+      // home knows it: queued, waiting for its registration as this
+      // server's human, which the next restore (or open) makes.
+      this.humanWanted = sender;
+      this.enqueue({ ...entry, state: "waiting", asHuman: true });
+      return { status: "queued", clientId: entry.clientId, reason: `${sender} is not registered with ${this.server} yet; it goes once the link allows` };
+    }
     // Order is kept per author: queue behind this author's own older entries.
     if (!this.transport.isUp() || this.queue.list().some((e) => e.sender === sender)) {
       this.enqueue(entry);
@@ -561,11 +668,23 @@ export class MirrorRoom extends ChatRoom {
 
   private enqueue(entry: QueuedMessage): void {
     this.queue.add(entry);
-    this.notice({
-      type: "pending",
-      conversationId: this.id,
-      data: { conversationId: this.id, clientId: entry.clientId, sender: entry.sender, text: entry.text, queuedAt: entry.queuedAt, ...(entry.to ? { to: entry.to } : {}) },
-    });
+    this.noticePending(entry.clientId);
+  }
+
+  private payloadOf(e: QueuedMessage): PendingPayload {
+    return {
+      conversationId: this.id, clientId: e.clientId, sender: e.sender, text: e.text, queuedAt: e.queuedAt,
+      ...(e.to ? { to: e.to } : {}),
+      state: e.state ?? "queued",
+      ...(e.state === "held" && e.heldReason ? { reason: e.heldReason } : {}),
+      ...(e.state === "waiting" ? { reason: `waiting for ${e.sender} to be registered with ${this.server}` } : {}),
+    };
+  }
+
+  /** The pending event for an entry, again whenever its state changes. */
+  private noticePending(clientId: string): void {
+    const e = this.queue.get(clientId);
+    if (e) this.notice({ type: "pending", conversationId: this.id, data: this.payloadOf(e) });
   }
 
   /** Send one entry home; its registration is resolved now, not when queued
@@ -600,14 +719,14 @@ export class MirrorRoom extends ChatRoom {
   pendingFor(viewer: string | undefined): PendingPayload[] {
     return this.queue.list()
       .filter((e) => visibleToViewer({ id: 0, sender: e.sender, text: e.text, timestamp: e.queuedAt, ...(e.to ? { to: e.to } : {}) }, viewer))
-      .map((e) => ({ conversationId: this.id, clientId: e.clientId, sender: e.sender, text: e.text, queuedAt: e.queuedAt, ...(e.to ? { to: e.to } : {}) }));
+      .map((e) => this.payloadOf(e));
   }
 
   /** The author rejoined: its waiting messages may go now. */
   resumeAuthor(name: string): void {
     let any = false;
     for (const e of this.queue.list()) {
-      if (e.sender === name && e.state === "waiting") { this.queue.mark(e.clientId, undefined); any = true; }
+      if (e.sender === name && e.state === "waiting") { this.queue.mark(e.clientId, undefined); this.noticePending(e.clientId); any = true; }
     }
     if (any && this.transport.isUp()) void this.drain();
   }
@@ -635,7 +754,7 @@ export class MirrorRoom extends ChatRoom {
           // A waiting entry goes again once its author is registered here.
           if (blocked.has(e.sender) || e.state === "held" || (e.state === "waiting" && !this.registrationFor(e.sender))) { blocked.add(e.sender); continue; }
           if (!this.registrationFor(e.sender)) {
-            this.queue.mark(e.clientId, "waiting");
+            if (e.state !== "waiting") { this.queue.mark(e.clientId, "waiting"); this.noticePending(e.clientId); }
             blocked.add(e.sender);
             continue;
           }
@@ -657,9 +776,11 @@ export class MirrorRoom extends ChatRoom {
               // The home does not know the author (and re-registering did not
               // help): it waits for the author to rejoin.
               this.queue.mark(e.clientId, "waiting");
+              this.noticePending(e.clientId);
             } else {
               this.queue.mark(e.clientId, "held", (err as Error).message);
-              this.addLocalLine(`A queued message from ${e.sender} was refused by ${this.server}: ${(err as Error).message}. It stays queued until its author deletes it.`);
+              this.noticePending(e.clientId);
+              this.addLocalLine(this.refusalLine(e.sender, (err as Error).message));
             }
           } finally {
             this.dispatching = null;
@@ -681,6 +802,8 @@ export class MirrorRoom extends ChatRoom {
     if (this.dispatching === clientId) return { ok: false, status: 409, error: "That message is being sent right now" };
     this.queue.remove(clientId);
     this.notice({ type: "pending-deleted", conversationId: this.id, data: { conversationId: this.id, clientId } });
+    // It may have held up its author's later entries (gate round 2, finding 5).
+    if (this.transport.isUp() && this.queue.list().some((x) => x.sender === by)) void this.drain();
     return { ok: true };
   }
 

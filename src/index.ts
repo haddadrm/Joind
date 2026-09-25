@@ -723,11 +723,11 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
           replyTo: typeof replyTo === "number" ? replyTo : undefined,
           choices, to: Array.isArray(to) && to.length > 0 ? to : undefined,
           askFor: typeof askFor === "string" ? askFor : undefined,
-        });
+        }, { asHuman: true });
         if (r.status === "sent") {
           res.json({ id: r.message.id, sender: r.message.sender, text: r.message.text, choices: r.message.choices, ask: r.message.ask });
         } else {
-          res.status(202).json({ queued: true, pending: true, clientId: r.clientId, conversationId: room.id, reason: r.reason });
+          res.status(202).json({ queued: true, pending: room.pendingFor(viewer).find((p) => p.clientId === r.clientId) ?? true, clientId: r.clientId, conversationId: room.id, reason: r.reason });
         }
       } catch (err) {
         const status = err instanceof PeerRefusedError ? err.status : 502;
@@ -936,6 +936,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // is registered elsewhere too (gate round 3, finding 5).
     // The member's registration id names it, terminal or not (gate round 4,
     // finding 2: a terminal-less registration has nothing else to match).
+    // One owner per name (gate round 2, finding 1): the new name must not be
+    // a linked peer's here (its member or its human), and a peer's hosted
+    // member is renamed on its host, not here.
+    const owned = peerOwnerRefusal(room, convId, newName);
+    if (owned && oldName !== newName) { res.status(409).json(owned); return; }
+    const movedFrom = room.getAgent(oldName)?.host;
+    if (movedFrom) { res.status(409).json({ error: `${oldName} is hosted on ${movedFrom}; it is renamed there`, candidates: [{ conversation: convId, host: movedFrom }] }); return; }
     const registration = room.registrationOf(oldName);
     const bound = registration != null && manager.bindingsOf(oldName).some((e) => e.conversationId === convId && e.registration === registration);
     const agent = room.rename(oldName, newName);
@@ -1113,12 +1120,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       // link is down (gate round 1, finding 8).
       await linkRegistry.ensureHuman(room.id, viewer);
       try {
-        const r = await room.writeThrough(viewer, text, { to: [to], replyTo: safeReplyTo });
+        const r = await room.writeThrough(viewer, text, { to: [to], replyTo: safeReplyTo }, { asHuman: true });
         if (r.status === "sent") {
           const msg = r.message;
           res.json({ id: msg.id, conversationId: convId, sender: msg.sender, to: msg.to, text: msg.text, timestamp: msg.timestamp, replyTo: msg.replyTo });
         } else {
-          res.status(202).json({ queued: true, pending: true, clientId: r.clientId, conversationId: convId, reason: r.reason });
+          res.status(202).json({ queued: true, pending: room.pendingFor(viewer).find((p) => p.clientId === r.clientId) ?? true, clientId: r.clientId, conversationId: convId, reason: r.reason });
         }
       } catch (err) {
         res.status(err instanceof PeerRefusedError ? err.status : 502).json({ error: (err as Error).message });
