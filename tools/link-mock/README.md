@@ -30,13 +30,17 @@ printed on start. Open it in a browser. The web token is injected into
   4. `link` down, plus the local-only system line
   5. a `pending` from the viewer (it gets the Delete affordance)
   6. a `pending` from `curzon` (no Delete for the viewer)
-  7. `link` up, the queue drains (one entry message first, the next
+  7. a pending DM from the viewer to `curzon` (`to: ["curzon"]`): it shows
+     only in curzon's mailbox, never in the channel
+  8. `link` up, the queue drains (one entry message first, the next
      dispatched first, so both arrival orders are exercised), and the
      "restored" system line
 - REST: `/api/conversations` (with `links` and `remoteConversations`),
   `/api/conversations/select` (with the room's `pending`), `/api/send`
   (queues while the link is down), `/api/pending/delete` (author only, emits
-  `pending-deleted`), and plausible JSON for the other routes the UI calls.
+  `pending-deleted`), `/api/dms` (partners and threads across rooms, one
+  seeded DM from curzon), and plausible JSON for the other routes the UI
+  calls.
 - `GET /mock/state` shows the viewer, active room, link and queue.
 
 Screenshots go to `tools/link-mock/shots/` (gitignored).
@@ -71,9 +75,16 @@ can match these or tell the UI side to change them:
 6. **No room menu for remote rooms.** Star, rename and delete are left out
    for remote rooms (administration stays on the home server, per the spec's
    out-of-scope list).
-7. **`since`** may be epoch milliseconds or an ISO string.
-8. **Theme.** `public/style.css` has a single dark palette in `:root` and no
+7. **Queued DMs.** A `pending` payload may carry `to` (the server sends it
+   for DMs). The UI keeps it and applies the same view rule as a real
+   message: a queued DM renders only in the mailbox of its recipient (or of
+   the sender's partner), from any room, and never in the channel. A queued
+   channel message never renders in a mailbox. On dispatch the real DM
+   arrives through the mailbox branch of the `message` handler, which
+   settles the pending row the same way the channel branch does.
+8. **`since`** may be epoch milliseconds or an ISO string.
+9. **Theme.** `public/style.css` has a single dark palette in `:root` and no
    light block. The new styles use existing tokens only, so they follow any
    theme block added later. Light and dark screenshots are identical today.
-9. **Unrelated fix.** Long system lines (the link lines among them) now wrap
+10. **Unrelated fix.** Long system lines (the link lines among them) now wrap
    inside the message pane. Before this change they overflowed it at 400 px.
