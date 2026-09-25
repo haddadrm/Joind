@@ -366,6 +366,23 @@ function getRoom(manager: ConversationManager, extra: { sessionId?: string }, se
   return route;
 }
 
+/**
+ * Whether a departure may act on this registration of `name` in `room`: the
+ * registration must be the room's CURRENT member of that name (gate round 5).
+ * A registration id the caller named must be the member's own; any other
+ * departure must match the member when there is one. A binding whose member
+ * is already gone (timed out) may still be cleaned up, unless an id was named.
+ */
+export function departureIsCurrent(
+  room: { getAgent(name: string): unknown; registrationOf(name: string): string | undefined } | undefined,
+  name: string, entryRegistration: string | undefined, namedRegistration?: string,
+): boolean {
+  const memberRegistration = room?.getAgent(name) ? room.registrationOf(name) : undefined;
+  if (namedRegistration != null) return memberRegistration != null && memberRegistration === namedRegistration && entryRegistration === namedRegistration;
+  if (memberRegistration != null || room?.getAgent(name)) return memberRegistration === entryRegistration;
+  return true;
+}
+
 const registrationArg = z.string().optional().describe(
   "The registration id your join returned. Pass it when your name may be registered more than once, and after an MCP reconnect."
 );
@@ -697,9 +714,12 @@ export function registerTools(
         // another registration of the name is not this session's to remove.
         return { content: [{ type: "text" as const, text: `${name}: no registration of this session to leave (already left, or pass registration)` }] };
       }
-      // Exactly the registration it names: the room member when it is that
-      // registration's, and the one binding.
-      if (target.room.registrationOf(name) === target.entry.registration) target.room.leave(name);
+      // Exactly the registration it reaches, and only while it is the room's
+      // current member of that name (gate round 5).
+      if (!departureIsCurrent(target.room, name, target.entry.registration, registration)) {
+        return { content: [{ type: "text" as const, text: `${name}: that registration was superseded by a later join; nothing removed` }] };
+      }
+      if (target.room.getAgent(name)) target.room.leave(name);
       manager.unbindRegistration(name, target.entry.registration);
       return { content: [{ type: "text" as const, text: `${name} disconnected` }] };
     }

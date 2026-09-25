@@ -29,7 +29,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager, newRegistrationId, isTerminalLess } from "./manager.js";
 import { visibleToViewer, type ChatMessage } from "./room.js";
-import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin } from "./tools.js";
+import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
@@ -1707,10 +1707,17 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
       return;
     }
   }
-  manager.supersedeJoins(name);
   const room = convId ? manager.getRoom(convId) : undefined;
+  const entry = convId ? manager.bindingsOf(name).find((e) => e.conversationId === convId) : undefined;
+  if (convId && !departureIsCurrent(room, name, entry?.registration, registration)) {
+    // The registration is not the room's current member of that name (it was
+    // superseded by a later join): remove nothing (gate round 5).
+    res.status(404).json({ error: "No such registration for this name (already left, or rejoined with a new id)" });
+    return;
+  }
+  manager.supersedeJoins(name);
   if (room) room.leave(name);
-  if (convId) manager.unbindAgent(name, convId);
+  if (entry) manager.unbindRegistration(name, entry.registration);
   res.json({ ok: true });
 });
 

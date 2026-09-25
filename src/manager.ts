@@ -489,6 +489,12 @@ export class ConversationManager extends EventEmitter {
         orcaTerminal: orcaTerminal ?? undefined,
       });
     }
+    // One binding per (conversation, name): the one this join wrote. Any
+    // other binding of the name in this conversation was superseded by it
+    // (for instance a pid that rejoins a room another pid of the name held),
+    // so it is retired and its id resolves nothing from now on (gate round 5).
+    const kept = idx >= 0 ? entries[idx] : entries[entries.length - 1];
+    this.agentBindings.set(agentName, entries.filter((e) => e === kept || e.conversationId !== conversationId));
     return id;
   }
 
