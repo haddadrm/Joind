@@ -30,6 +30,7 @@ async function waitFor<T>(what: string, fn: () => T | undefined | false, ms = 3_
 /** A fake home of hosted members, over HTTP-shaped fetch. */
 function memberHome() {
   const members = new Map<string, string>();
+  const hostedOf = new Map<string, string>();
   const st = { down: false, n: 0 };
   const fetchImpl: FetchLike = async (url, init) => {
     if (st.down) throw new Error("connect ECONNREFUSED (test)");
@@ -39,11 +40,14 @@ function memberHome() {
     if (url.includes("/api/peer/register")) {
       const reg = `H${++st.n}`;
       members.set(body.name, reg);
+      hostedOf.set(body.name, body.registration);
       return ok({ ok: true, registration: reg, online: [] });
     }
     if (url.includes("/api/peer/leave")) {
-      if (members.get(body.name) !== body.registration) return { status: 404, text: async () => JSON.stringify({ error: "No such registration" }) };
+      const match = body.hostedRegistration ? hostedOf.get(body.name) === body.hostedRegistration : members.get(body.name) === body.registration;
+      if (!members.has(body.name) || !match) return { status: 404, text: async () => JSON.stringify({ error: "No such registration" }) };
       members.delete(body.name);
+      hostedOf.delete(body.name);
       return ok({ ok: true });
     }
     return ok({});
@@ -80,7 +84,7 @@ describe("gate round 8: member release debt", () => {
       expect(home.members.get("Curzon")).toBe("H1");
       home.st.down = true;
       m.leave("Curzon");                                  // the last member leaves while the home is unreachable
-      await waitFor("the debt on disk", () => existsSync(join(dir, "links", "home", "c-1.releases.json")));
+      await waitFor("the debt on disk", () => existsSync(join(dir, "links", "home", "c-1.members.json")));
       first.stop();                                       // this server restarts
       home.st.down = false;
       const second = registry(dir, home);
@@ -101,7 +105,7 @@ describe("gate round 8: member release debt", () => {
     try {
       const m = await joinCurzon(r);
       home.st.down = true;                                // the release will fail too
-      const tmp = join(dir, "links", "home", "c-1.releases.json.tmp");
+      const tmp = join(dir, "links", "home", "c-1.members.json.tmp");
       mkdirSync(tmp, { recursive: true });                // the atomic write fails
       expect(() => m.leave("Curzon")).toThrow(/could not be saved/);
       expect(m.getAgent("Curzon")).toBeDefined();
@@ -109,7 +113,7 @@ describe("gate round 8: member release debt", () => {
       rmSync(tmp, { recursive: true, force: true });
       m.leave("Curzon");
       expect(m.getAgent("Curzon")).toBeUndefined();
-      expect(JSON.parse(readFileSync(join(dir, "links", "home", "c-1.releases.json"), "utf-8"))).toMatchObject({ releases: [{ name: "Curzon", registration: "H1" }] });
+      expect(JSON.parse(readFileSync(join(dir, "links", "home", "c-1.members.json"), "utf-8"))).toMatchObject({ members: [{ name: "Curzon", live: null, releasesOwed: ["reg-local"] }] });
     } finally { r.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
