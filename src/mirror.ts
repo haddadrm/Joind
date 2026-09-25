@@ -281,14 +281,34 @@ export class MirrorRoom extends ChatRoom {
       const target = this.humanState.target();
       const stray = this.humanState.unconfirmed;
       if (stray && stray !== target) {
-        const r = await this.registerHuman(stray);
-        this.humanState.update((d) => { d.releasesOwed.push({ name: stray, registration: r }); d.unconfirmed = null; });
+        let r: string | null = null;
+        try {
+          r = await this.registerHuman(stray);
+        } catch (err) {
+          // The home says it does not hold the stray for us (gate round 5):
+          // nothing to release; clear it and go on to the chosen viewer.
+          if (!this.homeDoesNotHold(err)) throw err;
+        }
+        const learned = r;
+        this.humanState.update((d) => {
+          if (learned) d.releasesOwed.push({ name: stray, registration: learned });
+          d.unconfirmed = null;
+        });
         if (!(await this.releaseOwed())) return;
       }
       if (!target) return;
       const previous = this.humanState.current;
       if (previous?.name !== target) this.humanState.update((d) => { d.unconfirmed = target; });
-      const registration = await this.registerHuman(target);
+      let registration: string;
+      try {
+        registration = await this.registerHuman(target);
+      } catch (err) {
+        // Refused for good (the name is someone else's there): the home holds
+        // nothing for us under it. The choice stays; a later choice or
+        // recovery tries again. Link errors keep it unconfirmed.
+        if (this.homeDoesNotHold(err)) this.humanState.update((d) => { if (d.unconfirmed === target) d.unconfirmed = null; });
+        throw err;
+      }
       this.humanState.update((d) => {
         d.current = { name: target, registration };
         d.unconfirmed = null;
@@ -304,6 +324,16 @@ export class MirrorRoom extends ChatRoom {
     } finally {
       release();
     }
+  }
+
+  /** A definitive answer that the home holds no registration of ours for
+   *  the name: 404, or 409 whose candidates are not this server's. */
+  private homeDoesNotHold(err: unknown): boolean {
+    if (!(err instanceof PeerRefusedError)) return false;
+    if (err.status === 404) return true;
+    if (err.status !== 409) return false;
+    const candidates = (err.body as { candidates?: Array<{ host?: unknown }> } | undefined)?.candidates ?? [];
+    return !candidates.some((c) => c.host === this.selfName);
   }
 
   private async registerHuman(name: string): Promise<string> {
