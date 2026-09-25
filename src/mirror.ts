@@ -26,6 +26,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { dirname } from "path";
 import { ChatRoom, visibleToViewer, type Agent, type ChatMessage, type HostedWakeResult } from "./room.js";
 import { ensureDir } from "./persist.js";
+import { HumanState, HumanStateError, type HumanStateData } from "./human-state.js";
 import {
   LinkDownError, PeerRefusedError,
   type PeerActBody, type PeerAction, type PeerEvent, type PeerLeaveBody, type PeerMessagesResult,
@@ -195,7 +196,6 @@ export class MirrorRoom extends ChatRoom {
   private readonly selfName: string;
   private roster = new Map<string, Agent>();
   private shadows = new Map<string, ShadowInfo>();
-  private human: { name: string; registration: string } | null = null;
   private queue: UndeliveredQueue;
   private localLines: ChatMessage[] = [];
   private localSeq = 0;
@@ -204,13 +204,8 @@ export class MirrorRoom extends ChatRoom {
   private draining: Promise<number> | null = null;
   private lastTouchSent = new Map<string, number>();
   private nameLocks = new Map<string, Promise<void>>();
-  /** A viewer that queued before it was registered here (finding 8), or a
-   *  viewer change made while the link was down (gate round 3, finding 2). */
-  private humanWanted: string | null = null;
-  /** Former human registrations whose release the home has not confirmed
-   *  (gate round 3, finding 1). Persisted with the human state. */
-  private pendingReleases: Array<{ name: string; registration: string }> = [];
-  private readonly humanFile: string | null;
+  /** This server's human in this room: the write-ahead record (gate round 4). */
+  private readonly humanState: HumanState;
   /** Another drain pass is owed (an entry was unblocked mid-drain; gate
    *  round 3, finding 3). */
   private rerunDrain = false;
@@ -231,75 +226,79 @@ export class MirrorRoom extends ChatRoom {
     this.transport = opts.transport;
     this.selfName = opts.selfName;
     this.queue = new UndeliveredQueue(opts.queueFile);
-    this.humanFile = opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") + ".human.json" : null;
-    this.loadHumanState();
-    // After a restart the reasons of held entries are said again, and a
-    // viewer who queued before registering is registered when the link allows.
+    this.humanState = new HumanState(opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") + ".human.json" : null);
+    // After a restart the reasons of held entries are said again. The viewer
+    // is never inferred from the queue: the human record alone says who it
+    // is (gate round 4, finding 2).
     for (const e of this.queue.list()) {
       if (e.state === "held") this.addLocalLine(this.refusalLine(e.sender, e.heldReason ?? "refused"));
-      if (e.asHuman && !this.humanWanted) this.humanWanted = e.sender;
     }
   }
 
-  /** The human's state survives a restart: who is registered, who is
-   *  wanted, and which former registrations still owe a release. */
-  private loadHumanState(): void {
-    if (!this.humanFile || !existsSync(this.humanFile)) return;
-    try {
-      const raw = JSON.parse(readFileSync(this.humanFile, "utf-8")) as {
-        human?: { name?: unknown; registration?: unknown } | null; wanted?: unknown; releases?: Array<{ name?: unknown; registration?: unknown }>;
-      };
-      if (raw.human && typeof raw.human.name === "string" && typeof raw.human.registration === "string") this.human = { name: raw.human.name, registration: raw.human.registration };
-      if (typeof raw.wanted === "string") this.humanWanted = raw.wanted;
-      for (const r of raw.releases ?? []) if (typeof r.name === "string" && typeof r.registration === "string") this.pendingReleases.push({ name: r.name, registration: r.registration });
-    } catch { /* a torn file: start clean */ }
-  }
-
-  private saveHumanState(): void {
-    if (!this.humanFile) return;
-    try {
-      ensureDir(dirname(this.humanFile));
-      const tmp = `${this.humanFile}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ human: this.human, wanted: this.humanWanted, releases: this.pendingReleases }), "utf-8");
-      renameSync(tmp, this.humanFile);
-    } catch { /* kept in memory for this run */ }
+  /** The human record as it stands (for tests and diagnostics). */
+  humanRecord(): HumanStateData {
+    return this.humanState.snapshot();
   }
 
   /** Former human registrations still to release at the home. */
   pendingHumanReleases(): Array<{ name: string; registration: string }> {
-    return this.pendingReleases.map((r) => ({ ...r }));
+    return this.humanState.releasesOwed;
   }
 
   /**
-   * Bring the home's view of this server's human in line, under the human's
-   * lock, in this order (gate round 3, findings 1 and 2):
-   *   1. release every former registration still owed (kept until the home
-   *      confirms, or says it is gone);
-   *   2. register the wanted viewer (`want`, else a viewer change recorded
-   *      offline, else the current one again, since the home may have
-   *      restarted), and queue the former one's release when it changed;
-   *   3. resume the registered viewer's waiting messages.
-   * A link failure stops the transition; everything owed stays recorded.
+   * Record the viewer's latest explicit choice without contacting the home
+   * (a choice of the current registration cancels a pending change). Throws
+   * HumanStateError when the record cannot be written.
+   */
+  chooseHuman(want: string): void {
+    if (this.humanState.wanted === want) return;
+    this.humanState.update((d) => { d.wanted = want; });
+  }
+
+  /**
+   * Bring the home in line with the human record, under the human's lock.
+   * Each step is written before it is made and after it is confirmed:
+   *   1. `want`, when given, is recorded first (the latest choice);
+   *   2. owed releases are made; a debt is cleared only when the release
+   *      succeeds or the home says the registration is absent (404);
+   *   3. an unconfirmed registration that is not the target (a reply was
+   *      lost, then the viewer changed its mind) is registered again, which
+   *      is idempotent there, to learn its id, and released;
+   *   4. the target (the choice, else the current viewer, again after a
+   *      home restart) is registered: recorded as unconfirmed first, then as
+   *      current, the former viewer's release recorded as owed;
+   *   5. owed releases again, then the viewer's waiting messages resume.
+   * Offline, only step 1 happens. A link failure stops at the step it hit;
+   * everything owed stays recorded. A record that cannot be written throws
+   * HumanStateError before the next remote call.
    */
   async settleHuman(want?: string): Promise<void> {
     const release = await this.lockName(HUMAN_LOCK);
     try {
-      if (!this.transport.isUp()) {
-        if (want && want !== this.human?.name) { this.humanWanted = want; this.saveHumanState(); }
-        return;
-      }
+      if (want) this.chooseHuman(want);
+      if (!this.transport.isUp()) return;
       if (!(await this.releaseOwed())) return;
-      const target = want ?? this.humanWanted ?? this.human?.name;
+      const target = this.humanState.target();
+      const stray = this.humanState.unconfirmed;
+      if (stray && stray !== target) {
+        const r = await this.registerHuman(stray);
+        this.humanState.update((d) => { d.releasesOwed.push({ name: stray, registration: r }); d.unconfirmed = null; });
+        if (!(await this.releaseOwed())) return;
+      }
       if (!target) return;
-      const previous = this.human;
-      const r = await this.transport.register({ room: this.homeRoomId, name: target, host: this.selfName, registration: `human:${this.selfName}`, human: true });
-      this.human = { name: target, registration: r.registration };
-      if (this.humanWanted === target) this.humanWanted = null;
-      if (previous && previous.name !== target) this.pendingReleases.push(previous);
-      this.saveHumanState();
+      const previous = this.humanState.current;
+      if (previous?.name !== target) this.humanState.update((d) => { d.unconfirmed = target; });
+      const registration = await this.registerHuman(target);
+      this.humanState.update((d) => {
+        d.current = { name: target, registration };
+        d.unconfirmed = null;
+        if (d.wanted === target) d.wanted = null;
+        if (previous && previous.name !== target) d.releasesOwed.push(previous);
+      });
       await this.releaseOwed();
       this.resumeAuthor(target);
     } catch (err) {
+      if (err instanceof HumanStateError) throw err;
       if (err instanceof LinkDownError) this.transport.failed(err.message);
       else console.log(`  [link ${this.server}] human registration in ${this.id} refused: ${(err as Error).message}`);
     } finally {
@@ -307,20 +306,28 @@ export class MirrorRoom extends ChatRoom {
     }
   }
 
-  /** Release owed former registrations; false when the link failed. */
+  private async registerHuman(name: string): Promise<string> {
+    const r = await this.transport.register({ room: this.homeRoomId, name, host: this.selfName, registration: `human:${this.selfName}`, human: true });
+    return r.registration;
+  }
+
+  /** Make every owed release; false when one could not be made now. */
   private async releaseOwed(): Promise<boolean> {
-    while (this.pendingReleases.length > 0) {
-      const r = this.pendingReleases[0];
+    for (;;) {
+      const r = this.humanState.releasesOwed[0];
+      if (!r) return true;
       try {
         await this.transport.leave({ room: this.homeRoomId, name: r.name, registration: r.registration });
       } catch (err) {
         if (err instanceof LinkDownError) { this.transport.failed(err.message); return false; }
-        // Refused (already gone there): nothing left to release.
+        // Only a confirmed absence settles the debt (gate round 4, finding 6).
+        if (!(err instanceof PeerRefusedError && err.status === 404)) {
+          console.log(`  [link ${this.server}] release of ${r.name} in ${this.id} refused (${(err as Error).message}); kept for the next recovery`);
+          return false;
+        }
       }
-      this.pendingReleases.shift();
-      this.saveHumanState();
+      this.humanState.update((d) => { d.releasesOwed = d.releasesOwed.filter((x) => !(x.name === r.name && x.registration === r.registration)); });
     }
-    return true;
   }
 
   private refusalLine(sender: string, reason: string): string {
@@ -543,36 +550,39 @@ export class MirrorRoom extends ChatRoom {
   }
 
   setHuman(name: string, registration: string): void {
-    this.human = { name, registration };
-    if (this.humanWanted === name) this.humanWanted = null;
-    this.saveHumanState();
+    this.humanState.update((d) => {
+      d.current = { name, registration };
+      if (d.wanted === name) d.wanted = null;
+      if (d.unconfirmed === name) d.unconfirmed = null;
+    });
     // Its waiting messages go now, as for a member's commit (finding 6).
     this.resumeAuthor(name);
   }
 
   humanRegistration(): { name: string; registration: string } | undefined {
-    return this.human ? { ...this.human } : undefined;
+    return this.humanState.current ?? undefined;
   }
 
   /** The viewer name to register as this server's human: the current one,
    *  or one that queued before it was registered (finding 8). */
   humanToRegister(): string | undefined {
-    return this.humanWanted ?? this.human?.name ?? undefined;
+    return this.humanState.target() ?? undefined;
   }
 
-  /** Whether the human's state owes the home anything (a release, a change). */
+  /** Whether the human's record owes the home anything (a release, a change). */
   humanOwes(): boolean {
-    return this.pendingReleases.length > 0 || this.humanWanted != null;
+    return this.humanState.owes();
   }
 
   humanName(): string | undefined {
-    return this.human?.name;
+    return this.humanState.current?.name;
   }
 
   /** The names whose view of the room this server mirrors (DM visibility). */
   viewerNames(): string[] {
     const names = [...this.agents.keys()];
-    if (this.human && !names.includes(this.human.name)) names.push(this.human.name);
+    const human = this.humanState.current;
+    if (human && !names.includes(human.name)) names.push(human.name);
     return names.sort();
   }
 
@@ -613,7 +623,9 @@ export class MirrorRoom extends ChatRoom {
         release();
       }
     }
-    if (this.humanToRegister() || this.pendingReleases.length > 0) await this.settleHuman();
+    if (this.humanToRegister() || this.humanOwes()) {
+      await this.settleHuman().catch((err: unknown) => console.log(`  [link ${this.server}] ${(err as Error).message}`));
+    }
   }
 
   override leave(name: string, reason: "deliberate" | "timeout" = "deliberate"): void {
@@ -631,7 +643,8 @@ export class MirrorRoom extends ChatRoom {
 
   private registrationFor(sender: string): string | undefined {
     if (this.agents.has(sender)) return this.shadows.get(sender)?.homeRegistration;
-    if (this.human?.name === sender) return this.human.registration;
+    const human = this.humanState.current;
+    if (human?.name === sender) return human.registration;
     return undefined;
   }
 
@@ -730,8 +743,8 @@ export class MirrorRoom extends ChatRoom {
       // This server's own web viewer (authenticated here) writes before the
       // home knows it: queued, waiting for its registration as this
       // server's human, which the next restore (or open) makes.
-      this.humanWanted = sender;
-      this.saveHumanState();
+      // The choice is recorded first; if it cannot be, nothing is queued.
+      this.chooseHuman(sender);
       this.enqueue({ ...entry, state: "waiting", asHuman: true });
       return { status: "queued", clientId: entry.clientId, reason: `${sender} is not registered with ${this.server} yet; it goes once the link allows` };
     }
@@ -886,7 +899,15 @@ export class MirrorRoom extends ChatRoom {
       }
       return sent;
     };
-    const p = run().finally(() => { this.draining = null; });
+    const p = run().finally(() => {
+      this.draining = null;
+      // A rerun requested after the loop's last check but before this
+      // cleanup (gate round 4, finding 4) is serviced now.
+      if (this.rerunDrain && this.transport.isUp() && !this.destroyed) {
+        this.rerunDrain = false;
+        void this.drain();
+      }
+    });
     this.draining = p;
     return p;
   }
