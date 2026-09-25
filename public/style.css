@@ -3138,6 +3138,40 @@ body {
 }
 .pending-delete:disabled { cursor: default; opacity: 0.6; }
 
+/* Pending states: queued (amber, the default above), waiting for the
+   author's home registration (muted), held by the home server (danger,
+   with the reason on its own line). */
+.message.pending-waiting .pending-marker {
+  color: var(--text-dim);
+  border-color: var(--border-strong);
+  border-style: dotted;
+}
+.message.pending-held .pending-marker {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-style: solid;
+  border-color: var(--danger-border);
+}
+.pending-reason {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+/* One-line error when a composer send failed; the text stays in the box */
+.composer-error {
+  margin: 0 0 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 /* Long system lines (the link down and restored lines among them) wrap
    inside the pane instead of overflowing it on narrow screens. */
 .message.system .msg-text-wrap { max-width: 100%; overflow-wrap: anywhere; }

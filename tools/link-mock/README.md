@@ -32,15 +32,22 @@ printed on start. Open it in a browser. The web token is injected into
   6. a `pending` from `curzon` (no Delete for the viewer)
   7. a pending DM from the viewer to `curzon` (`to: ["curzon"]`): it shows
      only in curzon's mailbox, never in the channel
-  8. `link` up, the queue drains (one entry message first, the next
+  8. a `waiting` entry (author not yet registered at home) and a `held`
+     entry with its `reason`
+  9. `link` up: the waiting entry is re-emitted as plain queued, and every
+     entry except the held one drains the queue drains (one entry message first, the next
      dispatched first, so both arrival orders are exercised), and the
      "restored" system line
 - REST: `/api/conversations` (with `links` and `remoteConversations`),
-  `/api/conversations/select` (with the room's `pending`), `/api/send`
-  (queues while the link is down), `/api/pending/delete` (author only, emits
+  `/api/conversations/select` (with the room's `pending`), `/api/send` and
+  `/api/dm/send` (while the link is down they answer 202 with the entry in
+  `pending`, and the `pending` event follows 200 ms later), `/api/pending/delete` (author only, emits
   `pending-deleted`), `/api/dms` (partners and threads across rooms, one
   seeded DM from curzon), and plausible JSON for the other routes the UI
   calls.
+- `GET /mock/fail-next?status=403&error=...` makes the next composer send
+  fail with that status and `{ error }` body (default 403, "viewer is not
+  registered with ramiy530 yet").
 - `GET /mock/state` shows the viewer, active room, link and queue.
 
 Screenshots go to `tools/link-mock/shots/` (gitignored).
@@ -82,9 +89,25 @@ can match these or tell the UI side to change them:
    channel message never renders in a mailbox. On dispatch the real DM
    arrives through the mailbox branch of the `message` handler, which
    settles the pending row the same way the channel branch does.
-8. **`since`** may be epoch milliseconds or an ISO string.
-9. **Theme.** `public/style.css` has a single dark palette in `:root` and no
+8. **Composer sends.** Channel and DM sends clear the composer only on a
+   2xx (200 sent, 202 queued). On any failure the text, reply target and
+   image stay, and a one-line error shows the response's `error` (or the
+   HTTP status, or "the server could not be reached"). The error clears on
+   the next keystroke, a successful send, or a view change. One send is in
+   flight at a time. On 202 the UI renders the entry from the response
+   (`pending` as an object: `clientId`, `sender`, `text`, `queuedAt`, `to`,
+   `state`, `reason`; missing fields fall back to the top-level `clientId`,
+   `conversationId`, `state`, `reason` and the sent payload), and the later
+   `pending` event is deduplicated by `clientId`.
+9. **Pending states.** An entry's `state` is absent (queued: amber "queued,
+   not delivered"), `waiting` (muted "waiting to register at home") or
+   `held` (danger "held, not delivered" with a "Held: <reason>" line). The
+   reason is read from `reason`, or `heldReason` as a fallback. A repeat
+   `pending` event for a known `clientId` updates its state in place. The
+   author can delete an entry in any of the three states.
+10. **`since`** may be epoch milliseconds or an ISO string.
+11. **Theme.** `public/style.css` has a single dark palette in `:root` and no
    light block. The new styles use existing tokens only, so they follow any
    theme block added later. Light and dark screenshots are identical today.
-10. **Unrelated fix.** Long system lines (the link lines among them) now wrap
+12. **Unrelated fix.** Long system lines (the link lines among them) now wrap
    inside the message pane. Before this change they overflowed it at 400 px.

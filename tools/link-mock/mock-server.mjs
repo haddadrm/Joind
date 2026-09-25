@@ -205,12 +205,26 @@ function localSystem(conv, text) {
   const msg = addMessage(conv, 'system', text);
   broadcast({ type: 'message', conversationId: conv, data: msg });
 }
-function queue(conv, sender, text, to) {
+// opts: { to, state: 'waiting' | 'held', reason, echoDelayMs }
+function queue(conv, sender, text, opts) {
+  const o = opts || {};
   const p = { clientId: crypto.randomUUID(), sender, text, queuedAt: Date.now() };
-  if (to && to.length) p.to = to; // a queued DM
+  if (o.to && o.to.length) p.to = o.to; // a queued DM
+  if (o.state) p.state = o.state;
+  if (o.reason) p.reason = o.reason;
   (pending[conv] ||= []).push(p);
-  broadcast({ type: 'pending', conversationId: conv, data: Object.assign({ conversationId: conv }, p) });
+  const ev = { type: 'pending', conversationId: conv, data: Object.assign({ conversationId: conv }, p) };
+  // A composer send gets its entry in the 202 first; the event follows and
+  // must be deduplicated by the UI.
+  if (o.echoDelayMs) setTimeout(() => broadcast(ev), o.echoDelayMs);
+  else broadcast(ev);
   return p;
+}
+// Re-emit an entry with a new state, as the server does on a state change
+function restate(conv, p, state, reason) {
+  if (state) p.state = state; else delete p.state;
+  if (reason) p.reason = reason; else delete p.reason;
+  broadcast({ type: 'pending', conversationId: conv, data: Object.assign({ conversationId: conv }, p) });
 }
 // Dispatch one queued entry. messageFirst flips the arrival order so the UI
 // is exercised both ways (the contract does not fix the order).
@@ -228,6 +242,8 @@ function fmt(ts) {
 
 const ROOM = HOME + ':cpm-engine';
 let flying = null; // the one message queued while the link is up
+let waitingEntry = null; // turns back into an ordinary queued entry on restore
+let failNext = null; // { status, error } for the next composer send
 const steps = [
   ['mirrored message', () => mirroredMessage(ROOM, 'jadzia', '@curzon the window 14 run finished. Critical path moved to the facade package.')],
   ['pending from the viewer (link up)', () => { flying = queue(ROOM, viewer, 'On it, reading the facade fragnet now.'); }],
@@ -238,9 +254,14 @@ const steps = [
   }],
   ['pending while down (viewer)', () => { queue(ROOM, viewer, 'Queued while the Y530 is away: the facade float is 12 days.'); }],
   ['pending while down (curzon, no delete for the viewer)', () => { queue(ROOM, 'curzon', 'Agree, and the MEP fragnet carries it.'); }],
-  ['pending DM from the viewer to curzon while down (mailbox only)', () => { queue(ROOM, viewer, 'Private: can you rerun W14 with the revised facade durations?', ['curzon']); }],
-  ['link up and drain', () => {
-    const q = (pending[ROOM] || []).slice();
+  ['pending DM from the viewer to curzon while down (mailbox only)', () => { queue(ROOM, viewer, 'Private: can you rerun W14 with the revised facade durations?', { to: ['curzon'] }); }],
+  ['a waiting entry (author not yet registered at home) and a held entry', () => {
+    waitingEntry = queue(ROOM, viewer, 'Posted before my home registration existed.', { state: 'waiting' });
+    queue(ROOM, viewer, 'Refused by the home server.', { state: 'held', reason: 'name human is registered on ramiy530 from another host' });
+  }],
+  ['link up and drain (held entries stay held)', () => {
+    if (waitingEntry) { restate(ROOM, waitingEntry, undefined, undefined); waitingEntry = null; }
+    const q = (pending[ROOM] || []).filter((p) => p.state !== 'held');
     linkEvent('up');
     q.forEach((p, i) => dispatch(ROOM, p, i % 2 === 1));
     localSystem(ROOM, 'link to ' + HOME + ' restored; ' + q.length + ' queued messages sent');
@@ -306,15 +327,27 @@ async function api(req, res, u) {
       pending: (pending[active] || []).map((x) => Object.assign({ conversationId: active }, x)),
     });
   }
-  if (p === '/api/send') {
+  if (p === '/api/send' || p === '/api/dm/send') {
     const b = await readBody(req);
-    if (!b.sender || !b.text) return json(res, 400, { error: 'sender and text required' });
-    if (isRemote(active) && links[0].state !== 'up') {
-      const q = queue(active, b.sender, b.text);
-      return json(res, 200, { queued: true, clientId: q.clientId });
+    if (failNext) {
+      const f = failNext;
+      failNext = null;
+      return json(res, f.status, { error: f.error });
     }
-    const msg = mirroredMessage(active, b.sender, b.text);
-    return json(res, 200, { id: msg.id, sender: msg.sender, text: msg.text });
+    const isDm = p === '/api/dm/send';
+    const sender = isDm ? viewer : b.sender;
+    if (!sender || !b.text) return json(res, 400, { error: 'sender and text required' });
+    const to = isDm ? (Array.isArray(b.to) ? b.to : [b.to]) : undefined;
+    // A DM routes to the room of the pair's last DM; the mock uses the remote room
+    const conv = isDm ? ROOM : active;
+    if (isRemote(conv) && links[0].state !== 'up') {
+      const q = queue(conv, sender, b.text, { to, echoDelayMs: 200 });
+      return json(res, 202, { queued: true, clientId: q.clientId, conversationId: conv,
+        reason: 'link to ' + HOME + ' is down', pending: Object.assign({ conversationId: conv }, q) });
+    }
+    const msg = addMessage(conv, sender, b.text, to ? { to } : undefined);
+    broadcast({ type: 'message', conversationId: conv, data: msg });
+    return json(res, 200, { id: msg.id, conversationId: conv, sender: msg.sender, text: msg.text, to: msg.to });
   }
   if (p === '/api/pending/delete') {
     const b = await readBody(req);
@@ -357,6 +390,12 @@ const server = http.createServer(async (req, res) => {
   if (u.pathname === '/mock/advance') {
     const label = runStep();
     return json(res, 200, { step: stepIndex, of: steps.length, label });
+  }
+  if (u.pathname === '/mock/fail-next') {
+    // The next composer send fails with this status and error body
+    failNext = { status: Number(u.searchParams.get('status') ?? 403),
+      error: u.searchParams.get('error') ?? 'viewer is not registered with ' + HOME + ' yet' };
+    return json(res, 200, { armed: failNext });
   }
   if (u.pathname === '/mock/state') {
     return json(res, 200, { viewer, active, links, pending, step: stepIndex, of: steps.length });
