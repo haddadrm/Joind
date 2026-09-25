@@ -717,6 +717,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       // the link is down it is queued (202) and shown as pending.
       const viewer = webViewer();
       if (!viewer || sender !== viewer) { res.status(403).json({ error: "In a remote room you can send only as the registered viewer" }); return; }
+      // Not carried across a link yet: refused before anything is queued or
+      // reported sent (gate round 7, finding 2).
+      if (image) { res.status(400).json({ error: "Attachments are not supported in remote rooms" }); return; }
       await linkRegistry.ensureHuman(room.id, viewer);
       try {
         const r = await room.writeThrough(viewer, text, {
@@ -1114,6 +1117,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       typeof replyTo === "number" && replyConversationId === convId && room.getMessageById(replyTo)
         ? replyTo
         : undefined;
+    if (room instanceof MirrorRoom && typeof image === "string" && image) {
+      // Not carried across a link yet (gate round 7, finding 2).
+      res.status(400).json({ error: "Attachments are not supported in remote rooms" }); return;
+    }
     if (room instanceof MirrorRoom) {
       // A DM routed into a remote room goes to its home server as this
       // server's human (registered there when needed), and queues while the
@@ -1466,11 +1473,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (linkRegistry.isRemoteId(id)) await linkRegistry.prepare(id);
     const ok = manager.setActive(id);
     if (!ok) { res.status(404).json({ error: "Conversation not found" }); return; }
-    const room = manager.getActiveRoom();
+    // The room THIS request selected, not the active pointer: another
+    // selection may land while open() waits (gate round 7, finding 3).
+    const room = manager.getRoom(id);
     // A remote room: fill it now (bounded) and subscribe while it is open.
     if (room instanceof MirrorRoom) await linkRegistry.open(room.id, webViewer());
     res.json({
-      conversation: manager.getActiveMeta(),
+      conversation: room instanceof MirrorRoom ? room.meta() : manager.getMeta(id) ?? null,
       // Viewer is the registered web name, never the request (fails closed).
       messages: room ? viewMessages(room, 100, webViewer()) : [],
       agents: room?.who() ?? [],

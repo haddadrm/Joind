@@ -75,7 +75,14 @@ A Joind server can now link to peer servers, mirror their rooms, and host member
 - **Only a well-formed 409 is definitive.** A 409 clears a stray only when its candidates are a nonempty array, every entry has a nonempty host string, and none is this server. Missing, null, empty, non-array, `[null]`, `[{}]`, and entries without a valid host prove nothing: the stray is kept and retried later, as after a link error (no swallowed TypeError).
 - 1 test in `tests/linked-servers-gate5.test.ts` over eleven candidate shapes (including a candidate naming this server), failing on 9365651. Suite 406.
 
+### Codex gate round 7 (3 Medium on the server side, closed)
+- **A departure is serialized with registration.** The home side of a local member's leave now waits for the name's lock, so a registration in flight (a recovery after a home restart, a join) finishes first and the registration the home ends up holding is the one released. A reply that arrives for a member that already left becomes a release debt. Member release debts are cleared only when the home confirms (success, or 404), are saved beside the queue as `<room>.releases.json`, and are retried at every recovery.
+- **Attachments in remote rooms are refused, not dropped.** The web channel send and the mailbox DM answer 400 "Attachments are not supported in remote rooms" before anything is queued or reported sent. Carrying images was weighed and not taken: the home stores a file under its own `/data/files`, which viewers of this server cannot reach, so every mirrored image would also need a proxy route here. That is a lane of its own.
+- **A selection answers with its own room.** `/api/conversations/select` takes the metadata and the contents from the room the request selected, not from the active pointer that another selection may have moved while the remote fill ran.
+- 4 tests in `tests/linked-servers-gate7.test.ts`, one per finding plus the departure debt across a restart, all failing on b21bdc1. Suite 410.
+
 ### Known limits
+- **Images are not carried to remote rooms** (refused with 400, above).
 - **A peer and this server may still share a human's name.** A peer's human may take any name that is not a local member or binding of the room, including this server's own web viewer name (the same person on both machines is the intended case).
 - **A linked peer is trusted with names.** It can register any name that is not a member of the room now, as a member or as its human, and then read what that name may read, as a local join can today. Tokens authenticate servers, not people.
 - **The home forgets hosted members on restart**, like local ones. The host re-registers its members when the link comes back and before a send it retries, but a wake that arrives for a host that restarted and lost its member says "no console" rather than "not joined here".
