@@ -3,6 +3,7 @@
 ## 2026-09-25: Linked Servers Design
 
 ### Added
+- `docs/superpowers/plans/2026-09-25-linked-servers-plan.md`: the implementation plan for approach A, with the wire contract between home server and peer, the mirroring server behaviour, the web UI contract, the task split and the rules for implementers.
 - `docs/superpowers/specs/2026-09-25-linked-servers-design.md`: every Joind server is also a router. One home server per room; a server holds links to peers, mirrors remote rooms in real time, registers its local agents as hosted members, and receives wake requests for them so injection happens where the terminal is. Offline rules: a dropped link is known on both sides, messages written while offline queue and dispatch on return, and their author may delete an undelivered one. Approach A (mirror and route at the API layer) is the next lane; approach B (rooms living on both servers) is backlogged. Worked example: Curzon in the cpm-engine room without a listen loop.
 
 ## 2026-09-25: Injection Matrix, End to End
