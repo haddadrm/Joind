@@ -67,6 +67,10 @@ A Joind server can now link to peer servers, mirror their rooms, and host member
 - **The drain's cleanup services a rerun requested in its completion gap** (after the loop's last check, before `draining` is cleared).
 - 9 tests in `tests/linked-servers-gate4.test.ts`: one per finding (all five failing on 933b439; the completion-gap test also fails with only the new cleanup disabled), a restart in the middle of each persisted step (the change recorded offline; a registration whose reply was lost, then a revert; a release cut off after the change), and a record that cannot be written (no request sent, and a viewer's send that needs the record is refused, not queued). The round-3 test reads the new record layout. Suite 403.
 
+### Codex gate round 5 (1 Medium on the server side, closed)
+- **A stray the home refuses for good no longer blocks the next viewer.** When the home answers the re-registration of an unconfirmed viewer with a definitive "not yours" (404, or 409 whose candidates do not name this server), `unconfirmed` is cleared in the record (written like every other step) and the transition goes on to the chosen viewer; only link errors keep it for a retry. The same answer for the target itself clears its `unconfirmed` too, while the choice stays for a later attempt.
+- 2 tests in `tests/linked-servers-gate5.test.ts`, both failing on 2cb76e4: Alice, then Bob refused with 409 because a home member holds the name, then Carol (registered, her waiting message sent); and a lost reply for Bob, then a home restart with Bob taken there, then Carol. Suite 405.
+
 ### Known limits
 - **A peer and this server may still share a human's name.** A peer's human may take any name that is not a local member or binding of the room, including this server's own web viewer name (the same person on both machines is the intended case).
 - **A linked peer is trusted with names.** It can register any name that is not a member of the room now, as a member or as its human, and then read what that name may read, as a local join can today. Tokens authenticate servers, not people.
