@@ -26,7 +26,7 @@ import { join } from "path";
 import type { LinkConfig } from "./config.js";
 import type { ConversationManager } from "./manager.js";
 import type { ChatMessage, HostedWakeRequest, HostedWakeResult } from "./room.js";
-import { MirrorRoom, HUMAN_LOCK, type MirrorNotice, type MirrorTransport, type PendingPayload } from "./mirror.js";
+import { MirrorRoom, type MirrorNotice, type MirrorTransport, type PendingPayload } from "./mirror.js";
 import { ensureDir } from "./persist.js";
 import {
   LinkDownError, PeerRefusedError, parseRemoteRoomId,
@@ -240,7 +240,7 @@ export class LinkClient extends EventEmitter {
    *  every queue drained in order, then the restore line where "down" was said. */
   private async restore(announce: boolean): Promise<void> {
     for (const m of this.mirrors.values()) {
-      if (m.hasLocalMembers() || m.humanToRegister()) await m.reregisterAll();
+      if (m.hasLocalMembers() || m.humanToRegister() || m.humanOwes()) await m.reregisterAll();
       const sent = m.queuedCount() > 0 ? await m.drain() : 0;
       if (announce && m.downNoted && this.state === "up") {
         m.addLocalLine(`link to ${this.name} restored; ${sent} queued message${sent === 1 ? "" : "s"} sent`);
@@ -622,22 +622,10 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     const r = parseRemoteRoomId(convId);
     const c = r ? this.clients.get(r.server) : undefined;
     const m = r && c ? c.getMirror(r.room) : undefined;
-    if (!r || !c || !m || !viewer || m.humanName() === viewer || !c.isUp()) return;
-    const release = await m.lockName(HUMAN_LOCK);
-    try {
-      const previous = m.humanRegistration();
-      if (previous?.name === viewer) return;
-      const res = await c.register({ room: r.room, name: viewer, host: this.selfName, registration: `human:${this.selfName}`, human: true });
-      m.setHuman(viewer, res.registration);
-      // A renamed viewer gives its old name back (gate round 2, finding 9).
-      if (previous) {
-        await c.leave({ room: r.room, name: previous.name, registration: previous.registration }).catch((err: unknown) => {
-          console.log(`  [link ${r.server}] could not release ${previous.name} in ${convId}: ${(err as Error).message}`);
-        });
-      }
-    } catch { /* not registered: the viewer reads public messages only */ } finally {
-      release();
-    }
+    if (!r || !c || !m || !viewer || (m.humanName() === viewer && !m.humanOwes())) return;
+    // One transition: owed releases first, then this viewer, the former one
+    // released (kept and retried at recovery when that fails).
+    await m.settleHuman(viewer);
   }
 
   /** The web UI opened a remote room: fill it now (bounded), then subscribe. */
