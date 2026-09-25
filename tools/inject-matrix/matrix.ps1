@@ -50,7 +50,18 @@ param(
   [string]$Mode = 'line',
   [ValidateSet('claude', 'codex')]
   [string]$Agent = 'claude',
-  [int]$ReplyTimeoutSec = 120
+  [int]$ReplyTimeoutSec = 120,
+  # End-to-end through a live Joind server (agent mode only); see E2E-Host.
+  [switch]$E2E,
+  [string]$ServerUrl = 'http://100.113.239.70:4200',
+  [string]$Conversation = '',
+  [string]$Sender = 'Admiral-e2e',
+  [string]$JoindLog = 'D:\GitHub\joind\data\logs\joind.log',
+  # Coalescing and @all, run once in the conhost host.
+  [switch]$E2EExtras,
+  # Negative controls: JSON array of { name, pid, pane?, what }, joined by REST first and
+  # left after the hosts.
+  [string]$E2EControlsJson = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -120,7 +131,8 @@ function Payload-Args([string]$name) {
     'keys' { $preamble + "`r`n" + "& python '$RawKey' '$name' '$Results' $ReceiverMaxMinutes" }
     'agent' {
       # The shell reports its own pid; the agent process is found underneath it.
-      $cmd = if ($Agent -eq 'claude') { 'claude --dangerously-skip-permissions' } else { 'codex' }
+      # E2E Codex must run curl, which Codex's default sandbox blocks.
+      $cmd = if ($Agent -eq 'claude') { 'claude --dangerously-skip-permissions' } elseif ($E2E) { 'codex --dangerously-bypass-approvals-and-sandbox' } else { 'codex' }
       # One agent per route: the probe ends a session after its route and the loop starts
       # the next one, so no route inherits another's transcript or a turn still running.
       $cmd = "for (`$i = 1; `$i -le 8; `$i++) { $cmd; Start-Sleep -Seconds 1 }"
@@ -306,9 +318,15 @@ function Reap-Gui($chain) {
       Start-Sleep -Seconds 2
       $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($c.pid)" | Where-Object { $_.Name -notin 'conhost.exe', 'OpenConsole.exe' })
       $proc = Get-Process -Id $c.pid -ErrorAction SilentlyContinue
-      if ($proc -and $kids.Count -eq 0 -and $proc.MainWindowHandle -ne 0) {
+      # Only a window that is visibly the probe's own (its --title): the main
+      # window of a shared process can be someone else's, even with no shell
+      # left in it (an exited pane stays open). Seen on 25 Sep 2026: the main
+      # window was a pre-existing "git.exe" window.
+      if ($proc -and $kids.Count -eq 0 -and $proc.MainWindowHandle -ne 0 -and $proc.MainWindowTitle -like 'inject-matrix-*') {
         $proc.CloseMainWindow() | Out-Null
-        $notes += "closed an empty window in the shared WindowsTerminal.exe($($c.pid))"
+        $notes += "closed the probe's empty window in the shared WindowsTerminal.exe($($c.pid))"
+      } elseif ($proc -and $kids.Count -eq 0) {
+        $notes += "left the shared WindowsTerminal.exe($($c.pid)) alone: its main window is not the probe's ($($proc.MainWindowTitle))"
       } elseif ($kids.Count) {
         $notes += "left WindowsTerminal.exe($($c.pid)) alone: $($kids.Count) other shell(s) still in it"
       }
@@ -806,12 +824,184 @@ function Stop-Agent([int]$agentPid) {
 
 
 # --------------------------------------------------------------------------------------
+# End-to-end mode (-Mode agent -E2E): the whole path through a live Joind server.
+# The agent in each host joins a scratch conversation itself (the harness types the join
+# instruction into it), a REST sender mentions it, and the probe checks the server log for
+# the route, the conversation for the reply, and the room for an honest warning line.
+# --------------------------------------------------------------------------------------
+
+function E2E-Tag([string]$hostName) {
+  switch ($hostName) { 'wt-pwsh' { 'wt7' } 'wt-ps5' { 'wt5' } default { $hostName } }
+}
+
+function Joind-Get([string]$path) {
+  try { Invoke-RestMethod -Uri "$ServerUrl$path" -Method Get -TimeoutSec 10 } catch { $null }
+}
+function Joind-Post([string]$path, $body) {
+  try { Invoke-RestMethod -Uri "$ServerUrl$path" -Method Post -ContentType 'application/json' -Body ($body | ConvertTo-Json -Compress -Depth 5) -TimeoutSec 20 }
+  catch { [pscustomobject]@{ error = $_.Exception.Message } }
+}
+
+# The server log from a point in time on (an ISO timestamp starts every line).
+function Log-Since([datetime]$sinceUtc, [string[]]$mustContain = @()) {
+  if (-not (Test-Path -LiteralPath $JoindLog)) { return @() }
+  $lines = [System.Collections.Generic.List[string]]::new()
+  foreach ($l in [System.IO.File]::ReadAllLines($JoindLog)) {
+    if ($l.Length -lt 24) { continue }
+    $stamp = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($l.Substring(0, 24), [ref]$stamp)) { continue }
+    if ($stamp.UtcDateTime -lt $sinceUtc) { continue }
+    if ($mustContain.Count -and -not ($mustContain | Where-Object { $l.Contains($_) })) { continue }
+    $lines.Add($l)
+  }
+  $lines.ToArray()
+}
+
+# Messages in the scratch conversation after `since`, read as the sender.
+function Room-Since([int]$since) {
+  $r = Joind-Get "/api/agent/read?sender=$([Uri]::EscapeDataString($Sender))&since=$since&limit=100"
+  if ($r -and $r.messages) { @($r.messages) } else { @() }
+}
+
+function Wait-Joined([string]$name, [int]$timeoutSec = 180) {
+  $deadline = (Get-Date).AddSeconds($timeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    $r = Joind-Get "/api/agent/read?sender=$([Uri]::EscapeDataString($name))&limit=1"
+    if ($r -and $null -ne $r.lastId) { return $true }
+    Start-Sleep -Seconds 3
+  }
+  $false
+}
+
+# One mention, then wait for the agent's reply or an honest line. Returns what happened.
+function Mention-And-Wait([string]$name, [string]$token, [int]$timeoutSec = 120) {
+  $sentUtc = [DateTime]::UtcNow
+  $sent = Joind-Post '/api/agent/send' @{ sender = $Sender; text = "@$name reply with exactly $token" }
+  $since = [int]($sent.id ?? 0)
+  $reply = $null; $honest = $null
+  $deadline = (Get-Date).AddSeconds($timeoutSec)
+  while ((Get-Date) -lt $deadline -and -not $reply) {
+    Start-Sleep -Seconds 2
+    foreach ($m in (Room-Since $since)) {
+      if ($m.sender -eq $name -and "$($m.text)" -match [regex]::Escape($token)) { $reply = $m }
+      if ($m.sender -eq 'system' -and "$($m.text)" -match "^Could not (wake|submit the prompt to) $([regex]::Escape($name))\b") { $honest = $m.text }
+    }
+    if ($honest -and -not $reply) { Start-Sleep -Seconds 5; foreach ($m in (Room-Since $since)) { if ($m.sender -eq $name -and "$($m.text)" -match [regex]::Escape($token)) { $reply = $m } }; break }
+  }
+  $replyMs = if ($reply) { [int]([DateTimeOffset]::FromUnixTimeMilliseconds([long]$reply.timestamp).UtcDateTime - $sentUtc).TotalMilliseconds } else { $null }
+  Start-Sleep -Seconds 1
+  $log = @(Log-Since $sentUtc.AddSeconds(-1) @($name, '[inject'))
+  $route = ($log | Where-Object { $_ -match 'Injecting into' -and $_.Contains($name) } | Select-Object -First 1)
+  [pscustomobject]@{
+    messageId = $since; token = $token; replied = [bool]$reply; replyMs = $replyMs
+    replyText = $(if ($reply) { "$($reply.text)" } else { $null }); honestLine = $honest
+    routeLine = $route; log = $log
+  }
+}
+
+function E2E-Host([string]$hostName, [int]$agentPid, $meta, $ctx) {
+  $name = if ($Agent -eq 'codex') { "Agent-codex-$(E2E-Tag $hostName)" } else { "Agent-$(E2E-Tag $hostName)" }
+  $body = [ordered]@{ name = $name; pid = $agentPid; conversation = $Conversation }
+  if ($meta.env.WEZTERM_PANE) { $body.weztermPaneId = [int]$meta.env.WEZTERM_PANE }
+  if ($meta.env.ORCA_TERMINAL_HANDLE) { $body.orcaTerminal = "$($meta.env.ORCA_TERMINAL_HANDLE)" }
+  $json = $body | ConvertTo-Json -Compress
+  $prompt = "Join the Joind chat now. Make exactly one HTTP POST to $ServerUrl/api/agent/join with header Content-Type: application/json and this exact JSON body: $json . Do nothing else. When a later message mentions you, follow its instructions."
+  $joinStartUtc = [DateTime]::UtcNow
+  Invoke-Inject $agentPid $prompt | Out-Null
+  # This harness's own injector predates the Codex fix: Codex needs a second Enter.
+  if ($Agent -eq 'codex') { Start-Sleep -Milliseconds 400; & python $SendKey $agentPid enter | Out-Null }
+  $joined = Wait-Joined $name
+  $joinLog = @(Log-Since $joinStartUtc.AddSeconds(-1) @($name))
+  Log "  e2e join $name ($json): joined=$joined"
+  $result = [ordered]@{ name = $name; joinBody = $json; joined = $joined; joinLog = $joinLog; mention = $null; extra = @(); noReplyScreen = $null }
+  if ($joined) {
+    $result.mention = Mention-And-Wait $name "PONG-$name"
+    # No reply: keep what the agent's screen shows, the only evidence of where the prompt stopped.
+    if (-not $result.mention.replied) {
+      $screen = Read-AgentScreen $agentPid
+      Set-Content -LiteralPath (Join-Path $Results "$name.noreply.screen.txt") -Value $screen -Encoding utf8
+      $result.noReplyScreen = (@($screen -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -Last 14) -join ' / '
+    }
+    Log "  e2e mention $name : replied=$($result.mention.replied) in $($result.mention.replyMs) ms; route: $($result.mention.routeLine); honest: $($result.mention.honestLine)"
+    if ($hostName -eq 'conhost' -and $E2EExtras) { $result.extra = E2E-Extras $name }
+  }
+  Joind-Post '/api/agent/leave' @{ name = $name; pid = $agentPid } | Out-Null
+  [pscustomobject]$result
+}
+
+# Step 6: two mentions in quick succession to one agent, then @all.
+function E2E-Extras([string]$name) {
+  $out = [System.Collections.Generic.List[object]]::new()
+  $t0 = [DateTime]::UtcNow
+  $a = Joind-Post '/api/agent/send' @{ sender = $Sender; text = "@$name reply with exactly PONG-C1" }
+  Start-Sleep -Milliseconds 300
+  Joind-Post '/api/agent/send' @{ sender = $Sender; text = "@$name reply with exactly PONG-C2" } | Out-Null
+  $deadline = (Get-Date).AddSeconds(150)
+  $seen = @()
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 3
+    $seen = @(Room-Since ([int]$a.id) | Where-Object { $_.sender -eq $name })
+    if (($seen | Where-Object { "$($_.text)" -match 'PONG-C1' }) -and ($seen | Where-Object { "$($_.text)" -match 'PONG-C2' })) { break }
+  }
+  Start-Sleep -Seconds 2
+  $out.Add([pscustomobject]@{
+      test = 'two mentions 300 ms apart'; replies = ($seen | ForEach-Object { "$($_.text)" }) -join ' / '
+      log = @(Log-Since $t0.AddSeconds(-1) @($name, '[inject', 'Injecting'))
+    })
+  Log "  e2e coalescing: replies=$($out[-1].replies)"
+  $t1 = [DateTime]::UtcNow
+  $b = Joind-Post '/api/agent/send' @{ sender = $Sender; text = "@all reply with exactly PONG-ALL followed by your name" }
+  $deadline = (Get-Date).AddSeconds(150)
+  $seenAll = @()
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 3
+    $seenAll = @(Room-Since ([int]$b.id))
+    if ($seenAll | Where-Object { $_.sender -eq $name -and "$($_.text)" -match 'PONG-ALL' }) { Start-Sleep -Seconds 8; $seenAll = @(Room-Since ([int]$b.id)); break }
+  }
+  $out.Add([pscustomobject]@{
+      test = '@all'; replies = ($seenAll | ForEach-Object { "$($_.sender): $($_.text)" }) -join ' / '
+      log = @(Log-Since $t1.AddSeconds(-1) @('Injecting', '[inject', 'Could not', 'Ghost', $name))
+    })
+  Log "  e2e @all: $($out[-1].replies)"
+  $out.ToArray()
+}
+
+# Step 5: negative controls, joined through REST by the harness (there is no agent to do it).
+function E2E-Controls {
+  $out = [System.Collections.Generic.List[object]]::new()
+  foreach ($c in $E2EControls) {
+    $body = [ordered]@{ name = $c.name; pid = [int]$c.pid; conversation = $Conversation }
+    if ($null -ne $c.pane) { $body.weztermPaneId = [int]$c.pane }
+    $t0 = [DateTime]::UtcNow
+    $join = Joind-Post '/api/agent/join' $body
+    $m = Mention-And-Wait $c.name "PONG-$($c.name)" 45
+    $out.Add([pscustomobject]@{
+        name = $c.name; what = $c.what; joinBody = ($body | ConvertTo-Json -Compress)
+        paneNote = "$($join.paneNote)"; joinOk = [bool]$join.ok
+        replied = $m.replied; honestLine = $m.honestLine; routeLine = $m.routeLine
+        log = @(Log-Since $t0.AddSeconds(-1) @($c.name, '[inject', 'pane'))
+      })
+    Log "  e2e control $($c.name): paneNote=$($join.paneNote) replied=$($m.replied) honest=$($m.honestLine) route=$($m.routeLine)"
+  }
+  $out.ToArray()
+}
+
+# --------------------------------------------------------------------------------------
 # Run
 # --------------------------------------------------------------------------------------
 
 $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 Log "run $RunId, elevated=$elevated, hosts: $($Hosts -join ', ')"
 $rows = [System.Collections.Generic.List[object]]::new()
+if ($E2E -and $Mode -ne 'agent') { throw '-E2E needs -Mode agent' }
+if ($E2E -and -not $Conversation) { throw '-E2E needs -Conversation <id>: never the active room' }
+$E2EControls = @()
+$controlResults = @()
+if ($E2E -and $E2EControlsJson) {
+  $E2EControls = @($E2EControlsJson | ConvertFrom-Json)
+  Log "== e2e negative controls"
+  $controlResults = E2E-Controls
+}
 
 foreach ($h in $Hosts) {
   Log "== $h"
@@ -830,7 +1020,7 @@ foreach ($h in $Hosts) {
   if (-not $launch.ctx) { $launch.ctx = @{} }
   Log "  launch: started=$($launch.started) pid=$($launch.pid) $($launch.note)"
 
-  $row = [ordered]@{ host = $h; started = [bool]$launch.started; pid = $launch.pid; mode = $launch.mode; launchNote = $launch.note; chain = $null; consoleHosts = @(); meta = $null; attempts = @(); warm = $null; native = $null; routes = @(); agentPid = $null; agentState = $null; cleanup = $null; ctx = $launch.ctx }
+  $row = [ordered]@{ host = $h; started = [bool]$launch.started; pid = $launch.pid; mode = $launch.mode; launchNote = $launch.note; chain = $null; consoleHosts = @(); meta = $null; attempts = @(); warm = $null; native = $null; routes = @(); agentPid = $null; agentState = $null; e2e = $null; cleanup = $null; ctx = $launch.ctx }
   $chain = @()
   try {
     if ($launch.started) {
@@ -868,7 +1058,10 @@ foreach ($h in $Hosts) {
           Log "  agent pid $agentPid ($Agent): $($row.agentState)"
           $script:ShellPidForAgent = $launch.pid
           $AgentPidsSeen.Add($agentPid)
-          if ($row.agentState -eq 'ready') { $row.routes = Probe-Agent $h $agentPid $row.meta $launch.ctx }
+          if ($row.agentState -eq 'ready') {
+            if ($E2E) { $row.e2e = E2E-Host $h $agentPid $row.meta $launch.ctx }
+            else { $row.routes = Probe-Agent $h $agentPid $row.meta $launch.ctx }
+          }
         }
         $launch.ctx.agentPid = $agentPid
       }
@@ -939,7 +1132,10 @@ if ($strays.Count) {
   $strays | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 } else { Log 'stray check: no receiver processes left' }
 
-$summary = [ordered]@{ runId = $RunId; mode = $Mode; agent = $(if ($Mode -eq 'agent') { $Agent } else { $null }); elevated = $elevated; os = [Environment]::OSVersion.VersionString; strays = $strays.Count; rows = $rows }
+if ($E2E) {
+  foreach ($c in $E2EControls) { Joind-Post '/api/agent/leave' @{ name = $c.name; pid = [int]$c.pid } | Out-Null }
+}
+$summary = [ordered]@{ runId = $RunId; e2e = [bool]$E2E; conversation = $Conversation; controls = $controlResults; mode = $Mode; agent = $(if ($Mode -eq 'agent') { $Agent } else { $null }); elevated = $elevated; os = [Environment]::OSVersion.VersionString; strays = $strays.Count; rows = $rows }
 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Results 'matrix.json') -Encoding utf8
 
 function Cell([string]$s) { if ($null -eq $s) { '' } else { $s.Replace('|', '\|').Replace("`r", ' ').Replace("`n", ' ') } }
@@ -956,6 +1152,26 @@ if ($Mode -eq 'keys') {
     }
   }
   $md | Set-Content -LiteralPath (Join-Path $Results 'matrix.md') -Encoding utf8
+  Log "wrote $(Join-Path $Results 'matrix.md')"
+  $md | ForEach-Object { Write-Host $_ }
+  return
+}
+if ($E2E) {
+  $md.Add("Conversation $Conversation on $ServerUrl, sender $Sender, agent $Agent.")
+  $md.Add('')
+  $md.Add('| host | name | route logged | joined ok | reply time | honest line? | notes |')
+  $md.Add('|---|---|---|---|---|---|---|')
+  foreach ($r in $rows) {
+    $e = $r.e2e
+    if (-not $e) { $md.Add(('| {0} | | | no | | | {1} |' -f $r.host, (Cell "$($r.agentState) $($r.launchNote)"))); continue }
+    $m = $e.mention
+    $route = if ($m -and $m.routeLine) { ($m.routeLine -replace '^.*Injecting into ', '') } else { '' }
+    $md.Add(('| {0} | {1} | {2} | {3} | {4} | {5} | {6} |' -f $r.host, $e.name, (Cell $route), $(if ($e.joined) { 'yes' } else { 'no' }),
+        $(if ($m -and $m.replied) { "$([math]::Round($m.replyMs / 1000, 1)) s" } elseif ($m) { 'no reply' } else { '' }),
+        $(if ($m -and $m.honestLine) { Cell $m.honestLine } else { 'none' }), (Cell "join $($e.joinBody)")))
+  }
+  $md | Set-Content -LiteralPath (Join-Path $Results 'matrix.md') -Encoding utf8
+  $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Results 'matrix.json') -Encoding utf8
   Log "wrote $(Join-Path $Results 'matrix.md')"
   $md | ForEach-Object { Write-Host $_ }
   return

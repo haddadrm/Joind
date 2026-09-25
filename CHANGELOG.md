@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-09-25: Injection Matrix, End to End
+
+The matrix now runs the whole wake path through a live Joind server, not only the injector: `-Mode agent -E2E`.
+
+### Added
+- **E2E mode:** each real agent joins a scratch conversation itself (the harness types the join instruction), a REST sender mentions it, and the probe reads the route from the server log, the reply from the conversation, and any honest warning line. It saves the agent's screen when no reply comes.
+- **Options:** `-E2EExtras` adds coalescing and `@all`; `-E2EControlsJson` adds negative controls. `-Conversation` is required, so a run never lands in the active room.
+- **Codex in E2E** runs with `--dangerously-bypass-approvals-and-sandbox`, because its default sandbox blocks the curl the wake prompt asks for.
+
+### Fixed
+- In a shared Windows Terminal process, the cleanup step closed the process's main window whenever no shell was left in it, and that window can be someone else's. It now closes only a window titled `inject-matrix-*`.
+
+### Findings (25 Sep 2026, integration/injection-20260925, details in results/e2e-20260925.md)
+- **Most routes delivered.** The mention reached a real Claude Code and got its reply in 22 to 37 s over conhost, both Windows Terminal shells, Orca (Orca's own send), wmux and Warp. Codex in Orca replied in 57 s.
+- **The WezTerm route silently loses real wake prompts** for both agents. A 320 to 345 character burst ending in a carriage return is taken as a paste, and the carriage return becomes a new line. The text, a pause of 300 ms or more, then a carriage return in its own `send-text` call submits both agents. The matrix's 49-character prompt could not show this.
+- **The server can bind to a dead WezTerm socket:** it picks the lexically last `gui-sock-*` file. Each failed probe leaves a `wezterm.exe-log-*.txt`.
+- **Negative controls:** a pid with no console gets the honest line. A stale pane is dropped at join and the console route is used. A pid whose console has no agent reading it is a silent miss.
+
 ## 2026-09-24: Injection Matrix, Keys and Agent Modes
 
 Line mode only proved that a whole line reaches a `ReadLine`. Claude Code and Codex are raw-mode TUIs, so the question that matters for a wake-up is whether the prompt SUBMITS. Two new modes answer that, and both found real defects. Full tables in `tools/inject-matrix/README.md`.

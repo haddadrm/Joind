@@ -59,6 +59,17 @@ pwsh -NoProfile -Command "& ./tools/inject-matrix/matrix.ps1 -Hosts conhost,wezt
 
 Use `-Command` rather than `-File` when passing a comma-separated `-Hosts` list, because `-File` binds it as one string.
 
+### End to end through a live server (`-Mode agent -E2E`)
+
+Each agent joins a scratch conversation on a running Joind server by itself: the harness types one instruction into it, a REST POST to `/api/agent/join` carrying the agent's real pid plus `weztermPaneId` or `orcaTerminal` where its shell has one. A REST sender then mentions it, and the probe reads three things: the server log for the route (`Injecting into <name> (pid|pane|orca)`), the conversation for the reply, and the room for an honest "Could not wake" or "Could not submit" line. When no reply comes, the probe saves the agent's screen. Options:
+
+- `-Conversation` is required. The harness refuses to run against the active room.
+- `-E2EExtras` runs coalescing and `@all` in the conhost host.
+- `-E2EControlsJson` takes negative controls (name, pid, optional pane), joined by REST before the hosts and left after them.
+- `-Sender`, `-ServerUrl` and `-JoindLog` point at the server.
+
+The run on 25 Sep 2026 and its findings are in `results/e2e-20260925.md` (not committed).
+
 ## Running it
 
 From a normal, non-elevated shell, after `npm run build`:
