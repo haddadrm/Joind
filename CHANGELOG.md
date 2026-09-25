@@ -4,6 +4,9 @@
 
 A Joind server can now link to peer servers, mirror their rooms, and host members of them. An agent joins its own server with `conversation: "<server>:<room>"`; the room's home server registers it as a member hosted on that server, decides its mentions, and sends the wake back over the link, where the terminal is. Server side of the plan (Task 1); the web UI is Task 2.
 
+### Live pass
+- 2026-09-26 00:10, integration branch 426ba29, two servers on one machine (home and peer, linked both ways) and a real Claude Code in a conhost window: the peer listed the home's room as remote on the next discovery tick; the agent joined the home's room through the peer with its real pid; a mention on the home was routed to the peer, injected there through the console in 3.4 s, and the reply landed in the home's room and the mirror in 22 s; stopping the home posted the local link-down line, three sends queued with 202 (the viewer's as waiting), an author-only delete held, the restart restored the link and delivered the two kept messages once each; the same name joined locally on the home got 409 with candidates; a departed member drew no injection. Evidence under tools/inject-matrix/results (gitignored). Peer-side log lines for hosted registration and release added after the pass.
+
 ### Added
 - **Config.** `links` from `JOIND_LINKS` (a JSON array of `{ name, url, token }`) and repeatable `--link name=url=token`. The server's own name is its instance name (`--name`); a link may not carry it. Names are one path-safe segment, URLs http or https, tokens at least 8 characters. Links are symmetric: each side lists the other with the same token, and the token names the calling peer.
 - **Home side (`src/peer.ts`, routes under `/api/peer`, `Authorization: Bearer <link token>`, 401 bad token, 503 when no links are configured).**

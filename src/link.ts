@@ -463,8 +463,11 @@ export class LinkClient extends EventEmitter {
     }
   }
 
-  register(body: PeerRegisterBody): Promise<PeerRegisterResult> {
-    return this.call<PeerRegisterResult>("POST", "/api/peer/register", body);
+  async register(body: PeerRegisterBody): Promise<PeerRegisterResult> {
+    const out = await this.call<PeerRegisterResult>("POST", "/api/peer/register", body);
+    // The home logs the join; the peer says what it did too, so both logs tell the story.
+    console.log(`  [link:${this.name}] registered ${body.name} in ${body.room} as hosted here (home registration ${out.registration ?? "?"})`);
+    return out;
   }
 
   async send(body: PeerSendBody): Promise<ChatMessage> {
@@ -477,6 +480,7 @@ export class LinkClient extends EventEmitter {
 
   async leave(body: PeerLeaveBody): Promise<void> {
     await this.call<{ ok: boolean }>("POST", "/api/peer/leave", body);
+    console.log(`  [link:${this.name}] released ${body.name} in ${body.room} at the home`);
   }
 
   async act(body: PeerActBody): Promise<void> {
