@@ -400,7 +400,13 @@ export class PeerHub {
         res.status(403).json({ error: `${sender} is not registered in this room from ${peer}`, code: "not-registered" });
         return;
       }
-      const dedupeKey = `${peer}\n${sender}\n${clientId}`;
+      // Keyed by the sender's INCARNATION (gate round 2, finding 3): for a
+      // hosted member, its host's registration id, which the host keeps
+      // across re-registrations of the same member and changes for a new
+      // session; for a peer's human, its registration here. A new owner of
+      // the name reusing an old clientId is a new message.
+      const incarnation = room.getAgent(sender)?.host === peer ? `m:${room.hostedRegistrationOf(sender) ?? ""}` : `h:${room.peerHumanOf(sender)?.registration ?? ""}`;
+      const dedupeKey = `${peer}\n${sender}\n${incarnation}\n${clientId}`;
       let seen = this.clientIds.get(roomId);
       const dup = seen?.get(dedupeKey);
       if (dup) { res.json({ ok: true, duplicate: true, message: dup }); return; }

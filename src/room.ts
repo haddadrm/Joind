@@ -950,6 +950,9 @@ export class ChatRoom extends EventEmitter {
   rename(oldName: string, newName: string): Agent | null {
     const agent = this.agents.get(oldName);
     if (!agent) return null;
+    // Never onto a name a linked peer owns here, and never a peer's member
+    // (callers answer 409 first; this keeps every path honest).
+    if (agent.host || (oldName !== newName && this.peerOwnerOf(newName))) return null;
     this.agents.delete(oldName);
     agent.name = newName;
     this.agents.set(newName, agent);

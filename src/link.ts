@@ -26,7 +26,7 @@ import { join } from "path";
 import type { LinkConfig } from "./config.js";
 import type { ConversationManager } from "./manager.js";
 import type { ChatMessage, HostedWakeRequest, HostedWakeResult } from "./room.js";
-import { MirrorRoom, type MirrorNotice, type MirrorTransport, type PendingPayload } from "./mirror.js";
+import { MirrorRoom, HUMAN_LOCK, type MirrorNotice, type MirrorTransport, type PendingPayload } from "./mirror.js";
 import { ensureDir } from "./persist.js";
 import {
   LinkDownError, PeerRefusedError, parseRemoteRoomId,
@@ -240,7 +240,7 @@ export class LinkClient extends EventEmitter {
    *  every queue drained in order, then the restore line where "down" was said. */
   private async restore(announce: boolean): Promise<void> {
     for (const m of this.mirrors.values()) {
-      if (m.hasLocalMembers() || m.humanName()) await m.reregisterAll();
+      if (m.hasLocalMembers() || m.humanToRegister()) await m.reregisterAll();
       const sent = m.queuedCount() > 0 ? await m.drain() : 0;
       if (announce && m.downNoted && this.state === "up") {
         m.addLocalLine(`link to ${this.name} restored; ${sent} queued message${sent === 1 ? "" : "s"} sent`);
@@ -369,10 +369,13 @@ export class LinkClient extends EventEmitter {
    *  `announce`: emit what changed (a refill after an outage). The mirror's
    *  events go out before the cursor moves past them. */
   async fill(m: MirrorRoom, signal?: AbortSignal, announce = false): Promise<number> {
+    // What is inserted after this point (a send completing meanwhile) is
+    // newer than the snapshot and is never judged by it (gate round 2, finding 4).
+    const mark = m.snapshotMark();
     const snap = await this.request<PeerMessagesResult>("GET", "/api/peer/messages", {
       query: { room: m.homeRoomId, limit: "500", viewers: m.viewerNames().join(",") }, signal,
     });
-    m.fill(snap, announce);
+    m.fill(snap, announce, mark);
     this.writeCursor(m.homeRoomId, snap.cursor);
     return snap.cursor;
   }
@@ -493,6 +496,9 @@ export class LinkClient extends EventEmitter {
 /** Every link of this server, by peer name. */
 export class LinkRegistry extends EventEmitter implements RemoteRooms {
   private clients = new Map<string, LinkClient>();
+  /** A join's hold on its name's lock, from register to commit or abandon
+   *  (gate round 2, finding 2). */
+  private joinLocks = new WeakMap<RemoteRegistered, () => void>();
   private readonly selfName: string;
 
   constructor(links: LinkConfig[], base: Omit<LinkClientOptions, "link">) {
@@ -548,12 +554,19 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
       t.paneId != null && t.gui != null ? `WezTerm pane ${t.paneId} (gui ${t.gui})` : "",
       t.orcaTerminal ? "Orca terminal" : "",
     ].filter(Boolean).join(", ") || "no terminal";
+    // One registration transition of a name at a time: this join holds the
+    // lock until it commits or abandons, so a restore can never land after
+    // a newer join (gate round 2, finding 2).
+    const release = await m.lockName(name);
     try {
       const res = await c.register({ room: r.room, name, host: this.selfName, registration, terminalSummary, ...(t.role ? { role: t.role } : {}) });
       // Nothing is kept here yet: the join may still be superseded (gate
       // round 1, finding 3). The caller commits or abandons.
-      return { ok: true, online: res.online ?? [], homeRegistration: res.registration, role: t.role, terminalSummary };
+      const out: RemoteRegistered = { ok: true, online: res.online ?? [], homeRegistration: res.registration, role: t.role, terminalSummary };
+      this.joinLocks.set(out, release);
+      return out;
     } catch (err) {
+      release();
       if (err instanceof PeerRefusedError) {
         const body = err.body as { candidates?: unknown } | undefined;
         return { ok: false, status: err.status, error: err.message, ...(body?.candidates ? { candidates: body.candidates } : {}) };
@@ -566,6 +579,7 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     const m = this.mirror(convId);
     if (!m) return;
     m.setShadow(name, { homeRegistration: outcome.homeRegistration, role: outcome.role, terminalSummary: outcome.terminalSummary });
+    this.joinLocks.get(outcome)?.();
     m.resumeAuthor(name);
   }
 
@@ -573,7 +587,8 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     const r = parseRemoteRoomId(convId);
     const c = r ? this.clients.get(r.server) : undefined;
     const m = r && c ? c.getMirror(r.room) : undefined;
-    if (!r || !c || !m) return;
+    if (!r || !c || !m) { this.joinLocks.get(outcome)?.(); return; }
+    // Still under this join's lock: the member captured here is the current one.
     const current = m.shadowsForRegister().find((s) => s.name === name);
     try {
       if (current) {
@@ -587,6 +602,8 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
       }
     } catch (err) {
       console.log(`  [link ${r.server}] could not restore ${name} in ${convId} after a superseded join: ${(err as Error).message}`);
+    } finally {
+      this.joinLocks.get(outcome)?.();
     }
   }
 
@@ -606,10 +623,21 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     const c = r ? this.clients.get(r.server) : undefined;
     const m = r && c ? c.getMirror(r.room) : undefined;
     if (!r || !c || !m || !viewer || m.humanName() === viewer || !c.isUp()) return;
+    const release = await m.lockName(HUMAN_LOCK);
     try {
+      const previous = m.humanRegistration();
+      if (previous?.name === viewer) return;
       const res = await c.register({ room: r.room, name: viewer, host: this.selfName, registration: `human:${this.selfName}`, human: true });
       m.setHuman(viewer, res.registration);
-    } catch { /* not registered: the viewer reads public messages only */ }
+      // A renamed viewer gives its old name back (gate round 2, finding 9).
+      if (previous) {
+        await c.leave({ room: r.room, name: previous.name, registration: previous.registration }).catch((err: unknown) => {
+          console.log(`  [link ${r.server}] could not release ${previous.name} in ${convId}: ${(err as Error).message}`);
+        });
+      }
+    } catch { /* not registered: the viewer reads public messages only */ } finally {
+      release();
+    }
   }
 
   /** The web UI opened a remote room: fill it now (bounded), then subscribe. */

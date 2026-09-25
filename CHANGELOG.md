@@ -39,6 +39,18 @@ A Joind server can now link to peer servers, mirror their rooms, and host member
 - **Web edits and reactions in a remote room answer 400** before any local store or mirror text changes.
 - 10 tests in `tests/linked-servers-gate1.test.ts`, one per finding, all failing on 7753499 at the finding's own assertion. Joins that must race are parked in terminal validation by a stub a test can hold. The mirror unit test for a refused queued message now expects it held rather than dropped. Suite 382.
 
+### Codex gate round 2 (1 High, 8 Medium on the server side, closed)
+- **Renames keep one owner per name (High).** The UI rename (the only member rename) answers 409 with the candidates when the new name is a peer's (member or human) and when the member is a peer's hosted member; `ChatRoom.rename` refuses both too, so no path can bypass it.
+- **Registration transitions of a name are serialized.** `MirrorRoom.lockName` holds one transition per name at a time: a remote join holds it from its home registration to its commit or abandon, recovery re-registration takes it per member and registers the member as it is at that moment, and the human's changes take their own. A restore after a superseded join can no longer land after a newer join.
+- **clientId dedupe is per sender incarnation:** the host's registration id for a hosted member (stable across re-registrations of the same member, new for a new session), the registration for a peer's human. A new owner of a name reusing an old clientId sends a new message.
+- **A refill never judges what came after its request.** The mirror numbers its insertions; `LinkClient.fill` takes the mark before it asks for the snapshot, and only messages cached before the mark can be dropped as gone. A send completing during a recovery refill is no longer deleted and replayed.
+- **Deleting a held entry resumes its author's queue.**
+- **Registering the human resumes its waiting messages,** as a member's commit does.
+- **Pending entries carry their state:** `state` is `queued`, `waiting` or `held`, with `reason`, in `init`, the conversations list, select, the `pending` event (sent again whenever the state changes) and the web 202. After a restart the refusal line of a held entry is said again.
+- **The viewer's first message while offline is queued, not refused.** The locally authenticated web viewer's send or mailbox DM queues as `waiting` (202 with the pending entry) when the home does not know it yet; the viewer is registered as this server's human when the link returns, and the message goes then.
+- **A new web viewer name releases the old one at the home** (a peer leave of the previous human registration, under the human's lock), so the old name is free again there.
+- 9 tests in `tests/linked-servers-gate2.test.ts`, one per finding, all failing on b73ea7e at the finding's own assertion. Suite 391.
+
 ### Known limits
 - **A peer and this server may still share a human's name.** A peer's human may take any name that is not a local member or binding of the room, including this server's own web viewer name (the same person on both machines is the intended case).
 - **A linked peer is trusted with names.** It can register any name that is not a member of the room now, as a member or as its human, and then read what that name may read, as a local join can today. Tokens authenticate servers, not people.
