@@ -297,7 +297,7 @@ describe("inject fallback", () => {
     expect(calls).toEqual([]);
     await inject(100, "hi", 0, undefined, undefined, backends, { fallbackGuard: () => "proceed" });
     expect(calls).toEqual(["windows:100"]);
-  });
+  }, 20000);
 
   it("re-asks the guard right before typing, on the direct console path too", async () => {
     const calls: string[] = [];

@@ -1,5 +1,5 @@
 /**
- * Joind — Universal agent chat via MCP.
+ * Joind: Universal agent chat via MCP.
  *
  * Multiple isolated conversations, each with its own agents and messages.
  * ConversationManager holds all conversations.
@@ -602,7 +602,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const sessionId = req.headers["mcp-session-id"] as string;
     const session = sessionId ? mcpSessions.get(sessionId) : undefined;
     if (!session) {
-      // No session or stale — return 400 so client re-initializes
+      // No session or stale: return 400 so client re-initializes
       res.status(400).json({ error: "Session not found. POST /mcp to initialize." });
       return;
     }
@@ -794,7 +794,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       const time = new Date(msg.timestamp).toLocaleTimeString([], {
         hour: "2-digit", minute: "2-digit", second: "2-digit",
       });
-      if (msg.sender === "system") { md += `*${time} — ${msg.text}*\n\n`; continue; }
+      if (msg.sender === "system") { md += `*${time}: ${msg.text}*\n\n`; continue; }
       if (msg.replyTo) {
         const orig = room.getMessageById(msg.replyTo);
         if (orig) md += `> *replying to ${orig.sender}*: ${orig.text.slice(0, 80)}${orig.text.length > 80 ? "…" : ""}\n\n`;
@@ -809,7 +809,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     res.send(md);
   });
 
-  // Structured JSON export — round-trippable bundle for importing into another instance.
+  // Structured JSON export: round-trippable bundle for importing into another instance.
   app.get("/api/conversations/:id/export.json", (req, res) => {
     if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
     const convId = req.params.id;
@@ -1362,11 +1362,11 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // Deliberate full-conversation dump; intentionally includes DMs.
     const messages = room.readAll(100000);
     const decisions = messages.filter(m => m.tag === "decision" || m.tag === "handoff" || m.pinned);
-    let md = `# Decision Log — ${meta?.name ?? "Joind"}\n\n`;
+    let md = `# Decision Log: ${meta?.name ?? "Joind"}\n\n`;
     for (const msg of decisions) {
       const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       const tags = [msg.tag, msg.pinned ? "pinned" : ""].filter(Boolean).join(", ");
-      md += `### #${msg.id} — ${msg.sender} (${time}) [${tags}]\n${msg.text}\n\n`;
+      md += `### #${msg.id}: ${msg.sender} (${time}) [${tags}]\n${msg.text}\n\n`;
     }
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
     res.send(md);
@@ -1386,7 +1386,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const tagCounts: Record<string, number> = {};
     for (const m of tagged) { tagCounts[m.tag!] = (tagCounts[m.tag!] || 0) + 1; }
 
-    let md = `# Session Summary — ${meta?.name ?? "Joind"}\n\n`;
+    let md = `# Session Summary: ${meta?.name ?? "Joind"}\n\n`;
     md += `- **Messages**: ${messages.length}\n`;
     md += `- **Participants**: ${agents.map(a => a.name + (a.role ? ` (${a.role})` : "")).join(", ")}\n`;
     md += `- **Pinned**: ${pinned.length}\n`;
@@ -1683,7 +1683,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!convId) {
       const meta = manager.createConversation();
       convId = meta.id;
-      manager.setActive(convId); // First conversation — make it active for web UI
+      manager.setActive(convId); // First conversation: make it active for web UI
     }
 
     if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
@@ -1970,7 +1970,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   app.get("/api/terminals", async (_req, res) => {
     try {
       const terminals = await discoverTerminals();
-      // Build pid→name from all rooms (most reliable — room already knows invited agents)
+      // Build pid→name from all rooms (most reliable: room already knows invited agents)
       const pidToName = new Map<number, string>();
       for (const conv of manager.listConversations()) {
         const r = manager.getRoom(conv.id);
@@ -2338,13 +2338,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   {
     const shown = HOST === "0.0.0.0" ? "127.0.0.1" : HOST;
     console.log(`\n  ╔═══════════════════════════════════════╗`);
-    console.log(`  ║  Joind v0.2.0 — Agent Chat via MCP    ║`);
+    console.log(`  ║  Joind v0.2.0: Agent Chat via MCP    ║`);
     console.log(`  ║  MCP:  http://${shown}:${boundPort}/mcp`);
     console.log(`  ║  Web:  http://${shown}:${boundPort}/`);
     console.log(`  ║  Bind: ${HOST}`);
     console.log(`  ╚═══════════════════════════════════════╝\n`);
     if (HOST !== "127.0.0.1") {
-      console.log(`  [network] Bound to ${HOST} — reachable by remote agents. Ensure this is a private (e.g. Tailscale) interface, not the public internet.\n`);
+      console.log(`  [network] Bound to ${HOST}: reachable by remote agents. Ensure this is a private (e.g. Tailscale) interface, not the public internet.\n`);
     }
     if (!CONFIG.webTokenUserSet) {
       console.log(`  [web] Generated web token is served to any requester of /; on a multi-user or non-loopback host, set JOIND_WEB_TOKEN or --web-token to keep it out of the page.`);
