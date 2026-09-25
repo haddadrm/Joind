@@ -20,6 +20,7 @@ vi.mock("../src/inject.js", async () => {
         unix: async (p) => { state.console.push(p); },
         platform: "linux",
         classify: async () => CODEX_PLAN,
+        weztermSocket: (gui: number) => `/s/gui-sock-${gui}`,
       }, options),
   };
 });
@@ -39,7 +40,7 @@ describe("a partial delivery in the room", () => {
   it("is typed once, never replayed through the console or a retry, and reported honestly", async () => {
     const room = new ChatRoom();
     try {
-      room.join("Codex", 100, 7);
+      room.join("Codex", 100, 7, undefined, undefined, 1);
       room.send("Rami", "@Codex ping");
       await vi.advanceTimersByTimeAsync(2000);
       await settle();

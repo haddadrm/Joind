@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { resolveOrcaForJoin, resolvePaneForJoin, joinNotesText, requestedOrcaHandle, type OrcaResolverDeps } from "../src/tools.js";
-import { hasAncestor, isInsideOrcaTree, isInsideWezTermTree, isSessionRoot, type ProcessEntry } from "../src/terminals.js";
+import { hasAncestor, isInsideOrcaTree, isInsideWezTermTree, isSessionRoot, weztermGuiOfTree, type ProcessEntry } from "../src/terminals.js";
 import { inject, WakeFallbackAborted, type InjectBackends } from "../src/inject.js";
 import {
   injectOrca, orcaSendFailure, parseOrcaTerminalList, resolveOrcaCli, listOrcaTerminals, resetOrcaListCache,
@@ -444,14 +444,15 @@ describe("ancestry: a chain that ends at a session or system root is disproved, 
       expect(orca.note).toMatch(new RegExp(`pid ${pid} does not run inside Orca`));
       const lines: string[] = [];
       const pane = await resolvePaneForJoin("Claude", pid, 0, {
-        checkWezTerm: async () => true,
+        guiOf: async (p) => weztermGuiOfTree(p, tree),
+        socketForGui: (g) => `/s/gui-sock-${g}`,
         listPaneIds: async () => new Set([0]),
-        isInsideWezTerm: async (p) => isInsideWezTermTree(p, tree),
         autoDetect: async () => 0,
         log: (l) => lines.push(l),
       });
       expect(pane.paneId).toBeNull();
-      expect(pane.note).toMatch(new RegExp(`pid ${pid} does not run inside WezTerm`));
+      // No WezTerm GUI above the pid: its instance cannot be determined, so no pane.
+      expect(pane.note).toBe("pane 0 ignored for Claude: its WezTerm instance cannot be determined");
     }
     // And the Orca chain keeps its handle.
     expect((await resolveOrcaForJoin("Claude", 40, H1, deps({ isInsideOrca: async (p) => isInsideOrcaTree(p, orcaChain) }))).orcaTerminal).toBe(H1);

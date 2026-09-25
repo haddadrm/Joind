@@ -378,7 +378,9 @@ function connect() {
         lastScanResults.forEach(function(t) {
           if (t.tabTitle === d.oldName) t.tabTitle = d.newName;
           if (t.pid === d.agent.pid) t.tabTitle = d.newName;
-          if (t.weztermPaneId != null && t.weztermPaneId === d.agent.weztermPaneId) t.tabTitle = d.newName;
+          // A pane is the pair (GUI instance, pane number): a bare number matches nothing.
+          if (t.weztermPaneId != null && t.weztermGui != null &&
+              t.weztermPaneId === d.agent.weztermPaneId && t.weztermGui === d.agent.weztermGui) t.tabTitle = d.newName;
         });
         if (lastScanResults.length > 0) renderTerminals(lastScanResults);
         break;
@@ -1889,8 +1891,8 @@ function autoScanTerminals() {
   fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
     autoScanRunning = false;
     // Only re-render if something changed (compare by pid+paneId+tabTitle fingerprint)
-    var oldFp = lastScanResults.map(function(x) { return x.pid + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
-    var newFp = t.map(function(x) { return x.pid + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
+    var oldFp = lastScanResults.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
+    var newFp = t.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
     if (oldFp !== newFp) {
       lastScanResults = t;
       renderTerminals(t);
@@ -1941,7 +1943,8 @@ function inviteTerminal(t) {
     if (!name) return;
     var payload = { name: name, pid: t.pid };
     if (t.wtSession) payload.wtSession = t.wtSession;
-    if (t.weztermPaneId != null) payload.weztermPaneId = t.weztermPaneId;
+    // The pane travels with the GUI its scan found it in; the server binds the pair or nothing.
+    if (t.weztermPaneId != null && t.weztermGui != null) { payload.weztermPaneId = t.weztermPaneId; payload.weztermGui = t.weztermGui; }
     fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   });
 }

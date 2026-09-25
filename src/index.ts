@@ -744,31 +744,32 @@ app.post("/api/join", express.json(), async (req, res) => {
   // routing must land in the same room.
   const convId = manager.getActiveId();
   if (!convId) { res.status(400).json({ error: "No active conversation. Create or select one." }); return; }
-  const { name, pid, wtSession, weztermPaneId: requestedPane, orcaTerminal: requestedOrca } = req.body as {
-    name?: string; pid?: number; wtSession?: string; weztermPaneId?: number; orcaTerminal?: unknown;
+  const { name, pid, wtSession, weztermPaneId: requestedPane, weztermGui: discoveredGui, orcaTerminal: requestedOrca } = req.body as {
+    name?: string; pid?: number; wtSession?: string; weztermPaneId?: number; weztermGui?: number; orcaTerminal?: unknown;
   };
   if (!name || (!pid && requestedPane == null && requestedOrcaHandle(requestedOrca) === undefined)) {
     res.status(400).json({ error: "name and pid (or weztermPaneId, or orcaTerminal) required" }); return;
   }
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, convId, pid, requestedPane, requestedOrcaHandle(requestedOrca));
+  const joinToken = manager.beginJoin(name, convId, pid, requestedPane, requestedOrcaHandle(requestedOrca), typeof discoveredGui === "number" ? discoveredGui : undefined);
   // Same invariant as the agent joins: a pane or Orca terminal is bound only when it is live and this process's.
   const tree = processTreeOnce();
   const [paneResolution, orcaResolution] = await Promise.all([
-    resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager, tree)),
+    // The UI invite names the GUI whose socket its scan ran through: a pane is a pair.
+    resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager, tree), typeof discoveredGui === "number" ? discoveredGui : undefined),
     resolveOrcaForJoin(name, pid || 0, requestedOrca, defaultOrcaResolverDeps(manager, tree)),
   ]);
   const weztermPaneId = paneResolution.paneId;
   const boundOrca = orcaResolution.orcaTerminal;
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
-  if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined, boundOrca ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+  if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined, boundOrca ?? undefined, paneResolution.gui)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
   const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name], boundOrca, paneResolution.gui);
-  manager.bindAgent(name, convId, pid, weztermPaneId, boundOrca);
+  manager.bindAgent(name, convId, pid, weztermPaneId, boundOrca, paneResolution.gui);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
   res.json({
-    name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, orcaTerminal: agent.orcaTerminal, online: room.whoNames(),
+    name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal, online: room.whoNames(),
     ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
     ...(orcaResolution.note ? { orcaNote: orcaResolution.note } : {}),
   });
@@ -801,7 +802,7 @@ app.post("/api/rename", express.json(), (req, res) => {
   const convId = manager.getAgentBinding(oldName);
   if (convId) {
     manager.unbindAgent(oldName, convId);
-    manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId, agent.orcaTerminal);
+    manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId, agent.orcaTerminal, agent.weztermGui);
   }
   res.json({ name: agent.name, pid: agent.pid });
 });
@@ -913,7 +914,7 @@ app.post("/api/message/:id/resolve", express.json(), (req, res) => {
     }
   } else {
     if (!sender) { res.status(400).json({ error: "sender required" }); return; }
-    const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
+    const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
     if (!ctx) return;
     room = ctx.room;
     by = sender;
@@ -980,7 +981,7 @@ app.get("/api/agent/decisions", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const bound = agentRoom(sender, res, pid, paneId, orcaOf(req));
+  const bound = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!bound) return;
   const forName = req.query.for as string | undefined;
   const out: unknown[] = [];
@@ -1059,7 +1060,7 @@ app.get("/api/agent/unread", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   const cursor = cursorStore.get(sender);
   const newMsgs = ctx.room.read(cursor, 100000, undefined, sender);
@@ -1429,13 +1430,22 @@ function orcaOf(req: express.Request): string | undefined {
   return typeof b === "string" && b.trim() ? b.trim() : undefined;
 }
 
-/** Helper: get agent's room by name binding (with optional pid/paneId/orcaTerminal disambiguation) */
-function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number, orcaTerminal?: string) {
+/** The WezTerm GUI instance a request names (query or body): a pane number
+ *  identifies a registration only together with it. */
+function weztermGuiOf(req: express.Request): number | undefined {
+  const raw = req.query?.weztermGui ?? (req.body as { weztermGui?: unknown } | undefined)?.weztermGui;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/** Helper: get agent's room by name binding (with optional pid, pane with
+ *  its GUI, or Orca handle disambiguation) */
+function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number, orcaTerminal?: string, weztermGui?: number) {
   // Security gate: an existing binding is the credential. getAgentBinding is a
   // pure lookup and never creates one; bindings exist only after a join flow
   // (MCP chat_join, /api/agent/join, or the UI invite /api/join). A local HTTP
   // client claiming an unbound name gets nothing.
-  const convId = manager.getAgentBinding(name, pid, paneId, orcaTerminal);
+  const convId = manager.getAgentBinding(name, pid, paneId, orcaTerminal, weztermGui);
   if (convId) {
     const room = manager.getRoom(convId);
     if (room) {
@@ -1520,10 +1530,10 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   // departure for this name meanwhile wins over this one.
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
-  if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined, boundOrca ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
+  if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined, boundOrca ?? undefined, paneResolution.gui)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
 
   const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui);
-  manager.bindAgent(name, convId, pid, boundPane, boundOrca);
+  manager.bindAgent(name, convId, pid, boundPane, boundOrca, paneResolution.gui);
   room.touch(name);
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
@@ -1551,6 +1561,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
     recentMessages: recent,
     totalMessages: room.messageCount(),
     weztermPaneId: agent.weztermPaneId,
+    weztermGui: agent.weztermGui,
     orcaTerminal: agent.orcaTerminal,
     ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
     ...(orcaResolution.note ? { orcaNote: orcaResolution.note } : {}),
@@ -1562,7 +1573,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
 app.post("/api/agent/heartbeat", express.json(), (req, res) => {
   const { name, pid, paneId } = (req.body ?? {}) as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   ctx.room.touch(name);
   res.json({ ok: true, at: Date.now() });
@@ -1573,7 +1584,7 @@ app.get("/api/agent/listen", async (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   const since = req.query.since != null ? Number(req.query.since) : undefined;
   const timeoutMs = clampListenTimeout(
@@ -1601,7 +1612,7 @@ app.get("/api/agent/read", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   const since = req.query.since != null ? Number(req.query.since) : undefined;
   const limit = Number(req.query.limit ?? 50);
@@ -1630,7 +1641,7 @@ app.post("/api/agent/send", express.json(), (req, res) => {
     recipients = [...new Set((to as string[]).map((t) => t.trim()).filter((t) => t !== sender))];
     if (recipients.length === 0) { res.status(400).json({ error: "to must name someone other than the sender" }); return; }
   }
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   ctx.room.touch(sender);
   ctx.room.setTyping(sender, false);
@@ -1649,7 +1660,7 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
   const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
   manager.supersedeJoins(name);
-  const convId = manager.getAgentBinding(name, pid, paneId, orcaOf(req));
+  const convId = manager.getAgentBinding(name, pid, paneId, orcaOf(req), weztermGuiOf(req));
   const room = convId ? manager.getRoom(convId) : undefined;
   if (room) room.leave(name);
   if (convId) {
@@ -1663,7 +1674,7 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
 app.post("/api/agent/typing", express.json(), (req, res) => {
   const { name, typing, pid, paneId } = req.body as { name?: string; typing?: boolean; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   ctx.room.setTyping(name, typing ?? true);
   res.json({ ok: true });
@@ -1672,7 +1683,7 @@ app.post("/api/agent/typing", express.json(), (req, res) => {
 app.post("/api/agent/heartbeat", express.json(), (req, res) => {
   const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   ctx.room.touch(name);
   res.json({ ok: true });
@@ -1681,7 +1692,7 @@ app.post("/api/agent/heartbeat", express.json(), (req, res) => {
 app.post("/api/agent/status", express.json(), (req, res) => {
   const { name, status, pid, paneId } = req.body as { name?: string; status?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
   if (!ctx) return;
   const agent = ctx.room.setStatus(name, status ?? "");
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }

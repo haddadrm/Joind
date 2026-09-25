@@ -44,13 +44,10 @@ function deps(over: Partial<PaneResolverDeps>): PaneResolverDeps & { calls: stri
   const calls: string[] = [];
   return {
     calls,
-    checkWezTerm: async () => { calls.push("checkWezTerm"); return true; },
-    listPaneIds: async (socket?: string) => { calls.push(`list ${socket ?? "default"}`); return new Set([0, 7]); },
-    isInsideWezTerm: async () => true,
-    autoDetect: async (socket?: string) => { calls.push(`autoDetect ${socket ?? "default"}`); return 7; },
+    listPaneIds: async (socket: string) => { calls.push(`list ${socket}`); return new Set([0, 7]); },
+    autoDetect: async (socket: string) => { calls.push(`autoDetect ${socket}`); return 7; },
     guiOf: async () => 200,
     socketForGui: (gui: number) => `/s/gui-sock-${gui}`,
-    serverSocket: () => "/s/gui-sock-100",
     ensureExe: async () => { calls.push("ensureExe"); return true; },
     log: () => {},
     ...over,
@@ -66,17 +63,18 @@ describe("finding 2: auto-detection runs in the agent's own GUI and never stamps
     expect(d.calls).not.toContain("autoDetect default");
   });
 
-  it("agent in GUI 200 whose socket is unavailable: no auto-detection at all", async () => {
+  it("agent in GUI 200 whose socket is unavailable: no auto-detection at all, and no pane", async () => {
     const d = deps({ socketForGui: () => undefined });
     const r = await resolvePaneForJoin("A", 4242, undefined, d);
-    expect(r).toEqual({ paneId: undefined });
+    expect(r.paneId).toBeNull();
     expect(d.calls.filter((c) => c.startsWith("autoDetect"))).toEqual([]);
   });
 
-  it("an agent whose GUI is unknown keeps the old default-socket detection, with no GUI stamped", async () => {
+  it("an agent whose GUI is unknown gets no detection at all (a pane is a pair or nothing)", async () => {
     const d = deps({ guiOf: async () => "unknown" });
     const r = await resolvePaneForJoin("A", 4242, undefined, d);
-    expect(r).toEqual({ paneId: 7 });
+    expect(r).toEqual({ paneId: undefined });
+    expect(d.calls.filter((c) => c.startsWith("autoDetect"))).toEqual([]);
   });
 });
 
@@ -90,19 +88,18 @@ describe("finding 3: a pane's key includes its GUI", () => {
     expect(lockKeysFor(a, [a, b]).sort()).toEqual(["pane:10:0", "pid:101"]);
   });
 
-  it("a pane whose GUI is unknown keeps the old key", () => {
-    expect(terminalKeys({ pid: 101, weztermPaneId: 0 })).toEqual(["pid:101", "pane:0"]);
+  it("a pane without its GUI has no key at all (it is never bound)", () => {
+    expect(terminalKeys({ pid: 101, weztermPaneId: 0 })).toEqual(["pid:101"]);
   });
 });
 
 describe("finding 4: the executable is resolved before the agent's GUI is listed, without any default GUI", () => {
   it("an explicit pane in the agent's own GUI: ensureExe first, then the listing; no default-GUI check needed", async () => {
-    const d = deps({ checkWezTerm: async () => false });
+    const d = deps({});
     const r = await resolvePaneForJoin("A", 4242, 0, d);
     expect(r).toEqual({ paneId: 0, gui: 200 });
     expect(d.calls.indexOf("ensureExe")).toBeGreaterThanOrEqual(0);
     expect(d.calls.indexOf("ensureExe")).toBeLessThan(d.calls.indexOf("list /s/gui-sock-200"));
-    expect(d.calls).not.toContain("checkWezTerm");
   });
 
   it("no executable at all: the pane is dropped with that reason, not as 'not live'", async () => {

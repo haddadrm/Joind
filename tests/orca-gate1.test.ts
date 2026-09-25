@@ -130,7 +130,8 @@ describe("finding 3: handle-only registrations route callbacks by handle", () =>
     const calls = src.match(/agentRoom\((?:[^()]|\([^()]*\))*\)/g) ?? [];
     const routeCalls = calls.filter((c) => !c.startsWith("agentRoom(name: string"));
     expect(routeCalls.length).toBeGreaterThanOrEqual(10);
-    for (const c of routeCalls) expect(c).toMatch(/orcaOf\(req\)\)$/);
+    // Every route passes the Orca handle, and the WezTerm GUI after it (a pane is a pair).
+    for (const c of routeCalls) expect(c).toMatch(/orcaOf\(req\), weztermGuiOf\(req\)\)$/);
     const lookups = src.match(/manager\.getAgentBinding\(name, pid, paneId(?:[^()]|\([^()]*\))*\)/g) ?? [];
     for (const l of lookups) expect(l).toMatch(/orcaTerminal|orcaOf\(req\)/);
   });

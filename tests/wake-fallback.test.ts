@@ -22,6 +22,7 @@ vi.mock("../src/inject.js", async () => {
         // platform; a fixed plan keeps the test free of real subprocesses so
         // it settles on microtasks alone.
         classify: async () => DEFAULT_PLAN,
+        weztermSocket: (gui: number) => `/s/gui-sock-${gui}`,
       }, options),
   };
 });
@@ -42,7 +43,7 @@ describe("console fallback after a WezTerm failure (real inject, fake backends)"
   it("does not type into a session that left while WezTerm was being tried", async () => {
     const room = new ChatRoom();
     try {
-      room.join("Claude", 100, 7);
+      room.join("Claude", 100, 7, undefined, undefined, 1);
       room.send("Rami", "@Claude ping");
       await vi.advanceTimersByTimeAsync(2000);
       await settle();
@@ -64,15 +65,15 @@ describe("console fallback after a WezTerm failure (real inject, fake backends)"
     const b = new ChatRoom();
     const c = new ChatRoom();
     try {
-      a.join("A", 100, 7);
-      b.join("B", 200, 8);
+      a.join("A", 100, 7, undefined, undefined, 1);
+      b.join("B", 200, 8, undefined, undefined, 1);
       a.send("Rami", "@A ping");
       b.send("Rami", "@B ping");
       await vi.advanceTimersByTimeAsync(2000);
       await settle();
       expect(state.gates).toHaveLength(2); // both WezTerm attempts in flight, disjoint locks
       // A registration pairing pid 100 with pane 8 links A's and B's terminals.
-      c.join("C", 100, 8);
+      c.join("C", 100, 8, undefined, undefined, 1);
       await releaseOne(); // A's WezTerm attempt fails while B is still in flight
       await settle();
       expect(state.console).toEqual([]); // A must not type now: it needs pane:8, which B holds
@@ -92,7 +93,7 @@ describe("console fallback after a WezTerm failure (real inject, fake backends)"
   it("re-queues for the replacement session instead of typing into the old pid", async () => {
     const room = new ChatRoom();
     try {
-      room.join("Claude", 100, 7);
+      room.join("Claude", 100, 7, undefined, undefined, 1);
       room.send("Rami", "@Claude ping");
       await vi.advanceTimersByTimeAsync(2000);
       await settle();

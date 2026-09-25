@@ -241,18 +241,20 @@ describe("ChatRoom presence timestamps", () => {
   });
 
   it("derives every serialization key from the agent and treats a pane change as a new identity", () => {
-    expect(terminalKeys({ pid: 501, weztermPaneId: 7 })).toEqual(["pid:501", "pane:7"]);
+    // A pane is keyed only as the pair (GUI, pane); a bare pane number has no key.
+    expect(terminalKeys({ pid: 501, weztermPaneId: 7, weztermGui: 1 })).toEqual(["pid:501", "pane:1:7"]);
+    expect(terminalKeys({ pid: 501, weztermPaneId: 7 })).toEqual(["pid:501"]);
     expect(terminalKeys({ pid: 501 })).toEqual(["pid:501"]);
-    expect(terminalKeys({ pid: 0, weztermPaneId: 3 })).toEqual(["pane:3"]);
+    expect(terminalKeys({ pid: 0, weztermPaneId: 3, weztermGui: 1 })).toEqual(["pane:1:3"]);
     expect(terminalKeys({ pid: 0 })).toEqual(["pid:0"]);
     const room = new ChatRoom();
     try {
       room.join("Codex", 902);
       const before = terminalIdentity(room.getAgent("Codex")!);
-      room.join("Codex", 902, 72);
+      room.join("Codex", 902, 72, undefined, undefined, 1);
       const after = terminalIdentity(room.getAgent("Codex")!);
       expect(before).toBe("pid:902");
-      expect(after).toBe("pid:902|pane:72");
+      expect(after).toBe("pid:902|pane:1:72");
     } finally {
       room.destroy();
     }
@@ -263,18 +265,18 @@ describe("ChatRoom presence timestamps", () => {
     const b = new ChatRoom();
     const c = new ChatRoom();
     try {
-      a.join("Codex", 960, 60);
+      a.join("Codex", 960, 60, undefined, undefined, 1);
       b.join("Codex", 960);
-      c.join("Codex", 0, 60);
-      expect(lockKeysFor(b.getAgent("Codex")!).sort()).toEqual(["pane:60", "pid:960"]);
-      expect(lockKeysFor(c.getAgent("Codex")!).sort()).toEqual(["pane:60", "pid:960"]);
+      c.join("Codex", 0, 60, undefined, undefined, 1);
+      expect(lockKeysFor(b.getAgent("Codex")!).sort()).toEqual(["pane:1:60", "pid:960"]);
+      expect(lockKeysFor(c.getAgent("Codex")!).sort()).toEqual(["pane:1:60", "pid:960"]);
       // The pairing leaves with the registration that carried it.
       a.leave("Codex");
       expect(lockKeysFor(b.getAgent("Codex")!)).toEqual(["pid:960"]);
-      expect(lockKeysFor(c.getAgent("Codex")!)).toEqual(["pane:60"]);
+      expect(lockKeysFor(c.getAgent("Codex")!)).toEqual(["pane:1:60"]);
       // Transitive: pid 1 pairs with pane 5 through two registrations.
-      expect(lockKeysFor({ pid: 1 }, [{ pid: 1, weztermPaneId: 5 }, { pid: 2, weztermPaneId: 5 }]).sort())
-        .toEqual(["pane:5", "pid:1", "pid:2"]);
+      expect(lockKeysFor({ pid: 1 }, [{ pid: 1, weztermPaneId: 5, weztermGui: 1 }, { pid: 2, weztermPaneId: 5, weztermGui: 1 }]).sort())
+        .toEqual(["pane:1:5", "pid:1", "pid:2"]);
     } finally {
       a.destroy(); b.destroy(); c.destroy();
     }
@@ -283,15 +285,15 @@ describe("ChatRoom presence timestamps", () => {
   it("resets proof of life when a pane-only agent moves to another pane, not when a pane is first learned", () => {
     const room = new ChatRoom();
     try {
-      room.join("Jadzia", 0, 1);
+      room.join("Jadzia", 0, 1, undefined, undefined, 1);
       room.send("Jadzia", "posted");
       expect(room.getAgent("Jadzia")!.lastPostAt).toBeGreaterThan(0);
-      room.join("Jadzia", 0, 2);
+      room.join("Jadzia", 0, 2, undefined, undefined, 1);
       expect(room.getAgent("Jadzia")!.lastPostAt).toBeUndefined();
       room.join("Codex", 77);
       room.send("Codex", "posted");
       const posted = room.getAgent("Codex")!.lastPostAt;
-      room.join("Codex", 77, 9); // first pane discovery: same session
+      room.join("Codex", 77, 9, undefined, undefined, 1); // first pane discovery: same session
       expect(room.getAgent("Codex")!.lastPostAt).toBe(posted);
     } finally {
       room.destroy();

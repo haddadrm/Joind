@@ -39,8 +39,21 @@ export interface JoinToken {
 export interface AgentBindingEntry {
   conversationId: string;
   pid?: number;
+  /** A WezTerm pane is only ever bound together with its GUI instance
+   *  (weztermGui, the wezterm-gui pid): pane ids are per instance, so a bare
+   *  pane number identifies nothing. Both set or both unset. */
   paneId?: number;
+  weztermGui?: number;
   orcaTerminal?: string;
+}
+
+/** The alias of a WezTerm pane: its GUI and its number, never the number alone. */
+export function paneAlias(paneId: number | undefined, gui: number | undefined): string | undefined {
+  return paneId != null && gui != null ? `pane:${gui}:${paneId}` : undefined;
+}
+
+function samePane(e: AgentBindingEntry, paneId: number | undefined, gui: number | undefined): boolean {
+  return paneId != null && gui != null && e.paneId === paneId && e.weztermGui === gui;
 }
 
 export class ConversationManager extends EventEmitter {
@@ -263,14 +276,14 @@ export class ConversationManager extends EventEmitter {
     return this.getOrCreateRoom(id);
   }
 
-  getRoomForAgent(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string): ChatRoom | undefined {
-    const convId = this.getAgentBinding(agentName, pid, paneId, orcaTerminal);
+  getRoomForAgent(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number): ChatRoom | undefined {
+    const convId = this.getAgentBinding(agentName, pid, paneId, orcaTerminal, gui);
     if (!convId) return undefined;
     return this.conversations.get(convId);
   }
 
-  getAgentConversationId(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string): string | undefined {
-    return this.getAgentBinding(agentName, pid, paneId, orcaTerminal);
+  getAgentConversationId(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number): string | undefined {
+    return this.getAgentBinding(agentName, pid, paneId, orcaTerminal, gui);
   }
 
   // -----------------------------------------------------------------------
@@ -319,10 +332,11 @@ export class ConversationManager extends EventEmitter {
   private departedAt = new Map<string, number>();       // name -> seq of the latest departure
 
   /** Every alias a binding can match on (bindAgent merges by pid, pane OR Orca handle). */
-  static joinTerminalKeys(pid: number | undefined, paneId: number | undefined, orcaTerminal?: string): string[] {
+  static joinTerminalKeys(pid: number | undefined, paneId: number | undefined, orcaTerminal?: string, gui?: number): string[] {
     const keys: string[] = [];
     if (pid && pid > 0) keys.push(`pid:${pid}`);
-    if (paneId != null) keys.push(`pane:${paneId}`);
+    const pane = paneAlias(paneId, gui);
+    if (pane) keys.push(pane);
     if (orcaTerminal) keys.push(`orca:${orcaTerminal}`);
     return keys.length > 0 ? keys : ["pid:0"];
   }
@@ -331,18 +345,18 @@ export class ConversationManager extends EventEmitter {
    *  first the one matching by pane, Orca handle or non-zero pid, else the
    *  one for the same conversation, else -1. Kept as one function so
    *  freshness and merging agree. */
-  private mergeIndexFor(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal: string | undefined): number {
+  private mergeIndexFor(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal: string | undefined, gui?: number): number {
     const entries = this.agentBindings.get(agentName) ?? [];
     const byTerminal = entries.findIndex(e =>
-      (paneId != null && e.paneId === paneId) ||
+      samePane(e, paneId, gui) ||
       (orcaTerminal != null && e.orcaTerminal === orcaTerminal) ||
       (pid != null && pid !== 0 && e.pid === pid)
     );
     return byTerminal >= 0 ? byTerminal : entries.findIndex(e => e.conversationId === conversationId);
   }
 
-  private mergeTargetFor(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal: string | undefined): AgentBindingEntry | undefined {
-    const idx = this.mergeIndexFor(agentName, conversationId, pid, paneId, orcaTerminal);
+  private mergeTargetFor(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal: string | undefined, gui?: number): AgentBindingEntry | undefined {
+    const idx = this.mergeIndexFor(agentName, conversationId, pid, paneId, orcaTerminal, gui);
     return idx >= 0 ? this.agentBindings.get(agentName)?.[idx] : undefined;
   }
 
@@ -351,20 +365,21 @@ export class ConversationManager extends EventEmitter {
    * plus those of the existing binding bindAgent would merge it with (it
    * keeps the aliases the request omitted).
    */
-  effectiveJoinAliases(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal?: string): string[] {
-    const keys = new Set(ConversationManager.joinTerminalKeys(pid, paneId, orcaTerminal));
-    const target = this.mergeTargetFor(agentName, conversationId, pid, paneId, orcaTerminal);
+  effectiveJoinAliases(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal?: string, gui?: number): string[] {
+    const keys = new Set(ConversationManager.joinTerminalKeys(pid, paneId, orcaTerminal, gui));
+    const target = this.mergeTargetFor(agentName, conversationId, pid, paneId, orcaTerminal, gui);
     if (target) {
       if (target.pid && target.pid > 0) keys.add(`pid:${target.pid}`);
-      if (target.paneId != null) keys.add(`pane:${target.paneId}`);
+      const pane = paneAlias(target.paneId, target.weztermGui);
+      if (pane) keys.add(pane);
       if (target.orcaTerminal) keys.add(`orca:${target.orcaTerminal}`);
     }
     return [...keys];
   }
 
-  beginJoin(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal?: string): JoinToken {
+  beginJoin(agentName: string, conversationId: string, pid: number | undefined, paneId: number | undefined, orcaTerminal?: string, gui?: number): JoinToken {
     const seq = ++this.joinCounter;
-    const aliases = this.effectiveJoinAliases(agentName, conversationId, pid, paneId, orcaTerminal);
+    const aliases = this.effectiveJoinAliases(agentName, conversationId, pid, paneId, orcaTerminal, gui);
     for (const alias of aliases) this.aliasTouchedAt.set(`${agentName}|${alias}`, seq);
     this.roomTouchedAt.set(`${conversationId}|${agentName}`, seq);
     return { agentName, conversationId, seq, aliases };
@@ -377,11 +392,11 @@ export class ConversationManager extends EventEmitter {
    * position, so an older join completing later and discovering one of them
    * is superseded.
    */
-  joinIsCurrent(token: JoinToken, finalPid: number | undefined, finalPaneId: number | undefined, finalOrcaTerminal?: string): boolean {
+  joinIsCurrent(token: JoinToken, finalPid: number | undefined, finalPaneId: number | undefined, finalOrcaTerminal?: string, finalGui?: number): boolean {
     const { agentName, conversationId, seq } = token;
     if ((this.departedAt.get(agentName) ?? 0) > seq) return false;
     if ((this.roomTouchedAt.get(`${conversationId}|${agentName}`) ?? 0) > seq) return false;
-    const finalAliases = new Set([...token.aliases, ...this.effectiveJoinAliases(agentName, conversationId, finalPid, finalPaneId, finalOrcaTerminal)]);
+    const finalAliases = new Set([...token.aliases, ...this.effectiveJoinAliases(agentName, conversationId, finalPid, finalPaneId, finalOrcaTerminal, finalGui)]);
     for (const alias of finalAliases) {
       if ((this.aliasTouchedAt.get(`${agentName}|${alias}`) ?? 0) > seq) return false;
     }
@@ -395,8 +410,11 @@ export class ConversationManager extends EventEmitter {
   }
 
   /** `paneId` null clears a previously bound pane (proved stale on rejoin);
-   *  undefined keeps it. `orcaTerminal` follows the same rule. */
-  bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number | null, orcaTerminal?: string | null): void {
+   *  undefined keeps it. `orcaTerminal` follows the same rule. A pane is
+   *  bound only with its GUI (`gui`): a pane number without one binds
+   *  nothing and clears the old pane; "keep" (undefined) with a known `gui`
+   *  keeps the old pane only when it is in that same GUI. */
+  bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number | null, orcaTerminal?: string | null, gui?: number): void {
     let entries = this.agentBindings.get(agentName);
     if (!entries) {
       entries = [];
@@ -404,18 +422,28 @@ export class ConversationManager extends EventEmitter {
     }
     // Update the entry for the same pid, pane or Orca handle, else the same
     // conversation, else append (one selector shared with the freshness check).
-    const idx = this.mergeIndexFor(agentName, conversationId, pid, paneId ?? undefined, orcaTerminal ?? undefined);
+    const idx = this.mergeIndexFor(agentName, conversationId, pid, paneId ?? undefined, orcaTerminal ?? undefined, gui);
+    // The pane half: a pair or nothing.
+    const bindsPane = paneId != null && gui != null;
+    const clearsPane = paneId === null || (paneId != null && gui == null);
     if (idx >= 0) {
       // Merge: keep non-zero values from both old and new
       const old = entries[idx];
+      const keepOld = !clearsPane && !bindsPane && (gui == null || old.weztermGui === gui);
       entries[idx] = {
         conversationId,
         pid: (pid && pid !== 0) ? pid : old.pid,
-        paneId: paneId === null ? undefined : (paneId != null ? paneId : old.paneId),
+        paneId: bindsPane ? paneId ?? undefined : keepOld ? old.paneId : undefined,
+        weztermGui: bindsPane ? gui : keepOld ? old.weztermGui : undefined,
         orcaTerminal: orcaTerminal === null ? undefined : (orcaTerminal != null ? orcaTerminal : old.orcaTerminal),
       };
     } else {
-      entries.push({ conversationId, pid, paneId: paneId ?? undefined, orcaTerminal: orcaTerminal ?? undefined });
+      entries.push({
+        conversationId, pid,
+        paneId: bindsPane ? paneId ?? undefined : undefined,
+        weztermGui: bindsPane ? gui : undefined,
+        orcaTerminal: orcaTerminal ?? undefined,
+      });
     }
   }
 
@@ -452,7 +480,7 @@ export class ConversationManager extends EventEmitter {
    * UI invite /api/join). REST routes that return message content treat a
    * resolved binding as the agent's credential.
    */
-  getAgentBinding(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string): string | undefined {
+  getAgentBinding(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number): string | undefined {
     const entries = this.agentBindings.get(agentName);
     if (!entries || entries.length === 0) return undefined;
     // Exact match by Orca handle (a handle-only registration has no pid or pane)
@@ -460,9 +488,9 @@ export class ConversationManager extends EventEmitter {
       const match = entries.find(e => e.orcaTerminal === orcaTerminal);
       if (match) return match.conversationId;
     }
-    // Exact match by paneId (most specific)
-    if (paneId != null) {
-      const match = entries.find(e => e.paneId === paneId);
+    // Exact match by pane: the pair (GUI, pane) only, a bare number never.
+    if (paneId != null && gui != null) {
+      const match = entries.find(e => samePane(e, paneId, gui));
       if (match) return match.conversationId;
     }
     // Exact match by pid

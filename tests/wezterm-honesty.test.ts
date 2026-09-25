@@ -9,12 +9,14 @@ import { ConversationManager } from "../src/manager.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 
+// pid 100 runs in WezTerm GUI 10 (panes 0 and 3); pid 555 runs in no WezTerm
+// at all; anything else cannot be placed ("unknown").
 function deps(over: Partial<PaneResolverDeps> = {}): PaneResolverDeps & { lines: string[] } {
   const lines: string[] = [];
   return {
-    checkWezTerm: async () => true,
+    guiOf: async (pid) => (pid === 100 ? 10 : pid === 555 || pid === 32512 ? false : "unknown"),
+    socketForGui: (gui) => `/s/gui-sock-${gui}`,
     listPaneIds: async () => new Set([0, 3]),
-    isInsideWezTerm: async (pid) => pid === 100,
     autoDetect: async () => 3,
     log: (l) => lines.push(l),
     lines,
@@ -23,9 +25,9 @@ function deps(over: Partial<PaneResolverDeps> = {}): PaneResolverDeps & { lines:
 }
 
 describe("resolvePaneForJoin", () => {
-  it("accepts a live pane for a pid that runs inside WezTerm", async () => {
+  it("accepts a live pane for a pid that runs inside WezTerm, as the pair (GUI, pane)", async () => {
     const d = deps();
-    expect(await resolvePaneForJoin("A", 100, 3, d)).toEqual({ paneId: 3 });
+    expect(await resolvePaneForJoin("A", 100, 3, d)).toEqual({ paneId: 3, gui: 10 });
     expect(d.lines).toEqual([]);
   });
 
@@ -33,29 +35,30 @@ describe("resolvePaneForJoin", () => {
     const d = deps();
     const r = await resolvePaneForJoin("Claude", 32512, 0, d);
     expect(r.paneId).toBeNull();
-    expect(r.note).toMatch(/pid 32512 does not run inside WezTerm/);
+    expect(r.note).toBe("pane 0 ignored for Claude: its WezTerm instance cannot be determined");
     expect(d.lines).toHaveLength(1);
   });
 
-  it("rejects a pane that is not live and one offered when no WezTerm is reachable", async () => {
+  it("rejects a pane that is not live in its GUI, and one whose GUI has no reachable socket", async () => {
     const a = await resolvePaneForJoin("A", 100, 9, deps());
-    expect(a.paneId).toBeNull(); expect(a.note).toMatch(/not a live WezTerm pane/);
-    const b = await resolvePaneForJoin("A", 100, 3, deps({ checkWezTerm: async () => false }));
-    expect(b.paneId).toBeNull(); expect(b.note).toMatch(/no WezTerm reachable/);
-    // Nothing requested and nothing reachable: nothing learned, keep whatever was held.
-    expect((await resolvePaneForJoin("A", 100, undefined, deps({ checkWezTerm: async () => false }))).paneId).toBeUndefined();
+    expect(a.paneId).toBeNull(); expect(a.note).toMatch(/not a live pane of its WezTerm instance \(gui pid 10\)/);
+    const b = await resolvePaneForJoin("A", 100, 3, deps({ socketForGui: () => undefined }));
+    expect(b.paneId).toBeNull(); expect(b.note).toMatch(/has no reachable socket/);
+    // Nothing requested and the agent's own GUI unreachable: no pane, and any old one is cleared.
+    expect((await resolvePaneForJoin("A", 100, undefined, deps({ socketForGui: () => undefined }))).paneId).toBeNull();
   });
 
-  it("auto-detects only for a process inside WezTerm or pid-less; a pid provably elsewhere clears any old pane", async () => {
-    expect((await resolvePaneForJoin("A", 100, undefined, deps())).paneId).toBe(3);
-    expect((await resolvePaneForJoin("A", 0, undefined, deps())).paneId).toBe(3);
+  it("auto-detects only inside the agent's own GUI; a pid provably elsewhere clears any old pane; nothing to go on keeps it", async () => {
+    expect(await resolvePaneForJoin("A", 100, undefined, deps())).toEqual({ paneId: 3, gui: 10 });
+    expect((await resolvePaneForJoin("A", 0, undefined, deps())).paneId).toBeUndefined();
     expect((await resolvePaneForJoin("A", 555, undefined, deps())).paneId).toBeNull();
   });
 
-  it("treats unverifiable ancestry as unknown: a requested live pane is kept with a note, nothing is auto-detected", async () => {
-    const d = deps({ isInsideWezTerm: async () => "unknown" });
-    expect((await resolvePaneForJoin("A", 100, 3, d)).paneId).toBe(3);
-    expect(d.lines[0]).toMatch(/unverified/);
+  it("treats unverifiable ancestry as undeterminable: a requested pane is not bound, nothing is auto-detected", async () => {
+    const d = deps({ guiOf: async () => "unknown" });
+    const r = await resolvePaneForJoin("A", 100, 3, d);
+    expect(r.paneId).toBeNull();
+    expect(r.note).toMatch(/its WezTerm instance cannot be determined/);
     expect((await resolvePaneForJoin("A", 100, undefined, d)).paneId).toBeUndefined();
   });
 });
@@ -67,8 +70,9 @@ describe("join ordering (manager-level: aliases and rooms remember the newest jo
     try {
       const x = manager.createConversation("x");
       const y = manager.createConversation("y");
-      expect(ConversationManager.joinTerminalKeys(100, 7)).toEqual(["pid:100", "pane:7"]);
-      expect(ConversationManager.joinTerminalKeys(0, 7)).toEqual(["pane:7"]);
+      expect(ConversationManager.joinTerminalKeys(100, 7, undefined, 1)).toEqual(["pid:100", "pane:1:7"]);
+      expect(ConversationManager.joinTerminalKeys(100, 7)).toEqual(["pid:100"]); // a bare pane number is no alias
+      expect(ConversationManager.joinTerminalKeys(0, 7, undefined, 1)).toEqual(["pane:1:7"]);
       expect(ConversationManager.joinTerminalKeys(undefined, undefined)).toEqual(["pid:0"]);
       // Same terminal, newer into another room: the older is stale.
       const intoX = manager.beginJoin("Claude", x.id, 100, undefined);
@@ -86,30 +90,30 @@ describe("join ordering (manager-level: aliases and rooms remember the newest jo
       expect(manager.joinIsCurrent(otherY, 400, undefined)).toBe(true);
       expect(manager.joinIsCurrent(pendingX, 300, undefined)).toBe(true);
       // Shared pane with different or no pid.
-      const withBoth = manager.beginJoin("Claude", x.id, 500, 7);
-      const paneOnlyY = manager.beginJoin("Claude", y.id, 0, 7);
-      expect(manager.joinIsCurrent(paneOnlyY, 0, 7)).toBe(true);
-      expect(manager.joinIsCurrent(withBoth, 500, 7)).toBe(false);
+      const withBoth = manager.beginJoin("Claude", x.id, 500, 7, undefined, 1);
+      const paneOnlyY = manager.beginJoin("Claude", y.id, 0, 7, undefined, 1);
+      expect(manager.joinIsCurrent(paneOnlyY, 0, 7, undefined, 1)).toBe(true);
+      expect(manager.joinIsCurrent(withBoth, 500, 7, undefined, 1)).toBe(false);
       // Round-13 case: the newer join discovers pane 7 only during validation (auto-detect).
-      const heldPaneOnly = manager.beginJoin("Claude", x.id, 0, 7);
+      const heldPaneOnly = manager.beginJoin("Claude", x.id, 0, 7, undefined, 1);
       const newerPidOnly = manager.beginJoin("Claude", y.id, 200, undefined);
-      expect(manager.joinIsCurrent(newerPidOnly, 200, 7)).toBe(true);   // claims pane 7 at its position
-      expect(manager.joinIsCurrent(heldPaneOnly, 0, 7)).toBe(false);
+      expect(manager.joinIsCurrent(newerPidOnly, 200, 7, undefined, 1)).toBe(true);   // claims pane 7 at its position
+      expect(manager.joinIsCurrent(heldPaneOnly, 0, 7, undefined, 1)).toBe(false);
       // The reverse: an OLDER join discovering a pane late never promotes itself over a newer one.
       const olderPidOnly = manager.beginJoin("Claude", x.id, 600, undefined);
-      const newerPaneOnly = manager.beginJoin("Claude", y.id, 0, 9);
-      expect(manager.joinIsCurrent(newerPaneOnly, 0, 9)).toBe(true);
-      expect(manager.joinIsCurrent(olderPidOnly, 600, 9)).toBe(false);
+      const newerPaneOnly = manager.beginJoin("Claude", y.id, 0, 9, undefined, 1);
+      expect(manager.joinIsCurrent(newerPaneOnly, 0, 9, undefined, 1)).toBe(true);
+      expect(manager.joinIsCurrent(olderPidOnly, 600, 9, undefined, 1)).toBe(false);
       // Aliases retained through the binding merge count, on both merge branches.
-      manager.bindAgent("Claude", x.id, 100, 7);
-      expect(manager.effectiveJoinAliases("Claude", x.id, 0, 7).sort()).toEqual(["pane:7", "pid:100"]);
-      expect(manager.effectiveJoinAliases("Claude", y.id, 100, undefined).sort()).toEqual(["pane:7", "pid:100"]);
+      manager.bindAgent("Claude", x.id, 100, 7, undefined, 1);
+      expect(manager.effectiveJoinAliases("Claude", x.id, 0, 7, undefined, 1).sort()).toEqual(["pane:1:7", "pid:100"]);
+      expect(manager.effectiveJoinAliases("Claude", y.id, 100, undefined).sort()).toEqual(["pane:1:7", "pid:100"]);
       expect(manager.effectiveJoinAliases("Claude", y.id, 900, undefined)).toEqual(["pid:900"]);
-      expect(manager.effectiveJoinAliases("Claude", x.id, 200, undefined).sort()).toEqual(["pane:7", "pid:100", "pid:200"]);
-      const heldIntoY = manager.beginJoin("Claude", y.id, 0, 7);
+      expect(manager.effectiveJoinAliases("Claude", x.id, 200, undefined).sort()).toEqual(["pane:1:7", "pid:100", "pid:200"]);
+      const heldIntoY = manager.beginJoin("Claude", y.id, 0, 7, undefined, 1);
       const newerIntoX = manager.beginJoin("Claude", x.id, 200, undefined);
       expect(manager.joinIsCurrent(newerIntoX, 200, undefined)).toBe(true);
-      expect(manager.joinIsCurrent(heldIntoY, 0, 7)).toBe(false);
+      expect(manager.joinIsCurrent(heldIntoY, 0, 7, undefined, 1)).toBe(false);
       manager.unbindAgent("Claude");
       // A departure for the name (even with no binding yet) outranks every join begun before it.
       const before = manager.beginJoin("Claude", x.id, 300, undefined);
@@ -118,27 +122,27 @@ describe("join ordering (manager-level: aliases and rooms remember the newest jo
       const after = manager.beginJoin("Claude", x.id, 300, undefined);
       expect(manager.joinIsCurrent(after, 300, undefined)).toBe(true);
       // A room-level leave reaches the manager through the room event; applying a join does not supersede itself.
-      const tok = manager.beginJoin("Claude", x.id, 100, 7);
+      const tok = manager.beginJoin("Claude", x.id, 100, 7, undefined, 1);
       const room = manager.getRoom(x.id)!;
       room.join("Claude", 100, 7);
-      expect(manager.joinIsCurrent(tok, 100, 7)).toBe(true);
+      expect(manager.joinIsCurrent(tok, 100, 7, undefined, 1)).toBe(true);
       room.leave("Claude");
-      expect(manager.joinIsCurrent(tok, 100, 7)).toBe(false);
+      expect(manager.joinIsCurrent(tok, 100, 7, undefined, 1)).toBe(false);
       // A rename retires the old name for pending joins, and the new name joins normally.
-      const pendingOld = manager.beginJoin("Claude", x.id, 100, 7);
+      const pendingOld = manager.beginJoin("Claude", x.id, 100, 7, undefined, 1);
       room.join("Claude", 100, 7);
       room.rename("Claude", "Bob");
-      expect(manager.joinIsCurrent(pendingOld, 100, 7)).toBe(false);
+      expect(manager.joinIsCurrent(pendingOld, 100, 7, undefined, 1)).toBe(false);
       const asBob = manager.beginJoin("Bob", x.id, 100, 7);
-      expect(manager.joinIsCurrent(asBob, 100, 7)).toBe(true);
+      expect(manager.joinIsCurrent(asBob, 100, 7, undefined, 1)).toBe(true);
       // Round-15 case: a join for the DESTINATION name that was still validating when the
       // rename happened must not overwrite the renamed session; a later Bob join is fine.
       room.rename("Bob", "Claude");
       const pendingBob = manager.beginJoin("Bob", x.id, 200, 8);
       room.rename("Claude", "Bob");
-      expect(manager.joinIsCurrent(pendingBob, 200, 8)).toBe(false);
+      expect(manager.joinIsCurrent(pendingBob, 200, 8, undefined, 1)).toBe(false);
       const laterBob = manager.beginJoin("Bob", x.id, 200, 8);
-      expect(manager.joinIsCurrent(laterBob, 200, 8)).toBe(true);
+      expect(manager.joinIsCurrent(laterBob, 200, 8, undefined, 1)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -149,7 +153,7 @@ describe("a rejected pane does not survive a rejoin", () => {
   it("ChatRoom.join clears the pane on null and keeps it on undefined", () => {
     const room = new ChatRoom();
     try {
-      room.join("Claude", 100, 7);
+      room.join("Claude", 100, 7, undefined, undefined, 1);
       expect(room.getAgent("Claude")!.weztermPaneId).toBe(7);
       room.join("Claude", 100, undefined);
       expect(room.getAgent("Claude")!.weztermPaneId).toBe(7);
@@ -166,13 +170,13 @@ describe("a rejected pane does not survive a rejoin", () => {
     try {
       const a = manager.createConversation("a");
       const b = manager.createConversation("b");
-      manager.bindAgent("Claude", a.id, 100, 7);
+      manager.bindAgent("Claude", a.id, 100, 7, undefined, 1);
       manager.bindAgent("Claude", b.id, 300);
-      expect(manager.getAgentBinding("Claude", undefined, 7)).toBe(a.id);
+      expect(manager.getAgentBinding("Claude", undefined, 7, undefined, 1)).toBe(a.id);
       manager.bindAgent("Claude", a.id, 100, undefined);
-      expect(manager.getAgentBinding("Claude", undefined, 7)).toBe(a.id);
+      expect(manager.getAgentBinding("Claude", undefined, 7, undefined, 1)).toBe(a.id);
       manager.bindAgent("Claude", a.id, 200, null);
-      expect(manager.getAgentBinding("Claude", undefined, 7)).toBeUndefined();
+      expect(manager.getAgentBinding("Claude", undefined, 7, undefined, 1)).toBeUndefined();
       expect(manager.getAgentBinding("Claude", 200)).toBe(a.id);
     } finally {
       rmSync(dir, { recursive: true, force: true });

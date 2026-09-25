@@ -24,6 +24,15 @@ The end-to-end run against the local server (tools/inject-matrix, results/e2e-20
 - **The executable comes first.** An explicit-pane join listed the agent's GUI before the executable was resolved, so with WezTerm under Program Files but not on PATH a valid pane was dropped. `resolveWezTermExe` runs `--version` over the candidates and needs no GUI, and the resolver calls it (`ensureExe`) before listing the agent's instance, independently of the default GUI.
 - 12 tests: 11 in `tests/wezterm-submit-gate1.test.ts` and the GUI-move case in `tests/delivered-abort-room.test.ts`. Nine of the 12 fail on dd7deef, at least one per finding; the others pin behaviour that was already right. The `delivered-abort-room` fake now records which GUI's socket each send went through. Suite 305.
 
+### Codex gate round 2 (5 Medium, closed): the GUI is part of every pane, always
+Every finding came from a pane whose GUI was unknown sitting beside GUI-keyed panes. A pane is now only ever the pair (GUI instance, pane number); a bare pane number identifies nothing.
+- **A pane is bound only with its GUI.** The GUI comes from the pid's `wezterm-gui` ancestor or, for the UI invite route only, from the GUI whose socket discovery ran through. Otherwise the pane is dropped with "pane N ignored for X: its WezTerm instance cannot be determined". A pane-only join (no pid) binds no pane, and `room.join` binds none without a GUI. The `pane:<n>` key is gone; the only pane key is `pane:<gui>:<n>`.
+- **A known GUI with no reachable socket fails resolution.** No fallback to the server's socket or any other GUI remains, on a fresh server too. With no pane requested, the result is null (any old pane is cleared) with the note "no pane bound for X: its WezTerm instance (gui pid G) has no reachable socket".
+- **A rejoin from another GUI never keeps the old GUI's pane.** "Nothing learned" keeps an old pane only when it is in the same GUI, in the room and in the manager's binding alike.
+- **Auto-detection claims are per GUI.** `claimedPaneNumbers(agents, gui)` counts only panes claimed in the agent's own GUI, and detection runs only through that GUI's socket. The resolver's dependencies shrink to `guiOf`, `socketForGui`, `listPaneIds(socket)`, `autoDetect(socket, gui)` and `ensureExe`.
+- **Bindings and callbacks carry the pair.** Manager bindings store `weztermGui`; `getAgentBinding`, `beginJoin`, `joinIsCurrent`, `effectiveJoinAliases` and `bindAgent` take it; every REST agent route reads `weztermGui` (query or body) beside `paneId`; both REST join replies return `weztermGui` and the MCP join reply names the instance; the wake prompt puts `&paneId=N&weztermGui=G` in the read URL and `"paneId":N,"weztermGui":G` in the reply body; `public/app.js` matches and sends the pane only as a pair. Two bindings of one name in pane 0 of two GUIs resolve by the pair, and a bare pane number is ambiguous.
+- 10 tests in `tests/wezterm-submit-gate2.test.ts`, at least one per finding, all 10 failing on 4938bc0 (run there with the old dependency shape, at real assertions). The existing suites (`wezterm-honesty`, `wezterm-instances`, `wezterm-submit-gate1`, `orca-honesty`, `orca-gate1`, `delivered-abort-room`, `partial-delivery-room`, `wake-fallback`, `wake-room`, `wake`) follow the pair model. Suite 315.
+
 ### Verified (real agents, test server from this build on port 4299, own data dir; the live 4200 untouched)
 
 | host | agent | GUI instance | route logged | reply |
@@ -35,7 +44,7 @@ Before this build both rows typed the prompt and never submitted it.
 
 ### Known limits
 - **A console that no agent reads.** A pid whose console is read by something other than an agent (a sleeping shell, a WMI-spawned process) takes the wake silently. The server cannot know who reads a console, and nothing confirms that a turn started. In the end-to-end run such a registration was typed into with no warning and no reply.
-- **A pane whose GUI is unknown** (a join from a host that cannot enumerate processes, a mux-server pane) keeps the key `pane:N`, so it still meets any other unknown-GUI pane N for locking: waiting, never a misdirected wake.
+- **A pane whose GUI cannot be determined is not bound** (a join from a host that cannot enumerate processes, a mux-server pane, a join with no pid). Mentions to such an agent go by console injection or its own listen loop.
 
 ### Tests
 - 19 in `tests/wezterm-instances.test.ts`, all failing on d66e805:

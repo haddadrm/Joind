@@ -32,7 +32,7 @@ describe("ChatRoom wake path (mocked injector)", () => {
     const c = new ChatRoom();
     try {
       // Round-5 gate scenario. A knows the full identity and holds an injection.
-      a.join("Codex", 960, 60);
+      a.join("Codex", 960, 60, undefined, undefined, 1);
       a.send("Rami", "@Codex first");
       await vi.advanceTimersByTimeAsync(2000);
       await settle();
@@ -40,13 +40,13 @@ describe("ChatRoom wake path (mocked injector)", () => {
       // A leaves; B (pid-only) and C (pane-only) queue behind A on disjoint keys.
       a.leave("Codex");
       b.join("Codex", 960);
-      c.join("Codex", 0, 60);
+      c.join("Codex", 0, 60, undefined, undefined, 1);
       b.send("Rami", "@Codex from b");
       c.send("Rami", "@Codex from c");
       await vi.advanceTimersByTimeAsync(2000);
       await settle();
       // A comes back with the pairing before its injection completes.
-      a.join("Codex", 960, 60);
+      a.join("Codex", 960, 60, undefined, undefined, 1);
       await releaseOne(); // A's injection finishes (plus its 300ms settle on win32)
       await vi.advanceTimersByTimeAsync(300);
       await settle();

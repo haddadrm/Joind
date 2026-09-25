@@ -125,13 +125,10 @@ describe("c: a pane is checked in the agent's own WezTerm instance and woken thr
     const asked: Array<string | undefined> = [];
     return {
       asked,
-      checkWezTerm: async () => true,
-      listPaneIds: async (socket?: string) => { asked.push(socket); return new Set(over.panes[socket ?? "server"] ?? []); },
-      isInsideWezTerm: async () => true,
+      listPaneIds: async (socket: string) => { asked.push(socket); return new Set(over.panes[socket] ?? []); },
       autoDetect: async () => undefined,
       guiOf: async (pid: number) => weztermGuiOfTree(pid, tree),
       socketForGui: (gui: number) => (over.panes[`/s/gui-sock-${gui}`] ? `/s/gui-sock-${gui}` : undefined),
-      serverSocket: () => "/s/gui-sock-69000",
       log: () => {},
       ...over,
     };
@@ -151,11 +148,12 @@ describe("c: a pane is checked in the agent's own WezTerm instance and woken thr
     expect(r.note).toBe("pane 0 ignored for Agent-B: not a live pane of its WezTerm instance (gui pid 60924)");
   });
 
-  it("the agent's instance has no reachable socket and the server's is another instance: dropped with the instance note", async () => {
+  it("the agent's instance has no reachable socket: dropped, never checked in another instance", async () => {
     const d = deps({ panes: { "/s/gui-sock-69000": [0], server: [0] } });
     const r = await resolvePaneForJoin("Agent-B", 70128, 0, d);
     expect(r.paneId).toBeNull();
-    expect(r.note).toMatch(/^pane 0 belongs to another WezTerm instance \(gui pid 69000\)/);
+    expect(r.note).toBe("pane 0 ignored for Agent-B: its WezTerm instance (gui pid 60924) has no reachable socket");
+    expect(d.asked).toEqual([]);
   });
 
   it("an agent in the server's own instance is accepted as before, and carries its GUI", async () => {
@@ -164,11 +162,11 @@ describe("c: a pane is checked in the agent's own WezTerm instance and woken thr
     expect(r).toEqual({ paneId: 0, gui: 69000 });
   });
 
-  it("no pane requested from another instance: no auto-detection in the server's instance", async () => {
+  it("no pane requested and the agent's own instance unreachable: no auto-detection anywhere, any old pane cleared", async () => {
     let detected = 0;
     const d = deps({ panes: { "/s/gui-sock-69000": [0], server: [0] }, autoDetect: async () => { detected++; return 0; } });
     const r = await resolvePaneForJoin("Agent-B", 70128, undefined, d);
-    expect(r.paneId).toBeUndefined();
+    expect(r.paneId).toBeNull();
     expect(detected).toBe(0);
   });
 

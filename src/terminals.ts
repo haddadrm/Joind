@@ -30,6 +30,9 @@ export interface TerminalInfo {
   tabTitle?: string;
   wtSession?: string;
   weztermPaneId?: number;
+  /** The GUI instance (wezterm-gui pid) whose socket the discovery ran
+   *  through: a pane number means something only together with it. */
+  weztermGui?: number;
 }
 
 interface RawProcess {
@@ -817,7 +820,9 @@ export function getWeztermEnv(): Record<string, string> { return weztermEnv; }
  *  agent's own instance; pane ids are per instance). */
 export async function discoverWezTerm(socket?: string): Promise<TerminalInfo[]> {
   try {
-    const env = weztermProbeEnv(socket ?? weztermEnv.WEZTERM_UNIX_SOCKET);
+    const usedSocket = socket ?? weztermEnv.WEZTERM_UNIX_SOCKET;
+    const env = weztermProbeEnv(usedSocket);
+    const discoveredGui = socketGuiPid(usedSocket) ?? undefined;
     const { stdout } = await execFileAsync(
       weztermPath, ["cli", "--no-auto-start", "list", "--format", "json"],
       { timeout: 5000, env }
@@ -844,6 +849,7 @@ export async function discoverWezTerm(socket?: string): Promise<TerminalInfo[]> 
           type: pattern.type,
           tabTitle: displayTitle,
           weztermPaneId: pane.pane_id,
+          weztermGui: discoveredGui,
         });
         matched = true;
         break;
@@ -860,6 +866,7 @@ export async function discoverWezTerm(socket?: string): Promise<TerminalInfo[]> 
           type: "unknown",
           tabTitle: displayTitle || title,
           weztermPaneId: pane.pane_id,
+          weztermGui: discoveredGui,
         });
       }
     }

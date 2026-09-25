@@ -102,7 +102,7 @@ describe("a wake whose text is in the terminal finishes in place", () => {
   it("locks grew after the text (the gate's sequence): the text once, then its Enters, nothing in between, no warning", async () => {
     const room = new ChatRoom();
     try {
-      room.join("Codex", 100, 7);
+      room.join("Codex", 100, 7, undefined, undefined, 1);
       // After the text arrives, another registration links this terminal to an
       // Orca handle: the required locks grow, Codex's identity does not change.
       state.onFirstSleep = () => { room.join("Linker", 100, undefined, undefined, H); };
@@ -112,7 +112,7 @@ describe("a wake whose text is in the terminal finishes in place", () => {
       expect(state.sends).toHaveLength(3);
       expect(isPrompt(state.sends[0]) && !state.sends[0].payload.endsWith("\r")).toBe(true);
       expect(isEnter(state.sends[1]) && isEnter(state.sends[2])).toBe(true);
-      expect(state.sends.every((s) => s.target === "7")).toBe(true);
+      expect(state.sends.every((s) => s.target === "1:7")).toBe(true);
       expect(state.orca).toEqual([]);
       expect(lines(room).some((t) => /Could not (submit|wake)/.test(t))).toBe(false);
     } finally {
@@ -124,8 +124,8 @@ describe("a wake whose text is in the terminal finishes in place", () => {
   it("two agents on one pane: B's text arrives only after A's Enter, even when the locks grow during A's delay", async () => {
     const room = new ChatRoom();
     try {
-      room.join("A", 100, 7);
-      room.join("B", 101, 7);
+      room.join("A", 100, 7, undefined, undefined, 1);
+      room.join("B", 101, 7, undefined, undefined, 1);
       // The gate's interleave: during A's delay the locks grow and B is
       // mentioned; B's wake queues (with the grown lock set) while A still
       // holds the terminal. Round 2 released A there and let B type first.
@@ -147,8 +147,8 @@ describe("a wake whose text is in the terminal finishes in place", () => {
   it("the agent rejoined as a registration directly sharing the terminal: no replay, no Enter, the partial line", async () => {
     const room = new ChatRoom();
     try {
-      room.join("Codex", 100, 7);
-      state.onFirstSleep = () => { room.join("Codex", 100, 7, undefined, H); };
+      room.join("Codex", 100, 7, undefined, undefined, 1);
+      state.onFirstSleep = () => { room.join("Codex", 100, 7, undefined, H, 1); };
       room.send("Rami", "@Codex ping");
       await run();
       expect(state.sends.filter(isPrompt)).toHaveLength(1);
@@ -167,8 +167,8 @@ describe("a wake whose text is in the terminal finishes in place", () => {
       // Codex pane-only at pane 7; a live bridge registration carries pid 100
       // and pane 7; Codex then rejoins pid-only at 100. No direct overlap with
       // pane 7, but the same terminal through the bridge.
-      room.join("Codex", 0, 7);
-      room.join("Bridge", 100, 7);
+      room.join("Codex", 0, 7, undefined, undefined, 1);
+      room.join("Bridge", 100, 7, undefined, undefined, 1);
       state.onFirstSleep = () => { room.join("Codex", 100, null); };
       room.send("Rami", "@Codex ping");
       await run();
@@ -189,8 +189,8 @@ describe("a wake whose text is in the terminal finishes in place", () => {
       // bridge leaves and rejoins as pid 200 with the same H, and A rejoins
       // pid-only at 200. A's closure now is {pid:200, orca:H}: linked to the
       // terminal holding the text only through H, a key the attempt holds.
-      room.join("A", 0, 7);
-      room.join("Bridge", 100, 7, undefined, H);
+      room.join("A", 0, 7, undefined, undefined, 1);
+      room.join("Bridge", 100, 7, undefined, H, 1);
       state.onFirstSleep = () => {
         room.leave("Bridge");
         room.join("Bridge", 200, null, undefined, H);
@@ -230,12 +230,12 @@ describe("a wake whose text is in the terminal finishes in place", () => {
   it("the agent moved to a disjoint terminal: the old one is never typed into again, the new one gets a fresh wake", async () => {
     const room = new ChatRoom();
     try {
-      room.join("Codex", 100, 7);
-      state.onFirstSleep = () => { room.join("Codex", 200, 8); };
+      room.join("Codex", 100, 7, undefined, undefined, 1);
+      state.onFirstSleep = () => { room.join("Codex", 200, 8, undefined, undefined, 1); };
       room.send("Rami", "@Codex ping");
       await run();
-      const on7 = state.sends.filter((s) => s.target === "7");
-      const on8 = state.sends.filter((s) => s.target === "8");
+      const on7 = state.sends.filter((s) => s.target === "1:7");
+      const on8 = state.sends.filter((s) => s.target === "1:8");
       expect(on7.map((s) => (isEnter(s) ? "enter" : "text"))).toEqual(["text"]);
       expect(on8.map((s) => (isEnter(s) ? "enter" : "text"))).toEqual(["text", "enter", "enter"]);
       expect(on8[0].payload).toContain("pid=200");
@@ -248,7 +248,7 @@ describe("a wake whose text is in the terminal finishes in place", () => {
   it("the agent left after the text arrived: nothing more is typed anywhere", async () => {
     const room = new ChatRoom();
     try {
-      room.join("Codex", 100, 7);
+      room.join("Codex", 100, 7, undefined, undefined, 1);
       state.onFirstSleep = () => { room.leave("Codex"); };
       room.send("Rami", "@Codex ping");
       await run();
@@ -264,7 +264,7 @@ describe("a wake whose text is in the terminal finishes in place", () => {
     state.failWezterm = true;
     const room = new ChatRoom();
     try {
-      room.join("Codex", 100, 7);
+      room.join("Codex", 100, 7, undefined, undefined, 1);
       state.onFirstSleep = () => { room.join("Linker", 100, undefined, undefined, H); };
       room.send("Rami", "@Codex ping");
       await run();

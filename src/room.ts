@@ -29,15 +29,13 @@ export interface TerminalRef { pid: number; weztermPaneId?: number; weztermGui?:
 export function terminalKeys(agent: TerminalRef): string[] {
   const keys: string[] = [];
   if (agent.pid > 0) keys.push(`pid:${agent.pid}`);
-  // Pane ids are per WezTerm GUI instance: pane 0 of GUI 10 and pane 0 of
-  // GUI 20 are different terminals and must not be one for locking,
-  // identity or "is this still the terminal holding the prompt". A pane
-  // whose GUI is unknown (older joins, a host that cannot enumerate
-  // processes, a mux-server pane) keeps the old key, pane:<n>, and so still
-  // meets any other unknown-GUI pane <n>: over-serialization, never a wake
-  // typed into another GUI (the socket follows the GUI, see inject()).
-  if (agent.weztermPaneId != null) {
-    keys.push(agent.weztermGui != null ? `pane:${agent.weztermGui}:${agent.weztermPaneId}` : `pane:${agent.weztermPaneId}`);
+  // Pane ids are per WezTerm GUI instance, so a pane is only ever the pair
+  // (GUI, pane): pane 0 of GUI 10 and pane 0 of GUI 20 are different
+  // terminals for locking, identity and "is this still the terminal holding
+  // the prompt". There is no key for a bare pane number: a pane whose GUI
+  // cannot be determined is never bound (see resolvePaneForJoin and join()).
+  if (agent.weztermPaneId != null && agent.weztermGui != null) {
+    keys.push(`pane:${agent.weztermGui}:${agent.weztermPaneId}`);
   }
   if (agent.orcaTerminal) keys.push(`orca:${agent.orcaTerminal}`);
   return keys.length > 0 ? keys : ["pid:0"];
@@ -245,9 +243,16 @@ export class ChatRoom extends EventEmitter {
       // fresh worker, not the old one, and the old worker's proof of life
       // does not carry over. Learning a pane for the first time is not a
       // new session.
+      // A pane is a pair or nothing: a number without its GUI binds no pane.
+      const bindsPane = weztermPaneId != null && weztermGui != null;
+      const clearsPane = weztermPaneId === null || (weztermPaneId != null && weztermGui == null);
+      // "Nothing learned" (undefined) with a known GUI keeps the old pane
+      // only when it is in that same GUI: a rejoin from another GUI must not
+      // keep a pane of the old one.
+      const keepsOldPane = !bindsPane && !clearsPane && (weztermGui == null || existing.weztermGui === weztermGui);
       const paneReplaced =
-        existing.weztermPaneId != null && weztermPaneId != null &&
-        (existing.weztermPaneId !== weztermPaneId || (existing.weztermGui ?? null) !== (weztermGui ?? null));
+        existing.weztermPaneId != null && bindsPane &&
+        (existing.weztermPaneId !== weztermPaneId || existing.weztermGui !== weztermGui);
       const orcaReplaced =
         existing.orcaTerminal != null && orcaTerminal != null && existing.orcaTerminal !== orcaTerminal;
       if (existing.pid !== pid || paneReplaced || orcaReplaced) {
@@ -257,10 +262,8 @@ export class ChatRoom extends EventEmitter {
       }
       existing.active = true;
       existing.pid = pid;
-      // The GUI travels with the pane: a bound pane sets it (unknown clears
-      // it), a cleared pane clears it, "nothing learned" keeps both.
-      if (weztermPaneId === null) { existing.weztermPaneId = undefined; existing.weztermGui = undefined; }
-      else if (weztermPaneId != null) { existing.weztermPaneId = weztermPaneId; existing.weztermGui = weztermGui; }
+      if (bindsPane) { existing.weztermPaneId = weztermPaneId ?? undefined; existing.weztermGui = weztermGui; }
+      else if (!keepsOldPane) { existing.weztermPaneId = undefined; existing.weztermGui = undefined; }
       if (orcaTerminal === null) existing.orcaTerminal = undefined;
       else if (orcaTerminal != null) existing.orcaTerminal = orcaTerminal;
       if (!existing.role && persistedRole) existing.role = persistedRole;
@@ -280,8 +283,9 @@ export class ChatRoom extends EventEmitter {
       active: true,
       role: persistedRole,
       lastSeen: Date.now(),
-      weztermPaneId: weztermPaneId ?? undefined,
-      weztermGui: weztermPaneId != null ? weztermGui : undefined,
+      // A pane is bound only with its GUI.
+      weztermPaneId: weztermPaneId != null && weztermGui != null ? weztermPaneId : undefined,
+      weztermGui: weztermPaneId != null && weztermGui != null ? weztermGui : undefined,
       orcaTerminal: orcaTerminal ?? undefined,
     };
     this.agents.set(name, agent);
@@ -426,11 +430,14 @@ export class ChatRoom extends EventEmitter {
   private buildWakePrompt(sender: string, agent: Agent): string {
     const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
     const pidParam = agent.pid ? `&pid=${agent.pid}` : "";
-    const paneParam = agent.weztermPaneId != null ? `&paneId=${agent.weztermPaneId}` : "";
+    // A pane identifies the agent only together with its GUI instance.
+    const paneParam = agent.weztermPaneId != null && agent.weztermGui != null ? `&paneId=${agent.weztermPaneId}&weztermGui=${agent.weztermGui}` : "";
     // A handle-only registration is found by its handle (the read and send
     // routes match it before pid and pane); handles are term_<id>, URL-safe.
     const orcaParam = agent.orcaTerminal ? `&orcaTerminal=${encodeURIComponent(agent.orcaTerminal)}` : "";
-    const pidBody = (agent.pid ? `,"pid":${agent.pid}` : "") + (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "");
+    const pidBody = (agent.pid ? `,"pid":${agent.pid}` : "") +
+      (agent.weztermPaneId != null && agent.weztermGui != null ? `,"paneId":${agent.weztermPaneId},"weztermGui":${agent.weztermGui}` : "") +
+      (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "");
     const since = this.getCursor(agent.name);
     return (
       `[joind] @${agent.name} mentioned by ${sender}.${roleHint} ` +
