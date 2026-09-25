@@ -94,6 +94,29 @@ describe("gate round 5: a stray the home refuses for good does not block the nex
     expect(home.registered.filter((n) => n === "Bob")).toHaveLength(1);
   }));
 
+  it("gate round 6: a 409 whose candidates do not name the owners proves nothing; the stray is kept and retried later", async () => {
+    const shapes: unknown[] = [undefined, null, [], [{}], [null], "home", { host: "home" }, [{ host: "" }], [{ host: 7 }], [{ host: "home" }, {}], [{ host: "here" }]];
+    for (const candidates of shapes) {
+      const dir = mkdtempSync(join(tmpdir(), "joind-g6-"));
+      const home = fakeHome();
+      const m = new MirrorRoom({ server: "home", homeId: "c-1", name: "ops", queueFile: join(dir, "c-1.queue.jsonl"), transport: home.transport, selfName: "here" });
+      try {
+        await m.settleHuman("Alice");
+        home.st.loseRegisterReply = true;
+        await m.settleHuman("Bob");                      // Bob unconfirmed
+        const real = home.transport.register;
+        home.transport.register = async (b) => {
+          if (b.name === "Bob") throw new PeerRefusedError(409, "conflict", "name-conflict", candidates === undefined ? { error: "conflict" } : { error: "conflict", candidates });
+          return real(b);
+        };
+        await m.settleHuman("Carol");
+        const label = JSON.stringify(candidates) ?? "missing";
+        expect(m.humanRecord().unconfirmed, label).toBe("Bob");
+        expect(m.humanName(), label).toBe("Alice");
+      } finally { m.destroy(); rmSync(dir, { recursive: true, force: true }); }
+    }
+  });
+
   it("a lost reply for Bob, then the home restarts and Bob is taken there: choosing Carol still goes through", withMirror(async (m, home) => {
     await m.settleHuman("Alice");
     home.st.loseRegisterReply = true;
