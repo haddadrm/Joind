@@ -206,6 +206,12 @@ export class MirrorRoom extends ChatRoom {
   private nameLocks = new Map<string, Promise<void>>();
   /** This server's human in this room: the write-ahead record (gate round 4). */
   private readonly humanState: HumanState;
+  /** Home registrations of members that left here, still to release there
+   *  (a registration whose reply arrived after its member left; gate round
+   *  7, finding 1). Kept until the home confirms (success or 404), and
+   *  saved beside the queue. */
+  private memberReleases: Array<{ name: string; registration: string }> = [];
+  private readonly releasesFile: string | null;
   /** Another drain pass is owed (an entry was unblocked mid-drain; gate
    *  round 3, finding 3). */
   private rerunDrain = false;
@@ -227,6 +233,15 @@ export class MirrorRoom extends ChatRoom {
     this.selfName = opts.selfName;
     this.queue = new UndeliveredQueue(opts.queueFile);
     this.humanState = new HumanState(opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") + ".human.json" : null);
+    this.releasesFile = opts.queueFile ? opts.queueFile.replace(/\.queue\.jsonl$/, "") + ".releases.json" : null;
+    if (this.releasesFile && existsSync(this.releasesFile)) {
+      try {
+        const raw = JSON.parse(readFileSync(this.releasesFile, "utf-8")) as Array<{ name?: unknown; registration?: unknown }>;
+        for (const r of Array.isArray(raw) ? raw : []) {
+          if (typeof r.name === "string" && typeof r.registration === "string") this.memberReleases.push({ name: r.name, registration: r.registration });
+        }
+      } catch { /* a torn file: nothing owed is known */ }
+    }
     // After a restart the reasons of held entries are said again. The viewer
     // is never inferred from the queue: the human record alone says who it
     // is (gate round 4, finding 2).
@@ -642,6 +657,7 @@ export class MirrorRoom extends ChatRoom {
   /** Register (again) every local member and the human with the home
    *  server: idempotent there, and needed after the home restarted. */
   async reregisterAll(): Promise<void> {
+    await this.releaseMembers();
     for (const name of [...this.agents.keys()]) {
       // Under the name's lock, and with the member as it is NOW: a join that
       // committed meanwhile is never replaced by an older registration.
@@ -651,8 +667,13 @@ export class MirrorRoom extends ChatRoom {
         if (!this.agents.has(name) || !registration) continue;
         const info = this.shadows.get(name);
         const r = await this.transport.register({ room: this.homeRoomId, name, host: this.selfName, registration, terminalSummary: info?.terminalSummary, role: info?.role });
-        if (this.registrationOf(name) === registration) {
+        if (this.agents.has(name) && this.registrationOf(name) === registration) {
           this.shadows.set(name, { homeRegistration: r.registration, role: info?.role, terminalSummary: info?.terminalSummary });
+        } else {
+          // The member left while this was in flight: the home now holds a
+          // registration nobody here owns. It is owed a release (finding 1).
+          this.oweMemberRelease(name, r.registration);
+          await this.releaseMembers();
         }
       } catch (err) {
         if (err instanceof LinkDownError) return;
@@ -668,14 +689,70 @@ export class MirrorRoom extends ChatRoom {
 
   override leave(name: string, reason: "deliberate" | "timeout" = "deliberate"): void {
     const had = this.agents.has(name);
-    const reg = this.shadows.get(name)?.homeRegistration;
     super.leave(name, reason);
-    this.shadows.delete(name);
     this.lastTouchSent.delete(name);
-    if (had && reg) {
-      this.transport.leave({ room: this.homeRoomId, name, registration: reg }).catch((err: unknown) => {
-        console.log(`  [link ${this.server}] leave of ${name} not delivered: ${(err as Error).message}`);
-      });
+    if (!had) return;
+    // The home side waits for the name's lock, so a registration in flight
+    // (a recovery, a join) finishes first and its registration is the one
+    // released (gate round 7, finding 1).
+    void (async () => {
+      const release = await this.lockName(name);
+      try {
+        if (this.agents.has(name)) return; // rejoined meanwhile: that join owns the home registration
+        const reg = this.shadows.get(name)?.homeRegistration;
+        this.shadows.delete(name);
+        if (reg) this.oweMemberRelease(name, reg);
+        await this.releaseMembers();
+      } finally {
+        release();
+      }
+    })();
+  }
+
+  private saveMemberReleases(): void {
+    if (!this.releasesFile) return;
+    try {
+      ensureDir(dirname(this.releasesFile));
+      const tmp = `${this.releasesFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.memberReleases), "utf-8");
+      renameSync(tmp, this.releasesFile);
+    } catch (err) {
+      console.log(`  [link ${this.server}] member releases of ${this.id} not saved: ${(err as Error).message}`);
+    }
+  }
+
+  private oweMemberRelease(name: string, registration: string): void {
+    if (this.memberReleases.some((r) => r.name === name && r.registration === registration)) return;
+    this.memberReleases.push({ name, registration });
+    this.saveMemberReleases();
+  }
+
+  /** Home registrations of departed members still to release. */
+  pendingMemberReleases(): Array<{ name: string; registration: string }> {
+    return this.memberReleases.map((r) => ({ ...r }));
+  }
+
+  /** Release what departed members still hold at the home. A debt is
+   *  cleared only when the home confirms (success, or 404: it is gone). */
+  async releaseMembers(): Promise<void> {
+    for (const r of [...this.memberReleases]) {
+      // A member of that name here again may own the name at the home now.
+      if (this.agents.has(r.name) && this.shadows.get(r.name)?.homeRegistration === r.registration) {
+        this.memberReleases = this.memberReleases.filter((x) => x !== r);
+        this.saveMemberReleases();
+        continue;
+      }
+      try {
+        await this.transport.leave({ room: this.homeRoomId, name: r.name, registration: r.registration });
+      } catch (err) {
+        if (err instanceof LinkDownError) { this.transport.failed(err.message); return; }
+        if (!(err instanceof PeerRefusedError && err.status === 404)) {
+          console.log(`  [link ${this.server}] release of ${r.name} in ${this.id} refused (${(err as Error).message}); kept`);
+          continue;
+        }
+      }
+      this.memberReleases = this.memberReleases.filter((x) => x !== r);
+      this.saveMemberReleases();
     }
   }
 
