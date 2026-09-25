@@ -29,7 +29,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
 import { visibleToViewer, type ChatMessage } from "./room.js";
-import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor } from "./tools.js";
+import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
@@ -776,31 +776,34 @@ app.post("/api/join", express.json(), async (req, res) => {
 });
 
 app.post("/api/leave", express.json(), (req, res) => {
-  const { name } = req.body as { name?: string };
+  const { name, conversation } = req.body as { name?: string; conversation?: string };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
+  // The UI removes a member from the conversation it has selected, and only
+  // that conversation's registration: the same name elsewhere (another GUI,
+  // another room) is another registration (gate round 3, finding 3).
+  const convId = conversation ?? manager.getActiveId() ?? undefined;
+  const room = convId ? manager.getRoom(convId) : undefined;
+  if (!convId || !room) { res.status(404).json({ error: "Conversation not found" }); return; }
   manager.supersedeJoins(name);
-  // Leave from whichever conversation they're in
-  const convId = manager.getAgentBinding(name);
-  const room = convId ? manager.getRoom(convId) : manager.getActiveRoom();
-  if (room) room.leave(name);
-  if (convId) {
-    manager.unbindAgent(name, convId);
-  } else {
-    manager.unbindAgent(name);
-  }
+  room.leave(name);
+  manager.unbindAgent(name, convId);
   res.json({ ok: true });
 });
 
 app.post("/api/rename", express.json(), (req, res) => {
-  const room = activeRoom(res);
-  if (!room) return;
-  const { oldName, newName } = req.body as { oldName?: string; newName?: string };
+  const { oldName, newName, conversation } = req.body as { oldName?: string; newName?: string; conversation?: string };
+  const convId = conversation ?? manager.getActiveId() ?? undefined;
+  const room = convId ? manager.getRoom(convId) : undefined;
+  if (!convId || !room) { res.status(400).json({ error: "No active conversation. Create or select one." }); return; }
   if (!oldName || !newName) { res.status(400).json({ error: "oldName and newName required" }); return; }
+  // The registration being renamed is this conversation's, from the member's
+  // own terminal; never a name-only lookup, which is ambiguous when the name
+  // is registered elsewhere too (gate round 3, finding 5).
+  const before = room.getAgent(oldName);
+  const bound = before ? manager.bindingForTerminal(oldName, { pid: before.pid, paneId: before.weztermPaneId, weztermGui: before.weztermGui, orcaTerminal: before.orcaTerminal }, convId) === convId : false;
   const agent = room.rename(oldName, newName);
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
-  // Update binding
-  const convId = manager.getAgentBinding(oldName);
-  if (convId) {
+  if (bound) {
     manager.unbindAgent(oldName, convId);
     manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId, agent.orcaTerminal, agent.weztermGui);
   }
@@ -1474,23 +1477,17 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   if (!name) { res.status(400).json({ error: "name required" }); return; }
 
   // Auto-detect PID/paneId if not provided (an Orca handle names its terminal already)
+  let discoveredGui: number | undefined;
   if (!pid && weztermPaneId == null && requestedOrcaHandle(requestedOrca) === undefined) {
     try {
       const terminals = await discoverTerminals();
-      const allRooms = manager.listConversations().map(c => manager.getRoom(c.id)).filter(Boolean);
-      const takenPids = new Set<number>();
-      const takenPanes = new Set<number>();
-      for (const r of allRooms) { if (r) for (const a of r.who()) {
-        if (a.pid) takenPids.add(a.pid);
-        if (a.weztermPaneId != null) takenPanes.add(a.weztermPaneId);
-      }}
-      const available = terminals.filter(t =>
-        t.type === "claude" &&
-        (t.weztermPaneId != null ? !takenPanes.has(t.weztermPaneId) : !takenPids.has(t.pid))
-      );
+      const available = availableForAutoJoin(terminals, manager.listConversations().map(c => manager.getRoom(c.id)));
       if (available.length === 1) {
         pid = available[0].pid;
         weztermPaneId = available[0].weztermPaneId;
+        // The pane is the pair: keep the GUI its discovery row was found in
+        // (gate round 3, finding 1), for resolution, freshness and the binding.
+        discoveredGui = available[0].weztermPaneId != null ? available[0].weztermGui : undefined;
       } else if (available.length > 1) {
         res.status(300).json({
           error: "Multiple Claude Code processes found. Specify pid or weztermPaneId.",
@@ -1513,13 +1510,13 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   }
 
   if (!manager.getRoom(convId)) { res.status(404).json({ error: "Conversation not found" }); return; }
-  const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId, requestedOrcaHandle(requestedOrca));
+  const joinToken = manager.beginJoin(name, convId, pid, weztermPaneId, requestedOrcaHandle(requestedOrca), discoveredGui);
 
   // Bind a WezTerm pane or an Orca terminal only when it is live and really
   // this process's (one process enumeration shared by both checks).
   const tree = processTreeOnce();
   const [paneResolution, orcaResolution] = await Promise.all([
-    resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager, tree)),
+    resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager, tree), discoveredGui),
     resolveOrcaForJoin(name, pid || 0, requestedOrca, defaultOrcaResolverDeps(manager, tree)),
   ]);
   const boundPane = paneResolution.paneId;
@@ -1659,15 +1656,29 @@ app.post("/api/agent/send", express.json(), (req, res) => {
 app.post("/api/agent/leave", express.json(), (req, res) => {
   const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  manager.supersedeJoins(name);
   const convId = manager.getAgentBinding(name, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  if (!convId) {
+    const candidates = manager.bindingsOf(name);
+    if (candidates.length > 1) {
+      // Several registrations and nothing in the request names one: remove
+      // none of them (gate round 3, finding 3). The caller names its
+      // terminal: pid, the pair (paneId with weztermGui), or orcaTerminal.
+      res.status(409).json({
+        error: "Ambiguous departure: this name is registered more than once. Name your terminal (pid, paneId with weztermGui, or orcaTerminal).",
+        candidates: candidates.map((e) => ({
+          conversation: e.conversationId,
+          ...(e.pid ? { pid: e.pid } : {}),
+          ...(e.paneId != null && e.weztermGui != null ? { paneId: e.paneId, weztermGui: e.weztermGui } : {}),
+          ...(e.orcaTerminal ? { orcaTerminal: e.orcaTerminal } : {}),
+        })),
+      });
+      return;
+    }
+  }
+  manager.supersedeJoins(name);
   const room = convId ? manager.getRoom(convId) : undefined;
   if (room) room.leave(name);
-  if (convId) {
-    manager.unbindAgent(name, convId);
-  } else {
-    manager.unbindAgent(name);
-  }
+  if (convId) manager.unbindAgent(name, convId);
   res.json({ ok: true });
 });
 

@@ -649,7 +649,7 @@ function showPopover(anchor, agent) {
       var newName = renameInput.value.trim();
       if (newName && newName !== agent.name) {
         fetch('/api/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ oldName: agent.name, newName: newName }) });
+          body: JSON.stringify(Object.assign({ oldName: agent.name, newName: newName }, activeConversation && activeConversation.id ? { conversation: activeConversation.id } : {})) });
       }
       closePopover();
     }
@@ -1950,7 +1950,10 @@ function inviteTerminal(t) {
 }
 
 function kickAgent(name) {
-  fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name }) });
+  // Only the selected conversation's member leaves; the same name elsewhere is another registration.
+  var leaveBody = { name: name };
+  if (activeConversation && activeConversation.id) leaveBody.conversation = activeConversation.id;
+  fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leaveBody) });
 }
 
 // --- Sidebar toggle (desktop: show/hide, mobile: drawer overlay) ---

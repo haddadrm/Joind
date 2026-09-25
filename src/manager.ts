@@ -56,6 +56,23 @@ function samePane(e: AgentBindingEntry, paneId: number | undefined, gui: number 
   return paneId != null && gui != null && e.paneId === paneId && e.weztermGui === gui;
 }
 
+/** The terminal a registration was made from: what a session or a caller
+ *  recorded at join time. */
+export interface TerminalAliases {
+  pid?: number;
+  paneId?: number;
+  weztermGui?: number;
+  orcaTerminal?: string;
+}
+
+/** True when a binding answers on one of these exact terminal aliases: the
+ *  pid, the pair (GUI, pane), or the Orca handle. Never "the only binding". */
+export function bindingMatchesTerminal(e: AgentBindingEntry, t: TerminalAliases): boolean {
+  if (t.pid != null && t.pid !== 0 && e.pid === t.pid) return true;
+  if (samePane(e, t.paneId, t.weztermGui)) return true;
+  return t.orcaTerminal != null && e.orcaTerminal === t.orcaTerminal;
+}
+
 export class ConversationManager extends EventEmitter {
   private conversations = new Map<string, ChatRoom>();
   private meta = new Map<string, ConversationMeta>();
@@ -457,6 +474,22 @@ export class ConversationManager extends EventEmitter {
       if (room.getAgent(agentName)?.orcaTerminal != null) return true;
     }
     return false;
+  }
+
+  /** Copies of this name's registrations, for callers that must decide
+   *  between them (an ambiguous departure lists them; a session checks its own). */
+  bindingsOf(agentName: string): AgentBindingEntry[] {
+    return (this.agentBindings.get(agentName) ?? []).map((e) => ({ ...e }));
+  }
+
+  /** The conversation of this name's registration made from exactly this
+   *  terminal, preferring `conversationId` when given; no fallback to a
+   *  lone binding (a session must not be re-pointed at another terminal's
+   *  registration). */
+  bindingForTerminal(agentName: string, t: TerminalAliases, conversationId?: string): string | undefined {
+    const entries = this.agentBindings.get(agentName) ?? [];
+    const own = conversationId != null ? entries.find((e) => e.conversationId === conversationId && bindingMatchesTerminal(e, t)) : undefined;
+    return (own ?? entries.find((e) => bindingMatchesTerminal(e, t)))?.conversationId;
   }
 
   unbindAgent(agentName: string, conversationId?: string): void {

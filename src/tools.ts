@@ -9,7 +9,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ConversationManager } from "./manager.js";
+import { ConversationManager, type TerminalAliases } from "./manager.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { visibleToViewer } from "./room.js";
 import type { TaskStore } from "./tasks.js";
@@ -271,28 +271,79 @@ async function autoDetectWezTermPane(manager: ConversationManager, socket: strin
   return undefined;
 }
 
-// Session bindings are a FALLBACK — agent name bindings are primary.
-// This means MCP reconnects don't break routing as long as the agent
-// previously joined via chat_join (which sets the name binding).
-const sessionBindings = new Map<string | undefined, string>(); // sessionId → conversationId
-
-function getRoom(manager: ConversationManager, extra: { sessionId?: string }, senderHint?: string) {
-  // 1. Agent name binding (survives MCP reconnects)
-  if (senderHint) {
-    const agentConvId = manager.getAgentConversationId(senderHint);
-    if (agentConvId) {
-      const room = manager.getRoom(agentConvId);
-      if (room) return { room, convId: agentConvId };
+/**
+ * Candidates for the REST auto-join (no pid, pane or Orca handle supplied):
+ * discovered Claude Code terminals not already registered in any room. A
+ * WezTerm row is claimed only by a member in the same pane of the same GUI
+ * (the complete pair, gate round 3, finding 2), and a row with a pane but no
+ * GUI is no candidate at all, since such a pane cannot be bound. Other rows
+ * are claimed by pid.
+ */
+export function availableForAutoJoin<T extends { type: string; pid: number; weztermPaneId?: number; weztermGui?: number }>(
+  terminals: T[],
+  rooms: ReadonlyArray<{ who(): ReadonlyArray<{ pid: number; weztermPaneId?: number; weztermGui?: number }> } | undefined>,
+): T[] {
+  const takenPids = new Set<number>();
+  const takenPairs = new Set<string>();
+  for (const r of rooms) {
+    if (!r) continue;
+    for (const a of r.who()) {
+      if (a.pid) takenPids.add(a.pid);
+      if (a.weztermPaneId != null && a.weztermGui != null) takenPairs.add(`${a.weztermGui}:${a.weztermPaneId}`);
     }
   }
-  // 2. MCP session binding (set on chat_join, lost on reconnect)
-  const convId = sessionBindings.get(extra.sessionId);
-  if (convId) {
+  return terminals.filter((t) => {
+    if (t.type !== "claude") return false;
+    if (t.weztermPaneId != null) return t.weztermGui != null && !takenPairs.has(`${t.weztermGui}:${t.weztermPaneId}`);
+    return !takenPids.has(t.pid);
+  });
+}
+
+/** What an MCP session registered on chat_join: the room, the name, and the
+ *  terminal it joined from. The session's routing follows this registration
+ *  only (gate round 3, finding 4): a departure of it means the session must
+ *  rejoin, never that it is re-pointed at another registration of the name. */
+export interface SessionRegistration extends TerminalAliases {
+  convId: string;
+  name: string;
+}
+
+const sessionBindings = new Map<string | undefined, SessionRegistration>(); // sessionId -> registration
+
+/**
+ * The room an MCP call routes to.
+ * - With a session registration: that registration while it stands (the
+ *   name's binding in its room, from its own terminal). If the binding moved
+ *   (the same terminal rejoined elsewhere, or was renamed), follow it; any
+ *   binding from another terminal, even the only one left, is not this
+ *   session's, so the answer is null and the agent must rejoin.
+ * - With no registration (an MCP reconnect lost it): the name's binding,
+ *   when it is unambiguous.
+ */
+export function routeSessionRoom(
+  manager: ConversationManager, reg: SessionRegistration | undefined, senderHint?: string
+): { room: NonNullable<ReturnType<ConversationManager["getRoom"]>>; convId: string } | null {
+  if (reg) {
+    const name = senderHint ?? reg.name;
+    const convId = manager.bindingForTerminal(name, reg, reg.convId);
+    if (!convId) return null;
     const room = manager.getRoom(convId);
-    if (room) return { room, convId };
+    if (!room) return null;
+    reg.convId = convId;
+    reg.name = name;
+    return { room, convId };
   }
-  // No fallback — agent must chat_join first to avoid cross-conversation pollution
+  if (senderHint) {
+    const convId = manager.getAgentConversationId(senderHint);
+    const room = convId ? manager.getRoom(convId) : undefined;
+    if (convId && room) return { room, convId };
+  }
+  // No fallback: the agent must chat_join first to avoid cross-conversation pollution
   return null;
+}
+
+function getRoom(manager: ConversationManager, extra: { sessionId?: string }, senderHint?: string) {
+  return routeSessionRoom(manager, sessionBindings.get(extra.sessionId), senderHint);
 }
 
 export function registerTools(
@@ -365,7 +416,10 @@ export function registerTools(
       const persistedRole = getPersistedRole?.(name);
       const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui);
       manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca, paneResolution.gui);
-      sessionBindings.set(extra.sessionId, convId);
+      sessionBindings.set(extra.sessionId, {
+        convId, name, pid,
+        paneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal,
+      });
       room.touch(name);
 
       // Name the WezTerm tab to just the agent name
@@ -610,9 +664,10 @@ export function registerTools(
       if (target) {
         target.room.leave(name);
         manager.unbindAgent(name, target.convId);
-      } else {
-        manager.unbindAgent(name);
       }
+      // No target: this session's registration is already gone, or the name
+      // is ambiguous. Either way another registration of the name is not
+      // this session's to remove (gate round 3, finding 3).
       sessionBindings.delete(extra.sessionId);
       return { content: [{ type: "text" as const, text: `${name} disconnected` }] };
     }
