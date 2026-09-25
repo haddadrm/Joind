@@ -37,7 +37,7 @@ describe("finding 1: the REST auto-join carries the GUI its discovery row was fo
     expect(route).toMatch(/manager\.beginJoin\(name, convId, pid, weztermPaneId, requestedOrcaHandle\(requestedOrca\), discoveredGui\)/);
     expect(route).toMatch(/resolvePaneForJoin\(name, pid \|\| 0, weztermPaneId, defaultPaneResolverDeps\(manager, tree\), discoveredGui\)/);
     // The binding gets the resolved pair (resolution returns the GUI it used).
-    expect(route).toMatch(/manager\.bindAgent\(name, convId, pid, boundPane, boundOrca, paneResolution\.gui\)/);
+    expect(route).toMatch(/manager\.bindAgent\(name, convId, pid, boundPane, boundOrca, paneResolution\.gui, registration\)/);
   });
 
   it("a discovery row (pid 0, GUI 200, pane 0) resolves to the pair through the discovered GUI", async () => {

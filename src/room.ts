@@ -173,6 +173,11 @@ export function setDefaultPresenceGrace(ms: number): void {
   if (Number.isFinite(ms) && ms >= 120_000) DEFAULT_PRESENCE_GRACE_MS = ms;
 }
 
+/** Each room member's registration id (see AgentBindingEntry.registration).
+ *  Kept beside the member rather than on it: member objects are served to
+ *  web clients, and the id is a caller's proof of its registration. */
+const memberRegistrations = new WeakMap<Agent, string>();
+
 export class ChatRoom extends EventEmitter {
   private messages: ChatMessage[] = [];
   private agents = new Map<string, Agent>();
@@ -233,8 +238,9 @@ export class ChatRoom extends EventEmitter {
    *  before (the join proved it stale), undefined leaves it as it was.
    *  `orcaTerminal` follows the same rule: a handle binds, null clears,
    *  undefined keeps. */
-  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null, weztermGui?: number): Agent {
+  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null, weztermGui?: number, registration?: string): Agent {
     const existing = this.agents.get(name);
+    if (existing && registration != null) memberRegistrations.set(existing, registration);
     if (existing) {
       const now = Date.now();
       const previousIdentity = terminalIdentity(existing);
@@ -288,6 +294,7 @@ export class ChatRoom extends EventEmitter {
       weztermGui: weztermPaneId != null && weztermGui != null ? weztermGui : undefined,
       orcaTerminal: orcaTerminal ?? undefined,
     };
+    if (registration != null) memberRegistrations.set(agent, registration);
     this.agents.set(name, agent);
     liveTerminals.set(this.warnKey(name), terminalRefOf(agent));
     wakes.forget(this.warnKey(name)); // a new session starts with a clean wake record
@@ -676,6 +683,13 @@ export class ChatRoom extends EventEmitter {
         this.leave(name, "timeout");
       }
     }
+  }
+
+  /** The registration id of this room's member of that name (the id the
+   *  join issued; it follows the member through a rename). */
+  registrationOf(name: string): string | undefined {
+    const agent = this.agents.get(name);
+    return agent ? memberRegistrations.get(agent) : undefined;
   }
 
   rename(oldName: string, newName: string): Agent | null {

@@ -9,7 +9,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ConversationManager, type TerminalAliases } from "./manager.js";
+import { ConversationManager, isTerminalLess, newRegistrationId, type AgentBindingEntry, type TerminalAliases } from "./manager.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { visibleToViewer } from "./room.js";
 import type { TaskStore } from "./tasks.js";
@@ -299,10 +299,11 @@ export function availableForAutoJoin<T extends { type: string; pid: number; wezt
   });
 }
 
-/** What an MCP session registered on chat_join: the room, the name, and the
- *  terminal it joined from. The session's routing follows this registration
- *  only (gate round 3, finding 4): a departure of it means the session must
- *  rejoin, never that it is re-pointed at another registration of the name. */
+/** What an MCP session registered on chat_join: the room, the name, the
+ *  registration id the join issued, and the terminal it joined from. The
+ *  session's routing follows this record only: a departure of it means the
+ *  session must rejoin, never that it is re-pointed at another registration
+ *  of the name (gate rounds 3 and 4, finding 4 and finding 1). */
 export interface SessionRegistration extends TerminalAliases {
   convId: string;
   name: string;
@@ -310,41 +311,64 @@ export interface SessionRegistration extends TerminalAliases {
 
 const sessionBindings = new Map<string | undefined, SessionRegistration>(); // sessionId -> registration
 
-/**
- * The room an MCP call routes to.
- * - With a session registration: that registration while it stands (the
- *   name's binding in its room, from its own terminal). If the binding moved
- *   (the same terminal rejoined elsewhere, or was renamed), follow it; any
- *   binding from another terminal, even the only one left, is not this
- *   session's, so the answer is null and the agent must rejoin.
- * - With no registration (an MCP reconnect lost it): the name's binding,
- *   when it is unambiguous.
- */
-export function routeSessionRoom(
-  manager: ConversationManager, reg: SessionRegistration | undefined, senderHint?: string
-): { room: NonNullable<ReturnType<ConversationManager["getRoom"]>>; convId: string } | null {
-  if (reg) {
-    const name = senderHint ?? reg.name;
-    const convId = manager.bindingForTerminal(name, reg, reg.convId);
-    if (!convId) return null;
-    const room = manager.getRoom(convId);
-    if (!room) return null;
-    reg.convId = convId;
-    reg.name = name;
-    return { room, convId };
-  }
-  if (senderHint) {
-    const convId = manager.getAgentConversationId(senderHint);
-    const room = convId ? manager.getRoom(convId) : undefined;
-    if (convId && room) return { room, convId };
-  }
-  // No fallback: the agent must chat_join first to avoid cross-conversation pollution
-  return null;
+export interface SessionRoute {
+  room: NonNullable<ReturnType<ConversationManager["getRoom"]>>;
+  convId: string;
+  entry: AgentBindingEntry;
 }
 
-function getRoom(manager: ConversationManager, extra: { sessionId?: string }, senderHint?: string) {
-  return routeSessionRoom(manager, sessionBindings.get(extra.sessionId), senderHint);
+/**
+ * The room an MCP call routes to.
+ * - A `registration` id named in the call: that registration of the name,
+ *   and nothing else (an id that matches nothing is an answer of null).
+ * - A session record: its registration by id, else a binding of the same
+ *   name from exactly the same terminal (a pid or the (GUI, pane) pair, an
+ *   Orca handle). Never "the only binding left".
+ * - No record (a fresh transport after a reconnect, or after chat_leave): no
+ *   name lookup, so the agent must chat_join again. One narrow exception, by
+ *   design: when exactly one registration of the name exists anywhere and it
+ *   is terminal-less (pid 0, no pane, no handle), it is used. That is the
+ *   interactive REPL agent, which has no terminal to name and may not have
+ *   kept its id; with one such registration there is nothing to confuse it with.
+ */
+export function routeSessionRoom(
+  manager: ConversationManager, reg: SessionRegistration | undefined, senderHint?: string, registration?: string
+): SessionRoute | null {
+  const name = senderHint ?? reg?.name;
+  if (!name) return null;
+  let entry: AgentBindingEntry | undefined;
+  if (registration != null) {
+    entry = manager.bindingsOf(name).find((e) => e.registration === registration);
+  } else if (reg) {
+    entry = manager.bindingEntryForTerminal(name, reg, reg.convId);
+  } else {
+    const all = manager.bindingsOf(name);
+    if (all.length === 1 && isTerminalLess(all[0])) entry = all[0];
+  }
+  if (!entry) return null;
+  const room = manager.getRoom(entry.conversationId);
+  if (!room) return null;
+  return { room, convId: entry.conversationId, entry };
 }
+
+function getRoom(manager: ConversationManager, extra: { sessionId?: string }, senderHint?: string, registration?: string): SessionRoute | null {
+  const reg = sessionBindings.get(extra.sessionId);
+  const route = routeSessionRoom(manager, reg, senderHint, registration);
+  if (route) {
+    // The session now follows the registration it reached (by its record,
+    // or proved by the id the call named).
+    const e = route.entry;
+    sessionBindings.set(extra.sessionId, {
+      convId: e.conversationId, name: senderHint ?? reg?.name ?? "", registration: e.registration,
+      pid: e.pid, paneId: e.paneId, weztermGui: e.weztermGui, orcaTerminal: e.orcaTerminal,
+    });
+  }
+  return route;
+}
+
+const registrationArg = z.string().optional().describe(
+  "The registration id your join returned. Pass it when your name may be registered more than once, and after an MCP reconnect."
+);
 
 export function registerTools(
   server: McpServer,
@@ -414,10 +438,11 @@ export function registerTools(
       }
 
       const persistedRole = getPersistedRole?.(name);
-      const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui);
-      manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca, paneResolution.gui);
+      const registration = newRegistrationId();
+      const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui, registration);
+      manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca, paneResolution.gui, registration);
       sessionBindings.set(extra.sessionId, {
-        convId, name, pid,
+        convId, name, registration, pid,
         paneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal,
       });
       room.touch(name);
@@ -453,6 +478,7 @@ export function registerTools(
           text:
             `Joined conversation "${meta?.name ?? convId}".\n` +
             `Online: ${online.join(", ") || "just you"}` +
+            `\nRegistration: ${registration} (pass it as \`registration\` when your name may be registered more than once, and after an MCP reconnect)` +
             (agent.weztermPaneId != null && agent.weztermGui != null ? `\nWezTerm pane: ${agent.weztermPaneId} in instance (weztermGui) ${agent.weztermGui}` : "") +
             (agent.orcaTerminal ? `\nOrca terminal: ${agent.orcaTerminal} (mentions arrive through Orca)` : "") +
             joinNotesText([paneNote, orcaNote]) +
@@ -473,10 +499,11 @@ export function registerTools(
         replyTo: z.number().optional().describe("Message ID to reply to"),
         choices: z.array(z.string()).optional().describe("Inline decision options. Renders clickable buttons; first answer wins."),
         askFor: z.string().optional().describe("Name this message needs a decision from (e.g. Admiral). Creates a first-class open ask, queryable via chat_decisions and the web Decisions pane, resolved with chat_resolve."),
+        registration: registrationArg,
       }),
     },
-    async ({ sender, text, replyTo, choices, askFor }, extra) => {
-      const target = getRoom(manager, extra, sender);
+    async ({ sender, text, replyTo, choices, askFor, registration }, extra) => {
+      const target = getRoom(manager, extra, sender, registration);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
@@ -556,10 +583,11 @@ export function registerTools(
         since: z.number().optional().describe("Message ID to read from (exclusive). Omit for latest."),
         limit: z.number().optional().describe("Max messages to return (default 50)"),
         from: z.string().optional().describe("Filter messages by sender name (e.g., 'Admiral')"),
+        registration: registrationArg,
       }),
     },
-    async ({ sender, since, limit, from }, extra) => {
-      const target = getRoom(manager, extra, sender);
+    async ({ sender, since, limit, from, registration }, extra) => {
+      const target = getRoom(manager, extra, sender, registration);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
@@ -589,10 +617,11 @@ export function registerTools(
         since: z.number().optional().describe("Message ID cursor (exclusive); pass the lastId from the previous listen or read"),
         timeoutSec: z.number().optional().describe("Seconds to wait before returning empty (default 50, max 240)"),
         mentionsOnly: z.boolean().optional().describe("Wake and deliver only messages that address you with @YourName or @all; unaddressed traffic advances the cursor silently (protects your context budget; catch up with chat_read if needed)"),
+        registration: registrationArg,
       }),
     },
-    async ({ sender, since, timeoutSec, mentionsOnly }, extra) => {
-      const target = getRoom(manager, extra, sender);
+    async ({ sender, since, timeoutSec, mentionsOnly, registration }, extra) => {
+      const target = getRoom(manager, extra, sender, registration);
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
@@ -654,21 +683,24 @@ export function registerTools(
       description: "Disconnect from the Joind conversation.",
       inputSchema: z.object({
         name: z.string().describe("Your name"),
+        registration: registrationArg,
       }),
     },
-    async ({ name }, extra) => {
+    async ({ name, registration }, extra) => {
       // Even before any binding exists (a first join still validating), a
       // leave must win over that join.
       manager.supersedeJoins(name);
-      const target = getRoom(manager, extra, name);
-      if (target) {
-        target.room.leave(name);
-        manager.unbindAgent(name, target.convId);
-      }
-      // No target: this session's registration is already gone, or the name
-      // is ambiguous. Either way another registration of the name is not
-      // this session's to remove (gate round 3, finding 3).
+      const target = routeSessionRoom(manager, sessionBindings.get(extra.sessionId), name, registration);
       sessionBindings.delete(extra.sessionId);
+      if (!target) {
+        // This session's registration is already gone, or nothing names one:
+        // another registration of the name is not this session's to remove.
+        return { content: [{ type: "text" as const, text: `${name}: no registration of this session to leave (already left, or pass registration)` }] };
+      }
+      // Exactly the registration it names: the room member when it is that
+      // registration's, and the one binding.
+      if (target.room.registrationOf(name) === target.entry.registration) target.room.leave(name);
+      manager.unbindRegistration(name, target.entry.registration);
       return { content: [{ type: "text" as const, text: `${name} disconnected` }] };
     }
   );

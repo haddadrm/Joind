@@ -27,7 +27,7 @@ import { setDefaultPresenceGrace, setInjectBaseUrl } from "./room.js";
 import { injectBaseUrlFor } from "./wake.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { ConversationManager } from "./manager.js";
+import { ConversationManager, newRegistrationId, isTerminalLess } from "./manager.js";
 import { visibleToViewer, type ChatMessage } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin } from "./tools.js";
 import { TaskStore } from "./tasks.js";
@@ -764,12 +764,13 @@ app.post("/api/join", express.json(), async (req, res) => {
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
   if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined, boundOrca ?? undefined, paneResolution.gui)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
-  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name], boundOrca, paneResolution.gui);
-  manager.bindAgent(name, convId, pid, weztermPaneId, boundOrca, paneResolution.gui);
+  const registration = newRegistrationId();
+  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name], boundOrca, paneResolution.gui, registration);
+  manager.bindAgent(name, convId, pid, weztermPaneId, boundOrca, paneResolution.gui, registration);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
   res.json({
-    name: agent.name, pid: agent.pid, weztermPaneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal, online: room.whoNames(),
+    name: agent.name, registration, pid: agent.pid, weztermPaneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal, online: room.whoNames(),
     ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
     ...(orcaResolution.note ? { orcaNote: orcaResolution.note } : {}),
   });
@@ -799,13 +800,16 @@ app.post("/api/rename", express.json(), (req, res) => {
   // The registration being renamed is this conversation's, from the member's
   // own terminal; never a name-only lookup, which is ambiguous when the name
   // is registered elsewhere too (gate round 3, finding 5).
-  const before = room.getAgent(oldName);
-  const bound = before ? manager.bindingForTerminal(oldName, { pid: before.pid, paneId: before.weztermPaneId, weztermGui: before.weztermGui, orcaTerminal: before.orcaTerminal }, convId) === convId : false;
+  // The member's registration id names it, terminal or not (gate round 4,
+  // finding 2: a terminal-less registration has nothing else to match).
+  const registration = room.registrationOf(oldName);
+  const bound = registration != null && manager.bindingsOf(oldName).some((e) => e.conversationId === convId && e.registration === registration);
   const agent = room.rename(oldName, newName);
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
-  if (bound) {
-    manager.unbindAgent(oldName, convId);
-    manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId, agent.orcaTerminal, agent.weztermGui);
+  if (bound && registration != null) {
+    // The same registration under its new name: same id, same terminal.
+    manager.unbindRegistration(oldName, registration);
+    manager.bindAgent(newName, convId, agent.pid, agent.weztermPaneId, agent.orcaTerminal, agent.weztermGui, registration);
   }
   res.json({ name: agent.name, pid: agent.pid });
 });
@@ -917,7 +921,7 @@ app.post("/api/message/:id/resolve", express.json(), (req, res) => {
     }
   } else {
     if (!sender) { res.status(400).json({ error: "sender required" }); return; }
-    const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+    const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
     if (!ctx) return;
     room = ctx.room;
     by = sender;
@@ -984,7 +988,7 @@ app.get("/api/agent/decisions", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const bound = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const bound = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!bound) return;
   const forName = req.query.for as string | undefined;
   const out: unknown[] = [];
@@ -1063,7 +1067,7 @@ app.get("/api/agent/unread", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   const cursor = cursorStore.get(sender);
   const newMsgs = ctx.room.read(cursor, 100000, undefined, sender);
@@ -1441,14 +1445,32 @@ function weztermGuiOf(req: express.Request): number | undefined {
   return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
+/** The registration id a request names (query or body `registration`). */
+function registrationOf(req: express.Request): string | undefined {
+  const raw = req.query?.registration ?? (req.body as { registration?: unknown } | undefined)?.registration;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
+/** The candidates of a name registered more than once, for a 403 or 409:
+ *  where each is and the terminal it answers on (never the ids). */
+function registrationCandidates(name: string) {
+  return manager.bindingsOf(name).map((e) => ({
+    conversation: e.conversationId,
+    ...(e.pid ? { pid: e.pid } : {}),
+    ...(e.paneId != null && e.weztermGui != null ? { paneId: e.paneId, weztermGui: e.weztermGui } : {}),
+    ...(e.orcaTerminal ? { orcaTerminal: e.orcaTerminal } : {}),
+    ...(isTerminalLess(e) ? { terminalLess: true } : {}),
+  }));
+}
+
 /** Helper: get agent's room by name binding (with optional pid, pane with
  *  its GUI, or Orca handle disambiguation) */
-function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number, orcaTerminal?: string, weztermGui?: number) {
+function agentRoom(name: string, res: express.Response, pid?: number, paneId?: number, orcaTerminal?: string, weztermGui?: number, registration?: string) {
   // Security gate: an existing binding is the credential. getAgentBinding is a
   // pure lookup and never creates one; bindings exist only after a join flow
   // (MCP chat_join, /api/agent/join, or the UI invite /api/join). A local HTTP
   // client claiming an unbound name gets nothing.
-  const convId = manager.getAgentBinding(name, pid, paneId, orcaTerminal, weztermGui);
+  const convId = manager.getAgentBinding(name, pid, paneId, orcaTerminal, weztermGui, registration);
   if (convId) {
     const room = manager.getRoom(convId);
     if (room) {
@@ -1465,6 +1487,13 @@ function agentRoom(name: string, res: express.Response, pid?: number, paneId?: n
   }
   // No binding, no service: 403 (not 400) so scanners don't mistake this for
   // a malformed request, and so the credential requirement is explicit.
+  const candidates = registrationCandidates(name);
+  if (registration == null && candidates.length > 1) {
+    // Several registrations of this name and nothing in the request names
+    // one: serve none of them (gate round 4, finding 2).
+    res.status(403).json({ error: "Ambiguous: this name is registered more than once. Pass registration (from your join reply), pid, or paneId with weztermGui.", candidates });
+    return null;
+  }
   res.status(403).json({ error: "No binding for this agent. Join first (chat_join), then retry." });
   return null;
 }
@@ -1529,8 +1558,9 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
   if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined, boundOrca ?? undefined, paneResolution.gui)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
 
-  const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui);
-  manager.bindAgent(name, convId, pid, boundPane, boundOrca, paneResolution.gui);
+  const registration = newRegistrationId();
+  const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui, registration);
+  manager.bindAgent(name, convId, pid, boundPane, boundOrca, paneResolution.gui, registration);
   room.touch(name);
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
@@ -1552,6 +1582,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
 
   res.json({
     ok: true,
+    registration,
     conversation: { id: convId, name: meta?.name ?? convId },
     online: room.whoNames(),
     lastMessageId: lastId,
@@ -1570,7 +1601,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
 app.post("/api/agent/heartbeat", express.json(), (req, res) => {
   const { name, pid, paneId } = (req.body ?? {}) as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   ctx.room.touch(name);
   res.json({ ok: true, at: Date.now() });
@@ -1581,7 +1612,7 @@ app.get("/api/agent/listen", async (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   const since = req.query.since != null ? Number(req.query.since) : undefined;
   const timeoutMs = clampListenTimeout(
@@ -1609,7 +1640,7 @@ app.get("/api/agent/read", (req, res) => {
   if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
   const pid = req.query.pid != null ? Number(req.query.pid) : undefined;
   const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   const since = req.query.since != null ? Number(req.query.since) : undefined;
   const limit = Number(req.query.limit ?? 50);
@@ -1638,7 +1669,7 @@ app.post("/api/agent/send", express.json(), (req, res) => {
     recipients = [...new Set((to as string[]).map((t) => t.trim()).filter((t) => t !== sender))];
     if (recipients.length === 0) { res.status(400).json({ error: "to must name someone other than the sender" }); return; }
   }
-  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   ctx.room.touch(sender);
   ctx.room.setTyping(sender, false);
@@ -1656,7 +1687,13 @@ app.post("/api/agent/send", express.json(), (req, res) => {
 app.post("/api/agent/leave", express.json(), (req, res) => {
   const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const convId = manager.getAgentBinding(name, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const registration = registrationOf(req);
+  const convId = manager.getAgentBinding(name, pid, paneId, orcaOf(req), weztermGuiOf(req), registration);
+  if (!convId && registration != null) {
+    // A named registration that does not exist is not a reason to remove another.
+    res.status(404).json({ error: "No such registration for this name (already left, or rejoined with a new id)" });
+    return;
+  }
   if (!convId) {
     const candidates = manager.bindingsOf(name);
     if (candidates.length > 1) {
@@ -1664,13 +1701,8 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
       // none of them (gate round 3, finding 3). The caller names its
       // terminal: pid, the pair (paneId with weztermGui), or orcaTerminal.
       res.status(409).json({
-        error: "Ambiguous departure: this name is registered more than once. Name your terminal (pid, paneId with weztermGui, or orcaTerminal).",
-        candidates: candidates.map((e) => ({
-          conversation: e.conversationId,
-          ...(e.pid ? { pid: e.pid } : {}),
-          ...(e.paneId != null && e.weztermGui != null ? { paneId: e.paneId, weztermGui: e.weztermGui } : {}),
-          ...(e.orcaTerminal ? { orcaTerminal: e.orcaTerminal } : {}),
-        })),
+        error: "Ambiguous departure: this name is registered more than once. Pass registration (from your join reply), pid, paneId with weztermGui, or orcaTerminal.",
+        candidates: registrationCandidates(name),
       });
       return;
     }
@@ -1685,7 +1717,7 @@ app.post("/api/agent/leave", express.json(), (req, res) => {
 app.post("/api/agent/typing", express.json(), (req, res) => {
   const { name, typing, pid, paneId } = req.body as { name?: string; typing?: boolean; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   ctx.room.setTyping(name, typing ?? true);
   res.json({ ok: true });
@@ -1694,7 +1726,7 @@ app.post("/api/agent/typing", express.json(), (req, res) => {
 app.post("/api/agent/heartbeat", express.json(), (req, res) => {
   const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   ctx.room.touch(name);
   res.json({ ok: true });
@@ -1703,7 +1735,7 @@ app.post("/api/agent/heartbeat", express.json(), (req, res) => {
 app.post("/api/agent/status", express.json(), (req, res) => {
   const { name, status, pid, paneId } = req.body as { name?: string; status?: string; pid?: number; paneId?: number };
   if (!name) { res.status(400).json({ error: "name required" }); return; }
-  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req));
+  const ctx = agentRoom(name, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
   if (!ctx) return;
   const agent = ctx.room.setStatus(name, status ?? "");
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }

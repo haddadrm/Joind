@@ -6,6 +6,7 @@
  * The web UI has an "active" conversation it's viewing.
  */
 
+import { randomUUID } from "crypto";
 import { EventEmitter } from "events";
 import { join } from "path";
 import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } from "fs";
@@ -38,6 +39,13 @@ export interface JoinToken {
  *  terminal aliases it answers on (pid, WezTerm pane, Orca handle). */
 export interface AgentBindingEntry {
   conversationId: string;
+  /** Server-issued, opaque, unique per join (gate round 4 on
+   *  feat/wezterm-submit). It identifies this registration independently of
+   *  its terminal aliases, so a terminal-less registration (pid 0, no pane,
+   *  no Orca handle) can still be named, and a caller that names its
+   *  registration never gets another one of the same name. The room member
+   *  holds the same id (ChatRoom.registrationOf). */
+  registration: string;
   pid?: number;
   /** A WezTerm pane is only ever bound together with its GUI instance
    *  (weztermGui, the wezterm-gui pid): pane ids are per instance, so a bare
@@ -45,6 +53,18 @@ export interface AgentBindingEntry {
   paneId?: number;
   weztermGui?: number;
   orcaTerminal?: string;
+}
+
+/** A registration with no terminal alias at all: pid 0, no pane, no Orca
+ *  handle (an interactive REPL agent that cannot name its terminal). Only
+ *  its registration id identifies it. */
+export function isTerminalLess(e: AgentBindingEntry): boolean {
+  return !e.pid && e.paneId == null && e.orcaTerminal == null;
+}
+
+/** A fresh registration id: opaque and unique per join. */
+export function newRegistrationId(): string {
+  return `reg-${randomUUID()}`;
 }
 
 /** The alias of a WezTerm pane: its GUI and its number, never the number alone. */
@@ -59,6 +79,8 @@ function samePane(e: AgentBindingEntry, paneId: number | undefined, gui: number 
 /** The terminal a registration was made from: what a session or a caller
  *  recorded at join time. */
 export interface TerminalAliases {
+  /** The registration id the join returned; matched before any alias. */
+  registration?: string;
   pid?: number;
   paneId?: number;
   weztermGui?: number;
@@ -68,6 +90,7 @@ export interface TerminalAliases {
 /** True when a binding answers on one of these exact terminal aliases: the
  *  pid, the pair (GUI, pane), or the Orca handle. Never "the only binding". */
 export function bindingMatchesTerminal(e: AgentBindingEntry, t: TerminalAliases): boolean {
+  if (t.registration != null && e.registration === t.registration) return true;
   if (t.pid != null && t.pid !== 0 && e.pid === t.pid) return true;
   if (samePane(e, t.paneId, t.weztermGui)) return true;
   return t.orcaTerminal != null && e.orcaTerminal === t.orcaTerminal;
@@ -431,7 +454,10 @@ export class ConversationManager extends EventEmitter {
    *  bound only with its GUI (`gui`): a pane number without one binds
    *  nothing and clears the old pane; "keep" (undefined) with a known `gui`
    *  keeps the old pane only when it is in that same GUI. */
-  bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number | null, orcaTerminal?: string | null, gui?: number): void {
+  bindAgent(agentName: string, conversationId: string, pid?: number, paneId?: number | null, orcaTerminal?: string | null, gui?: number, registration?: string): string {
+    // Each join is a new registration (a fresh id) unless the caller carries
+    // one over (a rename keeps the registration it renames).
+    const id = registration ?? newRegistrationId();
     let entries = this.agentBindings.get(agentName);
     if (!entries) {
       entries = [];
@@ -449,6 +475,7 @@ export class ConversationManager extends EventEmitter {
       const keepOld = !clearsPane && !bindsPane && (gui == null || old.weztermGui === gui);
       entries[idx] = {
         conversationId,
+        registration: id,
         pid: (pid && pid !== 0) ? pid : old.pid,
         paneId: bindsPane ? paneId ?? undefined : keepOld ? old.paneId : undefined,
         weztermGui: bindsPane ? gui : keepOld ? old.weztermGui : undefined,
@@ -456,12 +483,13 @@ export class ConversationManager extends EventEmitter {
       };
     } else {
       entries.push({
-        conversationId, pid,
+        conversationId, registration: id, pid,
         paneId: bindsPane ? paneId ?? undefined : undefined,
         weztermGui: bindsPane ? gui : undefined,
         orcaTerminal: orcaTerminal ?? undefined,
       });
     }
+    return id;
   }
 
   /** True when any binding of this name, or any room's registration of it,
@@ -487,9 +515,27 @@ export class ConversationManager extends EventEmitter {
    *  lone binding (a session must not be re-pointed at another terminal's
    *  registration). */
   bindingForTerminal(agentName: string, t: TerminalAliases, conversationId?: string): string | undefined {
+    return this.bindingEntryForTerminal(agentName, t, conversationId)?.conversationId;
+  }
+
+  /** As bindingForTerminal, returning a copy of the entry. The registration
+   *  id, when given, is matched first and alone: an id that matches nothing
+   *  falls back to the terminal aliases, never to "the only binding". */
+  bindingEntryForTerminal(agentName: string, t: TerminalAliases, conversationId?: string): AgentBindingEntry | undefined {
     const entries = this.agentBindings.get(agentName) ?? [];
+    const byId = t.registration != null ? entries.find((e) => e.registration === t.registration) : undefined;
     const own = conversationId != null ? entries.find((e) => e.conversationId === conversationId && bindingMatchesTerminal(e, t)) : undefined;
-    return (own ?? entries.find((e) => bindingMatchesTerminal(e, t)))?.conversationId;
+    const e = byId ?? own ?? entries.find((x) => bindingMatchesTerminal(x, t));
+    return e ? { ...e } : undefined;
+  }
+
+  /** Remove exactly one registration, by its id. */
+  unbindRegistration(agentName: string, registration: string): void {
+    const entries = this.agentBindings.get(agentName);
+    if (!entries) return;
+    const filtered = entries.filter((e) => e.registration !== registration);
+    if (filtered.length === 0) this.agentBindings.delete(agentName);
+    else this.agentBindings.set(agentName, filtered);
   }
 
   unbindAgent(agentName: string, conversationId?: string): void {
@@ -513,9 +559,12 @@ export class ConversationManager extends EventEmitter {
    * UI invite /api/join). REST routes that return message content treat a
    * resolved binding as the agent's credential.
    */
-  getAgentBinding(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number): string | undefined {
+  getAgentBinding(agentName: string, pid?: number, paneId?: number, orcaTerminal?: string, gui?: number, registration?: string): string | undefined {
     const entries = this.agentBindings.get(agentName);
     if (!entries || entries.length === 0) return undefined;
+    // A named registration is matched alone: an id that matches nothing is
+    // not this caller's to fall back from (it left, or rejoined elsewhere).
+    if (registration != null) return entries.find(e => e.registration === registration)?.conversationId;
     // Exact match by Orca handle (a handle-only registration has no pid or pane)
     if (orcaTerminal) {
       const match = entries.find(e => e.orcaTerminal === orcaTerminal);

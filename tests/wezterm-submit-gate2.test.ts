@@ -150,9 +150,9 @@ describe("finding 5: bindings and callbacks carry the pair (GUI, pane); a bare p
   it("the REST read route resolves the binding with the GUI from the request (query or body)", () => {
     const src = readFileSync(join(__dirname, "..", "src", "index.ts"), "utf-8");
     const read = src.slice(src.indexOf('app.get("/api/agent/read"'), src.indexOf('app.post("/api/agent/send"'));
-    expect(read).toMatch(/agentRoom\(sender, res, pid, paneId, orcaOf\(req\), weztermGuiOf\(req\)\)/);
+    expect(read).toMatch(/agentRoom\(sender, res, pid, paneId, orcaOf\(req\), weztermGuiOf\(req\), registrationOf\(req\)\)/);
     const helper = src.slice(src.indexOf("function agentRoom("), src.indexOf("function agentRoom(") + 600);
-    expect(helper).toMatch(/manager\.getAgentBinding\(name, pid, paneId, orcaTerminal, weztermGui\)/);
+    expect(helper).toMatch(/manager\.getAgentBinding\(name, pid, paneId, orcaTerminal, weztermGui, registration\)/);
     // Both REST join replies hand the agent its GUI, so it can send the pair back.
     expect(src.match(/weztermGui: agent\.weztermGui/g) ?? []).toHaveLength(2);
   });
