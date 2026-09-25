@@ -78,7 +78,7 @@ function terminalRefOf(agent: TerminalRef): TerminalRef {
 function sameTerminal(held: ReadonlySet<string>, live: TerminalRef): boolean {
   return lockKeysFor(live).some((k) => held.has(k));
 }
-import { getWeztermPath, getWeztermEnv } from "./terminals.js";
+import { getWeztermPath, weztermEnvForGui } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
 /**
@@ -122,6 +122,9 @@ export interface Agent {
    *  (a hung resident heartbeats forever), a post is proof of life. */
   lastPostAt?: number;
   weztermPaneId?: number;
+  /** The WezTerm GUI instance (wezterm-gui pid) that weztermPaneId belongs
+   *  to: pane ids are per instance, so wakes use that GUI's own socket. */
+  weztermGui?: number;
   /** Orca terminal handle (term_<uuid>), bound only after the join checked it. */
   orcaTerminal?: string;
 }
@@ -455,7 +458,7 @@ export class ChatRoom extends EventEmitter {
         partialLine = false;
         console.log(`  → Injecting into ${name} (${identity})...`);
         try {
-          await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), getWeztermEnv(), undefined, {
+          await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), weztermEnvForGui(agent.weztermGui), undefined, {
             // Orca's own input path first when the join bound a handle.
             orcaTerminal: agent.orcaTerminal,
             // Between the Orca or WezTerm failure and the console fallback the target

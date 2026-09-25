@@ -78,7 +78,7 @@ describe("finding 2: the delayed second Enter re-asks the guard", () => {
     const guard = (): void => { if (left) throw new WakeFallbackAborted("skip"); };
     await expect(injectWezTerm(3, "hello", "wezterm", undefined, { spawn: fakeSpawn(log), sleep, plan: CODEX_PLAN, guard }))
       .rejects.toBeInstanceOf(WakeFallbackAborted);
-    expect(log).toEqual([JSON.stringify("hello\r")]);
+    expect(log).toEqual([JSON.stringify("hello")]);
   });
 
   it("inject() hands the guard to the WezTerm backend", async () => {
@@ -117,7 +117,7 @@ describe("finding 3: a failed second Enter recovers only the Enter, never the pr
   it("WezTerm: one more lone carriage return, and the wake succeeds", async () => {
     const log: string[] = [];
     await injectWezTerm(3, "hello", "wezterm", undefined, { spawn: fakeSpawn(log, [0, 1, 0]), sleep: noSleep, plan: CODEX_PLAN });
-    expect(log).toEqual([JSON.stringify("hello\r"), CR, CR]);
+    expect(log).toEqual([JSON.stringify("hello"), CR, CR, CR]); // text, failed first Enter, its retry, the second Enter
   });
 
   it("WezTerm: both Enter sends fail: a PartialDeliveryError, and the text is never sent again", async () => {
@@ -125,7 +125,7 @@ describe("finding 3: a failed second Enter recovers only the Enter, never the pr
     const err = await injectWezTerm(3, "hello", "wezterm", undefined, { spawn: fakeSpawn(log, [0, 1, 1]), sleep: noSleep, plan: CODEX_PLAN }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PartialDeliveryError);
     expect((err as PartialDeliveryError).phase).toBe("text-delivered");
-    expect(log).toEqual([JSON.stringify("hello\r"), CR, CR]);
+    expect(log).toEqual([JSON.stringify("hello"), CR, CR]);
   });
 
   it("WezTerm: the recovery send re-asks the guard too", async () => {
@@ -134,7 +134,7 @@ describe("finding 3: a failed second Enter recovers only the Enter, never the pr
     const guard = (): void => { guardCalls++; if (guardCalls === 2) throw new WakeFallbackAborted("moved"); };
     await expect(injectWezTerm(3, "hello", "wezterm", undefined, { spawn: fakeSpawn(log, [0, 1]), sleep: noSleep, plan: CODEX_PLAN, guard }))
       .rejects.toBeInstanceOf(WakeFallbackAborted);
-    expect(log).toEqual([JSON.stringify("hello\r"), CR]);
+    expect(log).toEqual([JSON.stringify("hello"), CR]);
   });
 
   it("inject() never falls back to the console with the full prompt after a partial delivery", async () => {
@@ -304,7 +304,7 @@ describe("gate round 3: once the text is in, the same attempt finishes in place"
       fallbackGuard: () => (grown ? "moved" : "proceed"),
       afterTextGuard: () => "proceed",
     });
-    expect(log).toEqual([JSON.stringify("hello\r"), CR]);
+    expect(log).toEqual([JSON.stringify("hello"), CR, CR]);
   });
 
   it("WezTerm through inject(): the post-text guard saying the agent left stops the Enter, nothing more is sent", async () => {
@@ -322,7 +322,7 @@ describe("gate round 3: once the text is in, the same attempt finishes in place"
       afterTextGuard: () => (left ? "skip" : "proceed"),
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(WakeFallbackAborted);
-    expect(log).toEqual([JSON.stringify("hello\r")]);
+    expect(log).toEqual([JSON.stringify("hello")]);
   });
 
   it("tmux: the second Enter asks the post-text guard, not the pre-text one", async () => {
@@ -351,7 +351,7 @@ describe("gate round 3: once the text is in, the same attempt finishes in place"
     };
     await expect(inject(100, "hello", 7, undefined, undefined, backends, { fallbackGuard: () => (left ? "skip" : "proceed") }))
       .rejects.toBeInstanceOf(WakeFallbackAborted);
-    expect(log).toEqual([JSON.stringify("hello\r")]);
+    expect(log).toEqual([JSON.stringify("hello")]);
   });
 });
 

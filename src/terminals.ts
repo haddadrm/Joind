@@ -16,7 +16,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { join } from "path";
-import { readdirSync, existsSync } from "fs";
+import { readdirSync, existsSync, statSync } from "fs";
 import { homedir } from "os";
 
 const execFileAsync = promisify(execFile);
@@ -389,22 +389,78 @@ let weztermEnv: Record<string, string> = {}; // extra env vars needed (WEZTERM_U
 let weztermLastCheck = 0;
 const WEZTERM_CHECK_INTERVAL = 30_000;
 
-/** Find the WezTerm GUI socket path (needed when running outside WezTerm). */
-function findWeztermSocket(): string | undefined {
-  // Already set in environment (inside WezTerm)
-  if (process.env.WEZTERM_UNIX_SOCKET) return process.env.WEZTERM_UNIX_SOCKET;
-  // Search the standard location for gui-sock-* files
-  const sockDir = join(homedir(), ".local", "share", "wezterm");
+/** Where WezTerm GUIs put their sockets, gui-sock-<gui pid>. */
+export function weztermSocketDir(): string {
+  return join(homedir(), ".local", "share", "wezterm");
+}
+
+/** The GUI pid a socket path names (gui-sock-<pid>), or null. */
+export function socketGuiPid(socketPath: string | undefined): number | null {
+  const m = /gui-sock-(\d+)$/.exec(socketPath ?? "");
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/** Is a process with this pid running? A cheap existence check (signal 0),
+ *  no process enumeration. EPERM means it exists but is not ours. */
+export function pidAlive(pid: number): boolean {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return (err as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+export interface SocketFinderDeps {
+  env?: NodeJS.ProcessEnv;
+  dir?: string;
+  list?: (dir: string) => string[];
+  mtimeMs?: (path: string) => number;
+  alive?: (pid: number) => boolean;
+}
+
+/**
+ * The WezTerm GUI socket the server talks to when it runs outside WezTerm.
+ * WEZTERM_UNIX_SOCKET wins when set. Otherwise the gui-sock-<pid> files are
+ * candidates only while their GUI process is alive, newest first. A GUI that
+ * closed leaves its socket file behind, and the old rule (the alphabetically
+ * last file) picked such a leftover whenever its pid sorted last: the server
+ * then reported "WezTerm not found" next to a live GUI (seen 25 Sep 2026 with
+ * gui-sock-42272 left over). Dead files are ignored, never deleted.
+ */
+export function findWeztermSocket(deps: SocketFinderDeps = {}): string | undefined {
+  const env = deps.env ?? process.env;
+  if (env.WEZTERM_UNIX_SOCKET) return env.WEZTERM_UNIX_SOCKET;
+  const sockDir = deps.dir ?? weztermSocketDir();
+  const list = deps.list ?? ((d: string) => (existsSync(d) ? readdirSync(d) : []));
+  const mtimeMs = deps.mtimeMs ?? ((f: string) => statSync(f).mtimeMs);
+  const alive = deps.alive ?? pidAlive;
   try {
-    if (!existsSync(sockDir)) return undefined;
-    const files = readdirSync(sockDir).filter(f => f.startsWith("gui-sock-"));
-    if (files.length === 1) return join(sockDir, files[0]);
-    // Multiple sockets — pick the most recent
-    if (files.length > 1) {
-      return join(sockDir, files[files.length - 1]);
-    }
-  } catch { /* ignore */ }
-  return undefined;
+    const live = list(sockDir)
+      .map((f) => ({ f, pid: socketGuiPid(f) }))
+      .filter((x): x is { f: string; pid: number } => x.pid !== null && alive(x.pid))
+      .map((x) => ({ path: join(sockDir, x.f), mtime: (() => { try { return mtimeMs(join(sockDir, x.f)); } catch { return 0; } })() }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return live[0]?.path;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The socket of one GUI instance, when that GUI is alive and its socket
+ *  file exists. */
+export function socketForGui(guiPid: number, deps: { dir?: string; exists?: (p: string) => boolean; alive?: (pid: number) => boolean } = {}): string | undefined {
+  const path = join(deps.dir ?? weztermSocketDir(), `gui-sock-${guiPid}`);
+  const exists = deps.exists ?? existsSync;
+  const alive = deps.alive ?? pidAlive;
+  return alive(guiPid) && exists(path) ? path : undefined;
+}
+
+/** Environment for `wezterm cli` PROBES (list): WEZTERM_LOG=off, because
+ *  every failed probe otherwise writes a wezterm.exe-log-<pid>.txt into the
+ *  runtime dir (26 of them after one morning of joins against a dead socket).
+ *  Measured: WEZTERM_LOG=off (or none) writes no file; error still does. It
+ *  also empties stderr, so it is not used for send-text, whose stderr is the
+ *  only explanation of a failed injection. */
+export function weztermProbeEnv(socket?: string): NodeJS.ProcessEnv {
+  return { ...process.env, ...(socket ? { WEZTERM_UNIX_SOCKET: socket } : {}), WEZTERM_LOG: "off" };
 }
 
 /** Resolve the wezterm executable path. */
@@ -429,9 +485,9 @@ async function checkWezTerm(): Promise<boolean> {
   }
   weztermLastCheck = now;
 
-  // Build env with socket path if needed
+  // Build env with socket path if needed; probes run with WezTerm's own log off.
   const socketPath = findWeztermSocket();
-  const env = socketPath ? { ...process.env, WEZTERM_UNIX_SOCKET: socketPath } : undefined;
+  const env = weztermProbeEnv(socketPath);
 
   for (const candidate of findWezTermExe()) {
     try {
@@ -464,9 +520,11 @@ export function getWeztermPath(): string { return weztermPath; }
 
 /** Ids of the panes the reachable WezTerm reports right now (never
  *  auto-starting a mux server). Empty when WezTerm cannot be reached. */
-export async function listWezTermPaneIds(): Promise<Set<number>> {
+/** Live pane ids in one WezTerm GUI: the server's own socket by default, or
+ *  `socket` (an agent's own GUI instance; pane ids are per instance). */
+export async function listWezTermPaneIds(socket?: string): Promise<Set<number>> {
   try {
-    const env = Object.keys(weztermEnv).length > 0 ? { ...process.env, ...weztermEnv } : undefined;
+    const env = weztermProbeEnv(socket ?? weztermEnv.WEZTERM_UNIX_SOCKET);
     const { stdout } = await execFileAsync(
       weztermPath, ["cli", "--no-auto-start", "list", "--format", "json"],
       { timeout: 3000, env }
@@ -597,12 +655,19 @@ export function isSessionRoot(pid: number, entry: ProcessEntry): boolean {
  * injectable for tests; names may be full paths (macOS ps prints them).
  */
 export function hasAncestor(pid: number, tree: Map<number, ProcessEntry>, host: RegExp): boolean | "unknown" {
+  const found = findAncestor(pid, tree, host);
+  return typeof found === "number" ? true : found;
+}
+
+/** hasAncestor, but naming the matching ancestor: its pid, false, or
+ *  "unknown", under exactly the same rules (one walk, two answers). */
+export function findAncestor(pid: number, tree: Map<number, ProcessEntry>, host: RegExp): number | false | "unknown" {
   let cur = pid;
   let child = tree.get(pid);
   for (let depth = 0; depth < 64 && cur > 0; depth++) {
     const entry = tree.get(cur);
     if (!entry) return false;
-    if (host.test(processBasename(entry.name))) return true;
+    if (host.test(processBasename(entry.name))) return cur;
     if (entry.ppid === cur || entry.ppid <= 0) return false;
     const parent = tree.get(entry.ppid);
     // The chain breaks above a live process. Above a session or system root
@@ -625,6 +690,35 @@ export function hasAncestor(pid: number, tree: Map<number, ProcessEntry>, host: 
   }
   return false;
 }
+
+/** The WezTerm GUI process (wezterm-gui) above `pid`: pane ids are per GUI
+ *  instance, and its socket is gui-sock-<that pid>. */
+const WEZTERM_GUI_PROCESS = /^wezterm-gui(\.exe)?$/i;
+
+/** The pid of the WezTerm GUI instance `pid` runs in, false when it runs in
+ *  none, or "unknown" (see hasAncestor). A pane under a mux server with no
+ *  GUI above it is false here while isInsideWezTermTree says true. */
+export function weztermGuiOfTree(pid: number, tree: Map<number, ProcessEntry>): number | false | "unknown" {
+  return findAncestor(pid, tree, WEZTERM_GUI_PROCESS);
+}
+
+/** weztermGuiOfTree with the host's process table. */
+export async function weztermGuiOf(pid: number, tree?: () => Promise<Map<number, ProcessEntry> | null>): Promise<number | false | "unknown"> {
+  if (!(pid > 0)) return false;
+  const t = await (tree ?? listParentPids)();
+  if (!t) return "unknown";
+  return weztermGuiOfTree(pid, t);
+}
+
+/** Environment for `wezterm cli` aimed at an agent's pane: its own GUI
+ *  instance's socket when known and alive, else the server's default. */
+export function weztermEnvForGui(gui: number | undefined): Record<string, string> {
+  const own = gui != null ? socketForGui(gui) : undefined;
+  return own ? { WEZTERM_UNIX_SOCKET: own } : weztermEnv;
+}
+
+/** The socket the server currently uses for WezTerm, if any. */
+export function getWeztermSocket(): string | undefined { return weztermEnv.WEZTERM_UNIX_SOCKET; }
 
 /** Does `pid` run inside WezTerm on this host? See hasAncestor. */
 export function isInsideWezTermTree(pid: number, tree: Map<number, ProcessEntry>): boolean | "unknown" {
@@ -672,7 +766,7 @@ export function getWeztermEnv(): Record<string, string> { return weztermEnv; }
 
 export async function discoverWezTerm(): Promise<TerminalInfo[]> {
   try {
-    const env = Object.keys(weztermEnv).length > 0 ? { ...process.env, ...weztermEnv } : undefined;
+    const env = weztermProbeEnv(weztermEnv.WEZTERM_UNIX_SOCKET);
     const { stdout } = await execFileAsync(
       weztermPath, ["cli", "--no-auto-start", "list", "--format", "json"],
       { timeout: 5000, env }

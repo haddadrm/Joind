@@ -16,7 +16,7 @@ import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
-import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, type ProcessEntry } from "./terminals.js";
+import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, getWeztermSocket, weztermEnvForGui, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, socketForGui, socketGuiPid, weztermGuiOf, type ProcessEntry } from "./terminals.js";
 import { listOrcaTerminals, ORCA_HANDLE, type OrcaTerminalState } from "./orca.js";
 
 const execFileAsync = promisify(execFile);
@@ -24,16 +24,30 @@ const execFileAsync = promisify(execFile);
 /** Dependencies of resolvePaneForJoin, injectable for tests. */
 export interface PaneResolverDeps {
   checkWezTerm: () => Promise<boolean>;
-  listPaneIds: () => Promise<Set<number>>;
+  /** Live panes of the server's socket, or of `socket` (one GUI instance). */
+  listPaneIds: (socket?: string) => Promise<Set<number>>;
   isInsideWezTerm: (pid: number) => Promise<boolean | "unknown">;
   autoDetect: () => Promise<number | undefined>;
+  /** The WezTerm GUI instance the pid runs in (its wezterm-gui pid). Optional
+   *  so older callers keep the instance-blind behaviour. */
+  guiOf?: (pid: number) => Promise<number | false | "unknown">;
+  /** That GUI's socket, when the GUI is alive and the socket exists. */
+  socketForGui?: (gui: number) => string | undefined;
+  /** The socket the server itself talks to. */
+  serverSocket?: () => string | undefined;
   log?: (line: string) => void;
 }
 
 /** Outcome of pane resolution. `paneId` null means: clear any pane this
  *  agent held before (the rejoin proved it stale); undefined means: leave
  *  whatever it had (nothing learned either way). */
-export interface PaneResolution { paneId: number | null | undefined; note?: string; }
+export interface PaneResolution {
+  paneId: number | null | undefined;
+  note?: string;
+  /** The GUI instance a bound pane lives in: wakes go through that GUI's own
+   *  socket, never the server's default one. */
+  gui?: number;
+}
 
 /**
  * Decide which WezTerm pane, if any, a joining agent is bound to. A pane is
@@ -48,6 +62,36 @@ export async function resolvePaneForJoin(
   name: string, pid: number, requested: number | undefined, deps: PaneResolverDeps
 ): Promise<PaneResolution> {
   const log = deps.log ?? ((line: string) => console.log(`  [wezterm] ${line}`));
+  // Pane ids are per WezTerm GUI instance. The pid names its instance; the
+  // pane is checked in THAT instance and wakes use that instance's socket.
+  // Field case (25 Sep 2026): an agent in a second GUI joined with pane 0,
+  // the server checked pane 0 in the first GUI (its default socket) and the
+  // pid only had to be "inside some WezTerm", so the wake was typed into the
+  // first GUI's pane 0.
+  const gui = pid > 0 && deps.guiOf ? await deps.guiOf(pid) : "unknown";
+  if (typeof gui === "number") {
+    const own = deps.socketForGui?.(gui);
+    const serverGui = socketGuiPid(deps.serverSocket?.());
+    if (requested != null) {
+      if (own) {
+        const live = await deps.listPaneIds(own);
+        if (!live.has(requested)) {
+          const note = `pane ${requested} ignored for ${name}: not a live pane of its WezTerm instance (gui pid ${gui})`;
+          log(note);
+          return { paneId: null, note };
+        }
+        return { paneId: requested, gui };
+      }
+      if (serverGui !== null && serverGui !== gui) {
+        const note = `pane ${requested} belongs to another WezTerm instance (gui pid ${serverGui}); ${name} runs in gui pid ${gui}, whose socket is not reachable`;
+        log(note);
+        return { paneId: null, note };
+      }
+    } else if (serverGui !== null && serverGui !== gui && !own) {
+      // Auto-detection lists the server's instance, not this pid's: nothing to learn.
+      return { paneId: undefined };
+    }
+  }
   if (!(await deps.checkWezTerm())) {
     if (requested != null) {
       const note = `pane ${requested} ignored for ${name}: no WezTerm reachable from this server`;
@@ -72,7 +116,7 @@ export async function resolvePaneForJoin(
       }
       if (inside === "unknown") log(`pane ${requested} accepted for ${name} unverified: this host cannot enumerate processes`);
     }
-    return { paneId: requested };
+    return typeof gui === "number" ? { paneId: requested, gui } : { paneId: requested };
   }
   // No pane requested: auto-detect only for a process that is inside WezTerm
   // (or an unknown one). A pid that provably runs elsewhere clears any pane
@@ -82,7 +126,26 @@ export async function resolvePaneForJoin(
     if (inside === false) return { paneId: null };
     if (inside === "unknown") return { paneId: undefined };
   }
-  return { paneId: await deps.autoDetect() };
+  const detected = await deps.autoDetect();
+  return typeof gui === "number" && detected != null ? { paneId: detected, gui } : { paneId: detected };
+}
+
+/** Record the GUI instance of a pane resolution on the joined agent, with
+ *  the pane's own rule: a bound pane sets it (or clears it when its instance
+ *  is unknown), a cleared pane clears it, "nothing learned" keeps it. */
+export function applyWeztermGui(agent: { weztermGui?: number }, resolution: PaneResolution): void {
+  if (typeof resolution.paneId === "number") {
+    if (resolution.gui != null) agent.weztermGui = resolution.gui;
+    else delete agent.weztermGui;
+  } else if (resolution.paneId === null) {
+    delete agent.weztermGui;
+  }
+}
+
+/** Environment for `wezterm cli` aimed at an agent's pane: its own GUI's
+ *  socket when known and alive, else the server's default. */
+export function weztermEnvFor(agent: { weztermGui?: number }): Record<string, string> {
+  return weztermEnvForGui(agent.weztermGui);
 }
 
 /** A per-join process table source (see processTreeOnce), so the WezTerm
@@ -95,6 +158,9 @@ export function defaultPaneResolverDeps(manager: ConversationManager, tree: Proc
     listPaneIds: listWezTermPaneIds,
     isInsideWezTerm: (pid) => isInsideWezTerm(pid, tree),
     autoDetect: () => autoDetectWezTermPane(manager),
+    guiOf: (pid) => weztermGuiOf(pid, tree),
+    socketForGui: (gui) => socketForGui(gui),
+    serverSocket: getWeztermSocket,
   };
 }
 
@@ -308,10 +374,11 @@ export function registerTools(
       // Bind a WezTerm pane or an Orca terminal only when it is live and
       // really this process's (one process enumeration shared by both checks).
       const tree = processTreeOnce();
-      const [{ paneId: resolvedPaneId, note: paneNote }, { orcaTerminal: resolvedOrca, note: orcaNote }] = await Promise.all([
+      const [paneResolution, { orcaTerminal: resolvedOrca, note: orcaNote }] = await Promise.all([
         resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager, tree)),
         resolveOrcaForJoin(name, pid, orcaTerminal, defaultOrcaResolverDeps(manager, tree)),
       ]);
+      const { paneId: resolvedPaneId, note: paneNote } = paneResolution;
 
       // Re-fetch after the await: a conversation deleted meanwhile must not
       // be resurrected by joining its destroyed room, and a newer join or a
@@ -326,13 +393,15 @@ export function registerTools(
 
       const persistedRole = getPersistedRole?.(name);
       const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca);
+      applyWeztermGui(agent, paneResolution);
       manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca);
       sessionBindings.set(extra.sessionId, convId);
       room.touch(name);
 
       // Name the WezTerm tab to just the agent name
       if (agent.weztermPaneId != null) {
-        const wtEnv = Object.keys(getWeztermEnv()).length > 0 ? { ...process.env, ...getWeztermEnv() } : undefined;
+        const ownEnv = weztermEnvFor(agent);
+        const wtEnv = Object.keys(ownEnv).length > 0 ? { ...process.env, ...ownEnv } : undefined;
         execFileAsync(getWeztermPath(), ["cli", "--no-auto-start", "set-tab-title", name, "--pane-id", String(agent.weztermPaneId)], { env: wtEnv })
           .catch(() => {});
       }

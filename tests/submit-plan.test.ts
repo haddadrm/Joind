@@ -119,21 +119,21 @@ function fakeSpawn(log: string[], code = 0): { spawn: SpawnSendText; args: strin
 }
 
 describe("injectWezTerm: carriage return, and a second one for Codex and Copilot", () => {
-  it("ends the text with a carriage return, not a line feed, as typed keys", async () => {
+  it("sends the text, then a carriage return (never a line feed) in its own call after the pause, as typed keys", async () => {
     const log: string[] = [];
     const { spawn, args } = fakeSpawn(log);
     await injectWezTerm(3, "hello", "wezterm", undefined, { spawn, sleep: async () => {} });
-    expect(log).toEqual([`send:${JSON.stringify("hello\r")}`]);
+    expect(log).toEqual([`send:${JSON.stringify("hello")}`, `send:${JSON.stringify("\r")}`]);
     expect(args[0]).toEqual(["cli", "--no-auto-start", "send-text", "--pane-id", "3", "--no-paste"]);
   });
 
-  it("Codex: text and CR, the plan's delay, then a lone CR in a second call", async () => {
+  it("Codex: the text, the pause, a lone CR, the plan's delay, a second lone CR", async () => {
     const log: string[] = [];
     const { spawn, args } = fakeSpawn(log);
     const sleep = async (ms: number) => { log.push(`sleep:${ms}`); };
     await injectWezTerm(3, "hello", "wezterm", undefined, { spawn, sleep, plan: CODEX_PLAN });
-    expect(log).toEqual([`send:${JSON.stringify("hello\r")}`, "sleep:300", `send:${JSON.stringify("\r")}`]);
-    expect(args).toHaveLength(2);
+    expect(log).toEqual([`send:${JSON.stringify("hello")}`, "sleep:300", `send:${JSON.stringify("\r")}`, "sleep:300", `send:${JSON.stringify("\r")}`]);
+    expect(args).toHaveLength(3);
     for (const a of args) expect(a).toContain("--no-auto-start");
   });
 

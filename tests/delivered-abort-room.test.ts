@@ -95,7 +95,7 @@ describe("a wake whose text is in the terminal finishes in place", () => {
   });
   afterEach(() => { vi.useRealTimers(); });
 
-  it("locks grew after the text (the gate's sequence): the text once, then its Enter, nothing in between, no warning", async () => {
+  it("locks grew after the text (the gate's sequence): the text once, then its Enters, nothing in between, no warning", async () => {
     const room = new ChatRoom();
     try {
       room.join("Codex", 100, 7);
@@ -104,9 +104,10 @@ describe("a wake whose text is in the terminal finishes in place", () => {
       state.onFirstSleep = () => { room.join("Linker", 100, undefined, undefined, H); };
       room.send("Rami", "@Codex ping");
       await run();
-      expect(state.sends).toHaveLength(2);
-      expect(isPrompt(state.sends[0]) && state.sends[0].payload.endsWith("\r")).toBe(true);
-      expect(isEnter(state.sends[1])).toBe(true);
+      // WezTerm: the text alone, then each Enter in its own call (Codex plan: two).
+      expect(state.sends).toHaveLength(3);
+      expect(isPrompt(state.sends[0]) && !state.sends[0].payload.endsWith("\r")).toBe(true);
+      expect(isEnter(state.sends[1]) && isEnter(state.sends[2])).toBe(true);
       expect(state.sends.every((s) => s.target === "7")).toBe(true);
       expect(state.orca).toEqual([]);
       expect(lines(room).some((t) => /Could not (submit|wake)/.test(t))).toBe(false);
@@ -132,7 +133,7 @@ describe("a wake whose text is in the terminal finishes in place", () => {
       room.send("Rami", "@A ping");
       await run();
       const order = state.sends.map((s) => (isEnter(s) ? "enter" : s.payload.includes("@A ") ? "A" : s.payload.includes("@B ") ? "B" : "?"));
-      expect(order).toEqual(["A", "enter", "B", "enter"]);
+      expect(order).toEqual(["A", "enter", "enter", "B", "enter", "enter"]);
     } finally {
       await run();
       room.destroy();
@@ -213,7 +214,7 @@ describe("a wake whose text is in the terminal finishes in place", () => {
       const on7 = state.sends.filter((s) => s.target === "7");
       const on8 = state.sends.filter((s) => s.target === "8");
       expect(on7.map((s) => (isEnter(s) ? "enter" : "text"))).toEqual(["text"]);
-      expect(on8.map((s) => (isEnter(s) ? "enter" : "text"))).toEqual(["text", "enter"]);
+      expect(on8.map((s) => (isEnter(s) ? "enter" : "text"))).toEqual(["text", "enter", "enter"]);
       expect(on8[0].payload).toContain("pid=200");
     } finally {
       await run();

@@ -118,24 +118,35 @@ export class PartialDeliveryError extends Error {
   }
 }
 
+/** The least pause between the text and its first Enter over WezTerm. */
+export const WEZTERM_SUBMIT_PAUSE_MS = 300;
+
 /**
  * Inject text into a WezTerm pane by pane ID, then submit it.
  * The text goes through stdin because a carriage return in a CLI argument
  * is literal, not interpreted. `--no-paste` stays: the text must arrive as
  * typed keys, not as a bracketed paste the TUI would hold for review.
  *
- * The line ends with a carriage return, not a line feed. Measured with the
- * injection matrix (tools/inject-matrix, 24 Sep 2026): a raw key reader in a
- * WezTerm pane receives U+000A for a line feed and U+000D for a carriage
- * return, and every other route (console, Orca, wmux) delivers U+000D. With
- * a real Claude Code 2.1.28x in the pane, text ending in a line feed stayed
- * unsent in the input box until a later Enter, while the same text ending in
- * a carriage return submitted and got its reply in 6.3 s. A line feed also
- * never submits a cooked-mode ReadLine under ConPTY.
+ * The Enter is a carriage return, not a line feed (24 Sep 2026: a raw key
+ * reader in a WezTerm pane receives U+000A for a line feed, which never
+ * submits, and U+000D for a carriage return).
  *
- * Codex and Copilot (plan.doubleEnter) get a second carriage return,
- * plan.delayMs later, in its own send-text call: with Codex CLI 0.154.0 in
- * the pane, one Enter left every prompt unsent and a second one submitted it.
+ * The Enter goes in its OWN send-text call, after a pause. Measured end to
+ * end on 25 Sep 2026 (tools/inject-matrix, results/e2e-20260925.md): a real
+ * wake prompt of 320 to 345 characters sent with its carriage return in one
+ * call was taken as a paste by both Claude Code 2.1.28x and Codex 0.154, and
+ * the carriage return became a new line in the input box: the prompt sat
+ * there unsent, the call succeeded, and nobody was told. A 49-character
+ * prompt with its carriage return did submit, which is why the earlier
+ * matrix missed it. The text alone, a pause of 300 ms, then the carriage
+ * return alone submitted both agents. So: text, max(plan.delayMs, 300 ms),
+ * guard, Enter; and for Codex and Copilot (plan.doubleEnter) a second Enter
+ * plan.delayMs later, guarded the same way.
+ *
+ * Once the text is in the pane, only Enters are ever sent again: each Enter
+ * that fails is retried once on its own, under the guard, and a second
+ * failure is a PartialDeliveryError (never a fallback that would type the
+ * prompt a second time).
  */
 export async function injectWezTerm(paneId: number, text: string, weztermExe?: string, extraEnv?: Record<string, string>, opts: WezTermSendOptions = {}): Promise<void> {
   const exe = weztermExe || "wezterm";
@@ -146,25 +157,29 @@ export async function injectWezTerm(paneId: number, text: string, weztermExe?: s
   const env = extraEnv && Object.keys(extraEnv).length > 0 ? { ...process.env, ...extraEnv } : undefined;
   // A failure here is ambiguous (the text may or may not have arrived), so it
   // stays an ordinary error and the caller may fall back.
-  await weztermSendText(spawnFn, exe, paneId, text + "\r", env);
-  if (plan.doubleEnter) {
-    // From here the text is in the pane. Only the missing Enter may be sent
-    // again, and every send after a wait re-asks the guard first.
-    await sleep(plan.delayMs);
+  await weztermSendText(spawnFn, exe, paneId, text, env);
+  // From here the text is in the pane.
+  const enter = async (which: string): Promise<void> => {
     opts.guard?.();
     try {
       await weztermSendText(spawnFn, exe, paneId, "\r", env);
     } catch (first) {
       const why = first instanceof Error ? first.message.split("\n")[0] : String(first);
-      console.log(`  [inject:wezterm] second Enter failed (${why.slice(0, 120)}); sending the Enter once more`);
+      console.log(`  [inject:wezterm] ${which} Enter failed (${why.slice(0, 120)}); sending the Enter once more`);
       opts.guard?.();
       try {
         await weztermSendText(spawnFn, exe, paneId, "\r", env);
       } catch (second) {
         const again = second instanceof Error ? second.message.split("\n")[0] : String(second);
-        throw new PartialDeliveryError(`wezterm pane ${paneId}: text delivered, but the Enter that submits it failed twice (${again.slice(0, 120)})`);
+        throw new PartialDeliveryError(`wezterm pane ${paneId}: text delivered, but the ${which} Enter that submits it failed twice (${again.slice(0, 120)})`);
       }
     }
+  };
+  await sleep(Math.max(plan.delayMs, WEZTERM_SUBMIT_PAUSE_MS));
+  await enter("first");
+  if (plan.doubleEnter) {
+    await sleep(plan.delayMs);
+    await enter("second");
   }
 }
 

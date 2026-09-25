@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-09-25: WezTerm Submit and Instances
+
+The end-to-end run against the local server (tools/inject-matrix, results/e2e-20260925.md) woke a real Claude Code in six of seven hosts. WezTerm failed: the wake typed but never submitted, for Claude Code and Codex alike, and nobody was told. The same run showed that the server can type one GUI instance's wake into another instance's pane, and that it can bind to a dead WezTerm socket.
+
+### Fixed
+- **Submit through WezTerm.** `injectWezTerm` sends the text alone, waits `max(plan.delayMs, 300 ms)`, asks the post-text guard, and then sends the carriage return in its own `send-text` call. Codex and Copilot get a second carriage return `plan.delayMs` later, guarded the same way. `--no-paste` stays. Measured: a 320-character wake prompt with its carriage return in one call was taken as a paste by Claude Code 2.1.28x and Codex 0.154, and the carriage return became a new line in the input box. The text, a 300 ms pause, and then the carriage return alone submitted both agents. Each Enter is still retried once on its own, and a second failure is still a `PartialDeliveryError`.
+- **One WezTerm instance per pane.** Pane ids are per WezTerm GUI instance.
+  - The ancestry walk now names the instance a pid runs in (`weztermGuiOfTree`: the `wezterm-gui` ancestor, one walk shared with `hasAncestor` through `findAncestor`).
+  - A requested pane is checked in THAT instance, through its own socket `gui-sock-<gui pid>`. The agent carries the instance as `weztermGui` (a pid, not a path, since the agent object is served to web clients), and wakes and tab titles go through that instance's socket, not one global setting.
+  - When the agent's instance has no reachable socket and the server's socket belongs to another instance, the pane is dropped with "pane N belongs to another WezTerm instance (gui pid X)". A pane not live in the agent's own instance is dropped even if the server's instance has one with that id.
+  - With no pane requested from another instance, nothing is auto-detected in the server's instance.
+  - Reproduced before the fix with two GUIs: an agent in GUI 60924 joined with pane 0, and its wake was typed into GUI 69000's pane 0.
+- **Live sockets only.** `findWeztermSocket` considers `gui-sock-<pid>` files only while that pid is running (a signal-0 existence check), newest first. The old rule took the alphabetically last file, a leftover of a closed GUI when its pid sorted last, and the server then reported "WezTerm not found" next to a live GUI. Files are never deleted.
+- **No log litter from probes.** Every failed `wezterm cli ... list` probe wrote a `wezterm.exe-log-<pid>.txt` into the WezTerm runtime dir (26 after one morning). Probes now run with `WEZTERM_LOG=off` (`weztermProbeEnv`). Measured: `off` or `none` writes no file, while `error` still does. `off` also empties stderr, so `send-text` keeps WezTerm's logging: its stderr is the only explanation of a failed injection.
+
+### Known limits
+- **A console that no agent reads.** A pid whose console is read by something other than an agent (a sleeping shell, a WMI-spawned process) takes the wake silently. The server cannot know who reads a console, and nothing confirms that a turn started. In the end-to-end run such a registration was typed into with no warning and no reply.
+- **Lock keys ignore the instance.** They are still `pane:N` without the GUI, so two instances' pane 0 serialize their wakes against each other. That costs waiting, not a misdirected wake: each wake goes through its own instance's socket.
+
+### Tests
+- 18 in `tests/wezterm-instances.test.ts`, all failing on d66e805:
+  - the submit sequence for the default and Codex plans, and the guard before the first Enter;
+  - socket choice with a dead leftover sorting last, an older live GUI, no live GUI, and the environment override;
+  - a GUI's own socket;
+  - a two-GUI process tree, with the field case bound in the agent's instance, a pane live only in the other instance, the other-instance note, an agent in the server's instance, and no auto-detection across instances;
+  - carrying `weztermGui` on the agent;
+  - the room waking through the agent's socket;
+  - the probe environment, and a source guard that every `list` call uses it.
+- The fake-spawn expectations in `submit-plan`, `inject-fixes-gate1` and `delivered-abort-room` now follow the new call sequence (text, then each Enter alone). Suite 292.
+
 ## 2026-09-24: Submit Fixes From the Injection Matrix
 
 The injection matrix (`tools/inject-matrix` on `feat/inject-matrix`) typed one prompt, `reply with exactly the word PONG and nothing else`, through every wake route into a real Claude Code 2.1.28x and a real Codex CLI 0.154.0, and read the screen back. Two routes delivered every byte and still never submitted, while the injector reported success.
