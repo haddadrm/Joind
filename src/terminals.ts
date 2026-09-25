@@ -493,6 +493,35 @@ function findWezTermExe(): string[] {
   return candidates;
 }
 
+let weztermExeResolved = false;
+
+/**
+ * Find a working wezterm executable, independently of whether any GUI is
+ * reachable: `wezterm --version` needs no socket. Gate finding (round 1 on
+ * feat/wezterm-submit): an explicit-pane join listed the agent's own GUI
+ * through the default "wezterm" command before the executable was ever
+ * resolved, so on a server where WezTerm lives under Program Files but not
+ * on PATH a valid pane was discarded. `run` is injectable for tests.
+ */
+export async function resolveWezTermExe(
+  run: (exe: string) => Promise<unknown> = (exe) => execFileAsync(exe, ["--version"], { timeout: 3000, env: weztermProbeEnv() }),
+  candidates: string[] = findWezTermExe()
+): Promise<boolean> {
+  if (weztermExeResolved) return true;
+  for (const candidate of candidates) {
+    try {
+      await run(candidate);
+      weztermPath = candidate;
+      weztermExeResolved = true;
+      return true;
+    } catch { /* try next */ }
+  }
+  return false;
+}
+
+/** Test hook: forget the resolved executable. */
+export function resetWezTermExe(): void { weztermExeResolved = false; weztermPath = "wezterm"; }
+
 async function checkWezTerm(): Promise<boolean> {
   const now = Date.now();
   if (weztermAvailable !== null && (now - weztermLastCheck) < WEZTERM_CHECK_INTERVAL) {
@@ -517,6 +546,7 @@ async function checkWezTerm(): Promise<boolean> {
         console.log(`  WezTerm detected at ${candidate}${socketPath ? ` (socket: ${socketPath})` : ""}`);
       }
       weztermPath = candidate;
+      weztermExeResolved = true;
       weztermEnv = socketPath ? { WEZTERM_UNIX_SOCKET: socketPath } : {};
       weztermAvailable = true;
       return true;
@@ -726,10 +756,14 @@ export async function weztermGuiOf(pid: number, tree?: () => Promise<Map<number,
 }
 
 /** Environment for `wezterm cli` aimed at an agent's pane: its own GUI
- *  instance's socket when known and alive, else the server's default. */
-export function weztermEnvForGui(gui: number | undefined): Record<string, string> {
-  const own = gui != null ? socketForGui(gui) : undefined;
-  return own ? { WEZTERM_UNIX_SOCKET: own } : weztermEnv;
+ *  instance's socket when the instance is known, the server's default when
+ *  it is not, and null when the known instance is gone. Never another GUI's
+ *  socket for a known instance: its pane number means nothing there (gate
+ *  round 1: a dead GUI B redirected B's wake into GUI A's pane 0). */
+export function weztermEnvForGui(gui: number | undefined): Record<string, string> | null {
+  if (gui == null) return weztermEnv;
+  const own = socketForGui(gui);
+  return own ? { WEZTERM_UNIX_SOCKET: own } : null;
 }
 
 /** The socket the server currently uses for WezTerm, if any. */
@@ -779,9 +813,11 @@ export function processTreeOnce(): () => Promise<Map<number, ProcessEntry> | nul
 /** Get extra env vars needed for wezterm CLI (socket path). */
 export function getWeztermEnv(): Record<string, string> { return weztermEnv; }
 
-export async function discoverWezTerm(): Promise<TerminalInfo[]> {
+/** Agent panes in one GUI: the server's default socket, or `socket` (an
+ *  agent's own instance; pane ids are per instance). */
+export async function discoverWezTerm(socket?: string): Promise<TerminalInfo[]> {
   try {
-    const env = weztermProbeEnv(weztermEnv.WEZTERM_UNIX_SOCKET);
+    const env = weztermProbeEnv(socket ?? weztermEnv.WEZTERM_UNIX_SOCKET);
     const { stdout } = await execFileAsync(
       weztermPath, ["cli", "--no-auto-start", "list", "--format", "json"],
       { timeout: 5000, env }

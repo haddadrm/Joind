@@ -17,6 +17,13 @@ The end-to-end run against the local server (tools/inject-matrix, results/e2e-20
   - The first re-run caught this: the agent's own socket looked missing, and a dead remembered server socket made the pane read as "another instance". The resolver now also ignores the server's socket unless its GUI is alive (`liveServerSocket`).
 - **No log litter from probes.** Every failed `wezterm cli ... list` probe wrote a `wezterm.exe-log-<pid>.txt` into the WezTerm runtime dir (26 after one morning). Probes now run with `WEZTERM_LOG=off` (`weztermProbeEnv`). Measured: `off` or `none` writes no file, while `error` still does. `off` also empties stderr, so `send-text` keeps WezTerm's logging: its stderr is the only explanation of a failed injection.
 
+### Codex gate round 1 (4 Medium, closed)
+- **A GUI that is gone fails the route.** When an agent's known GUI was gone, its wake and tab title used the server's socket with the agent's pane number, typing into another GUI's pane. `inject()` now takes the GUI (`weztermGui` option), resolves that GUI's own socket itself, and throws when the GUI is gone. The WezTerm route fails and the guarded console fallback runs; no other socket is ever substituted. `weztermEnvForGui` returns null for a gone GUI, and the tab title is skipped.
+- **Auto-detection stays in the agent's own GUI.** It took a pane detected in the server's GUI and stamped the agent's GUI on it. Discovery now lists the agent's own GUI through its socket (`autoDetect(socket)`), declines when that socket is unavailable, and never combines one GUI's pane with another GUI's identity.
+- **Pane keys include the GUI.** Pane equivalence ignored the GUI, so pane 0 of GUI 10 and pane 0 of GUI 20 were one terminal: a move between them during the first Enter's pause was judged "the terminal holding the prompt", and neither pane got its Enter or a fresh wake. Keys are now `pane:<gui>:<n>` when the GUI is known, so `terminalIdentity`, `lockKeysFor` and `sameTerminal` tell GUIs apart, and two GUIs no longer wait on each other. The GUI is set inside `room.join` (a sixth argument travelling with the pane), so the registry and the identity see it from the start. `applyWeztermGui` is gone.
+- **The executable comes first.** An explicit-pane join listed the agent's GUI before the executable was resolved, so with WezTerm under Program Files but not on PATH a valid pane was dropped. `resolveWezTermExe` runs `--version` over the candidates and needs no GUI, and the resolver calls it (`ensureExe`) before listing the agent's instance, independently of the default GUI.
+- 12 tests: 11 in `tests/wezterm-submit-gate1.test.ts` and the GUI-move case in `tests/delivered-abort-room.test.ts`. Nine of the 12 fail on dd7deef, at least one per finding; the others pin behaviour that was already right. The `delivered-abort-room` fake now records which GUI's socket each send went through. Suite 305.
+
 ### Verified (real agents, test server from this build on port 4299, own data dir; the live 4200 untouched)
 
 | host | agent | GUI instance | route logged | reply |
@@ -28,7 +35,7 @@ Before this build both rows typed the prompt and never submitted it.
 
 ### Known limits
 - **A console that no agent reads.** A pid whose console is read by something other than an agent (a sleeping shell, a WMI-spawned process) takes the wake silently. The server cannot know who reads a console, and nothing confirms that a turn started. In the end-to-end run such a registration was typed into with no warning and no reply.
-- **Lock keys ignore the instance.** They are still `pane:N` without the GUI, so two instances' pane 0 serialize their wakes against each other. That costs waiting, not a misdirected wake: each wake goes through its own instance's socket.
+- **A pane whose GUI is unknown** (a join from a host that cannot enumerate processes, a mux-server pane) keeps the key `pane:N`, so it still meets any other unknown-GUI pane N for locking: waiting, never a misdirected wake.
 
 ### Tests
 - 19 in `tests/wezterm-instances.test.ts`, all failing on d66e805:

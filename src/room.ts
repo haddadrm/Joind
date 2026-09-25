@@ -22,14 +22,23 @@ const wakes = new WakeCoordinator();
 let roomSeq = 0;
 /** What a terminal registration carries: the pid, and when known the
  *  WezTerm pane and the Orca terminal handle. */
-export interface TerminalRef { pid: number; weztermPaneId?: number; orcaTerminal?: string }
+export interface TerminalRef { pid: number; weztermPaneId?: number; weztermGui?: number; orcaTerminal?: string }
 /** Every identity known for a terminal. A wake holds all of them, so a room
  *  that registered the session pid-only and a room that registered it with
  *  its pane (or Orca handle) still serialize on the shared pid. */
 export function terminalKeys(agent: TerminalRef): string[] {
   const keys: string[] = [];
   if (agent.pid > 0) keys.push(`pid:${agent.pid}`);
-  if (agent.weztermPaneId != null) keys.push(`pane:${agent.weztermPaneId}`);
+  // Pane ids are per WezTerm GUI instance: pane 0 of GUI 10 and pane 0 of
+  // GUI 20 are different terminals and must not be one for locking,
+  // identity or "is this still the terminal holding the prompt". A pane
+  // whose GUI is unknown (older joins, a host that cannot enumerate
+  // processes, a mux-server pane) keeps the old key, pane:<n>, and so still
+  // meets any other unknown-GUI pane <n>: over-serialization, never a wake
+  // typed into another GUI (the socket follows the GUI, see inject()).
+  if (agent.weztermPaneId != null) {
+    keys.push(agent.weztermGui != null ? `pane:${agent.weztermGui}:${agent.weztermPaneId}` : `pane:${agent.weztermPaneId}`);
+  }
   if (agent.orcaTerminal) keys.push(`orca:${agent.orcaTerminal}`);
   return keys.length > 0 ? keys : ["pid:0"];
 }
@@ -62,7 +71,7 @@ export function lockKeysFor(
 }
 /** The terminal part of an agent, copied (the registry must not alias it). */
 function terminalRefOf(agent: TerminalRef): TerminalRef {
-  return { pid: agent.pid, weztermPaneId: agent.weztermPaneId, orcaTerminal: agent.orcaTerminal };
+  return { pid: agent.pid, weztermPaneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal };
 }
 /**
  * Is `live` still the terminal an attempt typed into? True when the closure
@@ -78,7 +87,7 @@ function terminalRefOf(agent: TerminalRef): TerminalRef {
 function sameTerminal(held: ReadonlySet<string>, live: TerminalRef): boolean {
   return lockKeysFor(live).some((k) => held.has(k));
 }
-import { getWeztermPath, weztermEnvForGui } from "./terminals.js";
+import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
 
 /**
@@ -226,7 +235,7 @@ export class ChatRoom extends EventEmitter {
    *  before (the join proved it stale), undefined leaves it as it was.
    *  `orcaTerminal` follows the same rule: a handle binds, null clears,
    *  undefined keeps. */
-  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null): Agent {
+  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null, weztermGui?: number): Agent {
     const existing = this.agents.get(name);
     if (existing) {
       const now = Date.now();
@@ -237,7 +246,8 @@ export class ChatRoom extends EventEmitter {
       // does not carry over. Learning a pane for the first time is not a
       // new session.
       const paneReplaced =
-        existing.weztermPaneId != null && weztermPaneId != null && existing.weztermPaneId !== weztermPaneId;
+        existing.weztermPaneId != null && weztermPaneId != null &&
+        (existing.weztermPaneId !== weztermPaneId || (existing.weztermGui ?? null) !== (weztermGui ?? null));
       const orcaReplaced =
         existing.orcaTerminal != null && orcaTerminal != null && existing.orcaTerminal !== orcaTerminal;
       if (existing.pid !== pid || paneReplaced || orcaReplaced) {
@@ -247,8 +257,10 @@ export class ChatRoom extends EventEmitter {
       }
       existing.active = true;
       existing.pid = pid;
-      if (weztermPaneId === null) existing.weztermPaneId = undefined;
-      else if (weztermPaneId != null) existing.weztermPaneId = weztermPaneId;
+      // The GUI travels with the pane: a bound pane sets it (unknown clears
+      // it), a cleared pane clears it, "nothing learned" keeps both.
+      if (weztermPaneId === null) { existing.weztermPaneId = undefined; existing.weztermGui = undefined; }
+      else if (weztermPaneId != null) { existing.weztermPaneId = weztermPaneId; existing.weztermGui = weztermGui; }
       if (orcaTerminal === null) existing.orcaTerminal = undefined;
       else if (orcaTerminal != null) existing.orcaTerminal = orcaTerminal;
       if (!existing.role && persistedRole) existing.role = persistedRole;
@@ -269,6 +281,7 @@ export class ChatRoom extends EventEmitter {
       role: persistedRole,
       lastSeen: Date.now(),
       weztermPaneId: weztermPaneId ?? undefined,
+      weztermGui: weztermPaneId != null ? weztermGui : undefined,
       orcaTerminal: orcaTerminal ?? undefined,
     };
     this.agents.set(name, agent);
@@ -458,7 +471,10 @@ export class ChatRoom extends EventEmitter {
         partialLine = false;
         console.log(`  → Injecting into ${name} (${identity})...`);
         try {
-          await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), weztermEnvForGui(agent.weztermGui), undefined, {
+          await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), agent.weztermGui != null ? undefined : getWeztermEnv(), undefined, {
+            // A pane of a known GUI goes through that GUI's socket only; a GUI
+            // that is gone fails the WezTerm route (guarded console fallback).
+            weztermGui: agent.weztermGui,
             // Orca's own input path first when the join bound a handle.
             orcaTerminal: agent.orcaTerminal,
             // Between the Orca or WezTerm failure and the console fallback the target

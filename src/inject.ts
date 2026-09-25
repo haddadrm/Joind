@@ -9,6 +9,7 @@ import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { injectOrca } from "./orca.js";
 import { classifyTarget, forgetTarget, DEFAULT_PLAN, type SubmitPlan } from "./target.js";
+import { socketForGui } from "./terminals.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -209,6 +210,11 @@ export interface InjectOptions {
    *  caller re-checks that the target is still the same live session.
    *  Anything but "proceed" aborts the fallback with WakeFallbackAborted. */
   fallbackGuard?: () => "proceed" | "skip" | "moved";
+  /** The WezTerm GUI instance (wezterm-gui pid) the pane belongs to. When
+   *  set, the WezTerm route uses that GUI's socket and nothing else; a GUI
+   *  that is gone fails the route, so the guarded console fallback runs,
+   *  instead of the pane number being typed into another GUI's pane. */
+  weztermGui?: number;
 }
 
 /** Backends, injectable for tests. */
@@ -220,6 +226,9 @@ export interface InjectBackends {
   /** `guard` is asked before any text is typed; `afterText`, once the text
    *  is in the pane, before the delayed second Enter and its recovery. */
   unix: (pid: number, text: string, guard?: () => void, plan?: SubmitPlan, afterText?: () => void) => Promise<void>;
+  /** A GUI instance's own socket, or undefined when that GUI is gone;
+   *  defaults to terminals.socketForGui. Injectable for tests. */
+  weztermSocket?: (gui: number) => string | undefined;
   platform?: NodeJS.Platform;
   /** How to submit to the target (a second Enter for Codex and Copilot);
    *  defaults to classifyTarget, which reads the process command line. */
@@ -280,9 +289,16 @@ export async function inject(
   } else if (weztermPaneId != null) {
     via = `wezterm pane ${weztermPaneId}`;
     attempt = async () => {
+      let env = weztermEnv;
+      if (options.weztermGui != null) {
+        const own = (backends.weztermSocket ?? socketForGui)(options.weztermGui);
+        // Never another GUI's socket: the pane number means nothing there.
+        if (!own) throw new Error(`wezterm instance gone: gui pid ${options.weztermGui} (pane ${weztermPaneId}) has no live socket`);
+        env = { WEZTERM_UNIX_SOCKET: own };
+      }
       const p = await plan();
       guard(); // the classification awaited: is this still the session to type into?
-      await backends.wezterm(weztermPaneId, text, weztermExe, weztermEnv, { plan: p, guard: afterText });
+      await backends.wezterm(weztermPaneId, text, weztermExe, env, { plan: p, guard: afterText });
     };
   }
   if (attempt) {

@@ -4,7 +4,8 @@ import { join } from "path";
 import { injectWezTerm, type SendTextProcess, type SpawnSendText } from "../src/inject.js";
 import { CODEX_PLAN, DEFAULT_PLAN } from "../src/target.js";
 import { findWeztermSocket, socketForGui, socketGuiPid, weztermGuiOfTree, weztermProbeEnv, type ProcessEntry } from "../src/terminals.js";
-import { resolvePaneForJoin, applyWeztermGui, type PaneResolverDeps } from "../src/tools.js";
+import { resolvePaneForJoin, type PaneResolverDeps } from "../src/tools.js";
+import { ChatRoom } from "../src/room.js";
 
 // Findings from the end-to-end run of 25 Sep 2026 (tools/inject-matrix,
 // results/e2e-20260925.md): each block fails on integration/injection-20260925
@@ -172,22 +173,24 @@ describe("c: a pane is checked in the agent's own WezTerm instance and woken thr
   });
 
   it("the agent keeps its GUI with its pane: set with a bound pane, cleared with a cleared pane, kept when nothing was learned", () => {
-    const agent: { weztermGui?: number } = {};
-    applyWeztermGui(agent, { paneId: 0, gui: 60924 });
-    expect(agent.weztermGui).toBe(60924);
-    applyWeztermGui(agent, { paneId: undefined });
-    expect(agent.weztermGui).toBe(60924);
-    applyWeztermGui(agent, { paneId: null });
-    expect(agent.weztermGui).toBeUndefined();
-    applyWeztermGui(agent, { paneId: 3, gui: 69000 });
-    applyWeztermGui(agent, { paneId: 4 });
-    expect(agent.weztermGui).toBeUndefined();
+    const room = new ChatRoom();
+    try {
+      const a = room.join("A", 100, 0, undefined, undefined, 60924);
+      expect(a.weztermGui).toBe(60924);
+      room.join("A", 100, undefined);
+      expect(a.weztermGui).toBe(60924);
+      room.join("A", 100, null);
+      expect(a.weztermGui).toBeUndefined();
+      room.join("A", 100, 3, undefined, undefined, 69000);
+      room.join("A", 100, 4);
+      expect(a.weztermGui).toBeUndefined();
+    } finally { room.destroy(); }
   });
 
-  it("the room wakes through the agent's own GUI socket, not the global one", () => {
+  it("the room hands the agent's GUI to inject(), which resolves that GUI's own socket", () => {
     const room = readFileSync(join(__dirname, "..", "src", "room.ts"), "utf-8");
-    expect(room).toMatch(/inject\(agent\.pid, prompt, agent\.weztermPaneId, getWeztermPath\(\), weztermEnvForGui\(agent\.weztermGui\)/);
-    expect(room).not.toMatch(/getWeztermEnv\(\)/);
+    expect(room).toMatch(/weztermGui: agent\.weztermGui,/);
+    expect(room).not.toMatch(/weztermEnvForGui/);
   });
 });
 

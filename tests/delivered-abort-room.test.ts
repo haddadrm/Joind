@@ -22,8 +22,11 @@ const state = {
 vi.mock("../src/inject.js", async () => {
   const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
   const { CODEX_PLAN } = await vi.importActual<typeof import("../src/target.js")>("../src/target.js");
-  const spawn: import("../src/inject.js").SpawnSendText = (_exe, argv) => {
-    const target = argv[argv.indexOf("--pane-id") + 1] ?? "?";
+  const spawn: import("../src/inject.js").SpawnSendText = (_exe, argv, opts) => {
+    // "<gui>:<pane>" when the send went through a GUI's own socket, else "<pane>".
+    const pane = argv[argv.indexOf("--pane-id") + 1] ?? "?";
+    const gui = /gui-sock-(\d+)$/.exec(opts.env?.WEZTERM_UNIX_SOCKET ?? "")?.[1];
+    const target = gui ? `${gui}:${pane}` : pane;
     let payload = "";
     const listeners: { close?: (c: number | null) => void } = {};
     return {
@@ -72,6 +75,7 @@ vi.mock("../src/inject.js", async () => {
         unix: (p, t, guard, plan, afterText) => actual.injectUnix(p, t, guard, plan, afterText, { exec, sleep }),
         platform: "linux",
         classify: async () => CODEX_PLAN,
+        weztermSocket: (gui: number) => `/s/gui-sock-${gui}`,
       }, options),
   };
 });
@@ -198,6 +202,25 @@ describe("a wake whose text is in the terminal finishes in place", () => {
       expect(state.sends.filter(isEnter)).toHaveLength(0);
       expect(state.orca).toEqual([]);
       expect(lines(room)).toContain("Could not submit the prompt to A; the text is in their input box.");
+    } finally {
+      await run();
+      room.destroy();
+    }
+  });
+
+  it("pane 0 of GUI 10 to pane 0 of GUI 20 during the first Enter's pause: a different terminal, never 'the one holding the prompt' (wezterm-submit gate round 1)", async () => {
+    const room = new ChatRoom();
+    try {
+      room.join("Codex", 101, 0, undefined, undefined, 10);
+      state.onFirstSleep = () => { room.join("Codex", 202, 0, undefined, undefined, 20); };
+      room.send("Rami", "@Codex ping");
+      await run();
+      const on10 = state.sends.filter((s) => s.target === "10:0");
+      const on20 = state.sends.filter((s) => s.target === "20:0");
+      expect(on10.map((s) => (isEnter(s) ? "enter" : "text"))).toEqual(["text"]);
+      expect(on20.map((s) => (isEnter(s) ? "enter" : "text"))).toEqual(["text", "enter", "enter"]);
+      expect(on20[0].payload).toContain("pid=202");
+      expect(lines(room).some((t) => /Could not submit/.test(t))).toBe(false);
     } finally {
       await run();
       room.destroy();

@@ -29,7 +29,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager } from "./manager.js";
 import { visibleToViewer, type ChatMessage } from "./room.js";
-import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, applyWeztermGui, weztermEnvFor } from "./tools.js";
+import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
@@ -763,8 +763,7 @@ app.post("/api/join", express.json(), async (req, res) => {
   const room = manager.getRoom(convId);
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
   if (!manager.joinIsCurrent(joinToken, pid, weztermPaneId ?? undefined, boundOrca ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
-  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name], boundOrca);
-  applyWeztermGui(agent, paneResolution);
+  const agent = room.join(name, pid || 0, weztermPaneId, agentRoles[name], boundOrca, paneResolution.gui);
   manager.bindAgent(name, convId, pid, weztermPaneId, boundOrca);
   if (pid) renameTabTitle(pid, name).catch(() => {});
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
@@ -1523,8 +1522,7 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
   if (!manager.joinIsCurrent(joinToken, pid, boundPane ?? undefined, boundOrca ?? undefined)) { res.status(409).json({ error: "Join superseded by a newer join or a departure for this name" }); return; }
 
-  const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca);
-  applyWeztermGui(agent, paneResolution);
+  const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui);
   manager.bindAgent(name, convId, pid, boundPane, boundOrca);
   room.touch(name);
   if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
@@ -1532,9 +1530,12 @@ app.post("/api/agent/join", express.json(), async (req, res) => {
   // Name the WezTerm tab if available
   if (agent.weztermPaneId != null) {
     const ownEnv = weztermEnvFor(agent);
-    const wtEnv = Object.keys(ownEnv).length > 0 ? { ...process.env, ...ownEnv } : undefined;
-    execFileAsync(getWeztermPath(), ["cli", "--no-auto-start", "set-tab-title", name, "--pane-id", String(agent.weztermPaneId)], { env: wtEnv })
-      .catch(() => {});
+    // A known GUI that is gone: no tab title, never in another GUI's pane.
+    if (ownEnv !== null) {
+      const wtEnv = Object.keys(ownEnv).length > 0 ? { ...process.env, ...ownEnv } : undefined;
+      execFileAsync(getWeztermPath(), ["cli", "--no-auto-start", "set-tab-title", name, "--pane-id", String(agent.weztermPaneId)], { env: wtEnv })
+        .catch(() => {});
+    }
   }
 
   const meta = manager.getMeta(convId);
