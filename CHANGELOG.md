@@ -15,6 +15,7 @@ The matrix now runs the whole wake path through a live Joind server, not only th
 ### Findings (25 Sep 2026, integration/injection-20260925, details in results/e2e-20260925.md)
 - **Most routes delivered.** The mention reached a real Claude Code and got its reply in 22 to 37 s over conhost, both Windows Terminal shells, Orca (Orca's own send), wmux and Warp. Codex in Orca replied in 57 s.
 - **The WezTerm route silently loses real wake prompts** for both agents. A 320 to 345 character burst ending in a carriage return is taken as a paste, and the carriage return becomes a new line. The text, a pause of 300 ms or more, then a carriage return in its own `send-text` call submits both agents. The matrix's 49-character prompt could not show this.
+- **Multi-GUI pane collision:** pane ids are per WezTerm GUI, the server checks a pane against the one socket it picked, and the ancestry check only asks "inside some WezTerm". An agent in a second GUI reporting pane 0 was accepted, and its wake was typed into the other GUI's pane 0. Reproduced between two GUIs of mine (69000 and 60924) with a receiver catching the prompt.
 - **The server can bind to a dead WezTerm socket:** it picks the lexically last `gui-sock-*` file. Each failed probe leaves a `wezterm.exe-log-*.txt`.
 - **Negative controls:** a pid with no console gets the honest line. A stale pane is dropped at join and the console route is used. A pid whose console has no agent reading it is a silent miss.
 
