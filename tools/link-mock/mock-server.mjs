@@ -238,7 +238,8 @@ function queue(conv, sender, text, opts) {
   (pending[conv] ||= []).push(p);
   const ev = { type: 'pending', conversationId: conv, data: Object.assign({ conversationId: conv }, p) };
   // A composer send gets its entry in the 202 first; the event follows and
-  // must be deduplicated by the UI.
+  // must be deduplicated by the UI. `silent` sends no event at all.
+  if (o.silent) return p;
   if (o.echoDelayMs) setTimeout(() => broadcast(ev), o.echoDelayMs);
   else broadcast(ev);
   return p;
@@ -273,6 +274,9 @@ let slowNext = null;
 let slowSelect = null;
 // { ms } for the next conversations fetch: see /mock/slow-conversations
 let slowConversations = null;
+// Delay (ms) of the pending event for the next queued composer send, so the
+// 202 is the page's only news of it for that long: see /mock/next-send-echo
+let nextSendEchoMs = null;
 function allPendingList() {
   const out = [];
   for (const conv of Object.keys(pending)) for (const x of pending[conv]) out.push(Object.assign({ conversationId: conv }, x));
@@ -427,7 +431,9 @@ async function api(req, res, u) {
           reason: 'author not registered at home', state: 'waiting', pending: snapshot }), slow.ms);
         return;
       }
-      const q = queue(conv, sender, b.text, { to, echoDelayMs: 200 });
+      const echo = nextSendEchoMs ?? 200;
+      nextSendEchoMs = null;
+      const q = queue(conv, sender, b.text, { to, echoDelayMs: echo });
       return json(res, 202, { queued: true, clientId: q.clientId, conversationId: conv,
         reason: 'link to ' + HOME + ' is down', pending: Object.assign({ conversationId: conv }, q) });
     }
@@ -531,6 +537,15 @@ const server = http.createServer(async (req, res) => {
     // Makes the page refetch /api/conversations (it does on this event)
     broadcast({ type: 'conversation-renamed', data: {} });
     return json(res, 200, { ok: true });
+  }
+  if (u.pathname === '/mock/silent-queue') {
+    // Queue an entry from the viewer with no event: only a snapshot reveals it
+    const q = queue(ROOM, viewer, u.searchParams.get('text') || 'Silently queued.', { silent: true });
+    return json(res, 200, { clientId: q.clientId });
+  }
+  if (u.pathname === '/mock/next-send-echo') {
+    nextSendEchoMs = Number(u.searchParams.get('ms') ?? 5000);
+    return json(res, 200, { echoMs: nextSendEchoMs });
   }
   if (u.pathname === '/mock/silent-drop') {
     // Remove queued entries with this text server-side, with no event (the

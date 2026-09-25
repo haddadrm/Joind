@@ -1393,8 +1393,11 @@ function onComposerQueued(body, payload, requestSeq) {
     state: (entry && entry.state) || body.state,
     reason: (entry && (entry.reason || entry.heldReason)) || body.reason,
   };
+  // Stale-202 rule: compare with the moment the request started ...
   if (!pendingSnapshotIsCurrent(p.clientId, requestSeq)) return;
-  applyPendingUpsert(conv, p, requestSeq);
+  // ... but record it with the moment it is applied, so a snapshot fetch
+  // that started before this 202 landed cannot erase the acknowledged entry.
+  applyPendingUpsert(conv, p);
 }
 
 // --- Decision cards ---
@@ -2379,10 +2382,21 @@ var activeDm = null; // name of the agent in the direct-message view, null = cha
 var lastRenderedDayKey = null; // calendar-date key of the last rendered message (for day dividers)
 var dmUnread = {}; // per-partner unread DM counts, keyed by agent name
 
+// Overlapping conversations fetches: each takes a number, and a response is
+// ignored once a newer fetch's response has been applied (its list and its
+// queue snapshot are both older than what is on screen).
+var convFetchSeq = 0;
+var convFetchApplied = 0;
+
 function loadConversations() {
+  var myFetch = ++convFetchSeq;
   var genAtStart = pendingGeneration;
   var seqAtStart = nextPendingSeq();
-  fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).then(function(data) {
+  // no-store: a live list never comes from a cache, and identical GETs are
+  // not serialized behind the browser's cache lock
+  fetch('/api/conversations?token=' + encodeURIComponent(webToken()), { cache: 'no-store' }).then(function(r) { return r.json(); }).then(function(data) {
+    if (myFetch < convFetchApplied) return; // a newer fetch already landed
+    convFetchApplied = myFetch;
     activeConversation = data.active;
     conversationList = data.conversations || [];
     applyLinkPayload(data, false, genAtStart !== pendingGeneration, seqAtStart);
@@ -2970,6 +2984,10 @@ function mergePendingSnapshot(conv, list, keepKnown, sinceSeq) {
   if (conv === null) pendingByConv = {};
   else delete pendingByConv[conv];
   var listed = {};
+  // HTTP snapshots stamp what they list with the moment they are applied,
+  // so a snapshot whose request started earlier (another kind of fetch)
+  // cannot drop an entry this one confirmed.
+  var applySeq = sinceSeq == null ? null : nextPendingSeq();
   list.forEach(function(p) {
     if (!p || !p.clientId) return;
     listed[p.clientId] = true;
@@ -2977,6 +2995,7 @@ function mergePendingSnapshot(conv, list, keepKnown, sinceSeq) {
     // The socket's snapshot is an event arriving now: stamp it, so a 202
     // whose request predates the reconnect cannot restate the entry.
     if (!keepKnown) notePendingLedger(p.clientId, 'state');
+    else if (applySeq != null) notePendingLedger(p.clientId, 'state', applySeq);
     var known = keepKnown && previous[p.clientId];
     addPendingEntry(conv === null ? p.conversationId : conv, known ? known.entry : p);
   });
@@ -3441,7 +3460,7 @@ function onPendingEvent(event) {
   applyPendingUpsert(conv, p);
 }
 
-// seq: the 202's request stamp, or omitted for an event arriving now
+// seq: an explicit order stamp; omitted, the entry is stamped as arriving now
 function applyPendingUpsert(conv, p, seq) {
   notePendingLedger(p.clientId, 'state', seq);
   if (!addPendingEntry(conv, p)) return;
