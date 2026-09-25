@@ -75,7 +75,7 @@ function config(dir: string, instance: string, port: number, peer: string, peerP
   };
 }
 
-async function waitFor<T>(what: string, fn: () => T | undefined | false | Promise<T | undefined | false>, ms = 15_000): Promise<T> {
+async function waitFor<T>(what: string, fn: () => T | undefined | false | Promise<T | undefined | false>, ms = 12_000): Promise<T> {
   const until = Date.now() + ms;
   for (;;) {
     const v = await fn();
@@ -99,7 +99,7 @@ async function get(base: string, path: string, headers: Record<string, string> =
 
 const auth = { Authorization: `Bearer ${TOKEN}` };
 
-describe("linked servers: two servers in one process", () => {
+describe("linked servers: two servers in one process", { timeout: 20_000 }, () => {
   let dirA: string, dirB: string;
   let A: JoindHandle, B: JoindHandle;
   let netA: ReturnType<typeof switchableFetch>, netB: ReturnType<typeof switchableFetch>;
@@ -141,7 +141,7 @@ describe("linked servers: two servers in one process", () => {
     expect(JSON.stringify(member)).not.toContain(curzonReg);
     // A name-only lookup on A never reaches a hosted registration.
     expect(A.manager.getAgentBinding("Curzon")).toBeUndefined();
-  }, 20_000);
+  });
 
   it("a mention on A reaches B as a wake request and B's injector gets a prompt naming A's room and B's URL", async () => {
     injected.length = 0;
@@ -152,15 +152,14 @@ describe("linked servers: two servers in one process", () => {
     expect(call.prompt).toContain(`in "ops" on alpha (conversation ${remote})`);
     expect(call.prompt).toContain(`${B.baseUrl}/api/agent/read?sender=Curzon`);
     expect(call.prompt).not.toContain(A.baseUrl);
-    // The mention was a success: no honest-failure line on A.
-    await new Promise((r) => setTimeout(r, 300));
-    expect(A.manager.getRoom(room)!.read().some((m) => /Could not wake Curzon/.test(m.text))).toBe(false);
+    // A success posts no line on A: asserted in the next test, which finds
+    // exactly one "Could not wake" line (its own) after this wake finished.
     // The member reads through its own server, with the home's ids.
     const read = await get(B.baseUrl, `/api/agent/read?sender=Curzon&pid=${PID}`);
     const msgs = read.json.messages as ChatMessage[];
     const ping = msgs.find((m) => m.text === "@Curzon ping from home")!;
     expect(ping.id).toBe(s.json.id);
-  }, 20_000);
+  });
 
   it("a reply written on B lands on A under A's id and is mirrored back", async () => {
     const r = await post(B.baseUrl, "/api/agent/send", { sender: "Curzon", text: "pong from the host", pid: PID });
@@ -168,7 +167,7 @@ describe("linked servers: two servers in one process", () => {
     const home = A.manager.getRoom(room)!.read().find((m) => m.text === "pong from the host")!;
     expect(home.sender).toBe("Curzon");
     expect(r.json.id).toBe(home.id);
-  }, 20_000);
+  });
 
   it("a failed injection on B comes back as A's honest line, worded as for a local wake", async () => {
     injectFailures.push("AttachConsole failed: error 87");
@@ -176,7 +175,8 @@ describe("linked servers: two servers in one process", () => {
     const line = await waitFor("the honest line on A", () =>
       A.manager.getRoom(room)!.read().find((m) => m.sender === "system" && /Could not wake Curzon/.test(m.text)));
     expect(line.text).toBe("Could not wake Curzon: no console reachable from their host bravo (remote session, or joined without its real terminal pid). They will see mentions only when they read on their own schedule.");
-  }, 20_000);
+    expect(A.manager.getRoom(room)!.read().filter((m) => /Could not wake Curzon/.test(m.text))).toHaveLength(1);
+  });
 
   it("register and send are idempotent on retry", async () => {
     const hosted = A.manager.getRoom(room)!.hostedRegistrationOf("Curzon")!;
@@ -208,7 +208,7 @@ describe("linked servers: two servers in one process", () => {
     // A wrong token is 401.
     const bad = await get(A.baseUrl, "/api/peer/rooms", { Authorization: "Bearer nope-nope-nope" });
     expect(bad.status).toBe(401);
-  }, 20_000);
+  });
 
   it("a DM not addressed to the hosted member never crosses the link; one addressed to it does", async () => {
     const mirror = B.manager.getRoom(remote)!;
@@ -224,7 +224,7 @@ describe("linked servers: two servers in one process", () => {
     const sub = await get(A.baseUrl, `/api/peer/subscribe?room=${room}&since=0&viewers=Jadzia,Rami&timeoutMs=1000`, auth);
     const texts = JSON.stringify(sub.json);
     expect(texts).not.toContain("secret for Jadzia only");
-  }, 20_000);
+  });
 
   it("while the link is down a send from B queues; its author may delete it, no one else; on recovery it is sent once under A's id", async () => {
     const link = B.links.get("alpha")!;
@@ -259,18 +259,18 @@ describe("linked servers: two servers in one process", () => {
 
     netB.cut(false);
     await waitFor("B to see the link up", () => link.info().state === "up", 10_000);
-    const landed = await waitFor("the queued message on A", () =>
-      A.manager.getRoom(room)!.read().filter((m) => m.text === "written offline, keep"));
-    await new Promise((r) => setTimeout(r, 500));
-    expect(A.manager.getRoom(room)!.read().filter((m) => m.text === "written offline, keep")).toHaveLength(1);
-    expect(A.manager.getRoom(room)!.read().some((m) => m.text === "written offline, delete")).toBe(false);
-    const dispatched = noticesB.find((n) => n.type === "pending-dispatched" && n.data.clientId === keep);
-    expect(dispatched && dispatched.type === "pending-dispatched" ? dispatched.data.id : undefined).toBe(landed[0].id);
+    const dispatched = await waitFor("the pending-dispatched notice", () =>
+      noticesB.find((n): n is Extract<MirrorNotice, { type: "pending-dispatched" }> => n.type === "pending-dispatched" && n.data.clientId === keep));
+    // The restore line is said after the drain finished: nothing else is on its way.
     const restored = await waitFor("the restore line", () => (mirror as unknown as { readForView(n: number, v?: string): ChatMessage[] }).readForView(100, undefined)
       .find((m) => m.local && m.text === "link to alpha restored; 1 queued message sent"));
     expect(restored.id).toBeLessThan(0);
+    const landed = A.manager.getRoom(room)!.read().filter((m) => m.text === "written offline, keep");
+    expect(landed).toHaveLength(1);
+    expect(dispatched.data.id).toBe(landed[0].id);
+    expect(A.manager.getRoom(room)!.read().some((m) => m.text === "written offline, delete")).toBe(false);
     expect(existsSync(queueFile) ? readFileSync(queueFile, "utf-8").trim() : "").toBe("");
-  }, 30_000);
+  });
 
   it("a mention while A cannot reach B is not queued: A says so once", async () => {
     injected.length = 0;
@@ -281,18 +281,18 @@ describe("linked servers: two servers in one process", () => {
     expect(line.text).toMatch(/^Could not wake Curzon: their host bravo is unreachable \(.+\)\. They will see this when the link returns\.$/);
     expect(injected).toHaveLength(0);
     netA.cut(false);
-  }, 20_000);
+  });
 
   it("a peer silent past the grace is announced once on A, and so is its return", async () => {
     netB.cut(true);
     const gone = await waitFor("the unreachable announcement", () =>
-      A.manager.getRoom(room)!.read().find((m) => m.text === "bravo unreachable; members hosted there cannot be woken until it returns"), 20_000);
+      A.manager.getRoom(room)!.read().find((m) => m.text === "bravo unreachable; members hosted there cannot be woken until it returns"), 12_000);
     expect(gone.sender).toBe("system");
     netB.cut(false);
     await waitFor("the return", () =>
-      A.manager.getRoom(room)!.read().find((m) => m.text === "bravo is reachable again; members hosted there can be woken"), 15_000);
+      A.manager.getRoom(room)!.read().find((m) => m.text === "bravo is reachable again; members hosted there can be woken"), 6_000);
     expect(A.manager.getRoom(room)!.read().filter((m) => m.text.startsWith("bravo unreachable"))).toHaveLength(1);
-  }, 45_000);
+  });
 
   it("MCP: chat_join takes \"<server>:<room>\", and chat_send, chat_read and chat_unsend work through the mirror", async () => {
     type ToolHandler = (args: Record<string, unknown>, extra: { sessionId?: string }) => Promise<{ content: Array<{ text: string }> }>;
@@ -313,6 +313,8 @@ describe("linked servers: two servers in one process", () => {
     const read = await call("chat_read", { sender: "Kira", limit: 5 });
     expect(read).toContain(`[#${home.id} Kira] hello from MCP on the host`);
 
+    const mirrorB = B.manager.getRoom(remote) as unknown as { readForView(n: number, v?: string): ChatMessage[] };
+    const restoresBefore = mirrorB.readForView(1000, undefined).filter((m) => m.local && m.text.startsWith("link to alpha restored")).length;
     netB.cut(true);
     await waitFor("down", () => B.links.get("alpha")!.info().state === "down");
     const queued = await call("chat_send", { sender: "Kira", text: "MCP offline draft" });
@@ -321,12 +323,15 @@ describe("linked servers: two servers in one process", () => {
     expect(await call("chat_unsend", { sender: "Kira", clientId })).toBe(`Undelivered message ${clientId} deleted`);
     expect(await call("chat_unsend", { sender: "Kira", clientId })).toBe("Not deleted: No such undelivered message (already sent, or deleted)");
     netB.cut(false);
-    await waitFor("up", () => B.links.get("alpha")!.info().state === "up", 10_000);
-    await new Promise((r) => setTimeout(r, 500));
+    // The restore line of this outage is said once its (empty) drain is over.
+    const restored = await waitFor("this outage's restore line", () =>
+      mirrorB.readForView(1000, undefined).filter((m) => m.local && m.text.startsWith("link to alpha restored")).length > restoresBefore
+        && mirrorB.readForView(1000, undefined).filter((m) => m.local && m.text.startsWith("link to alpha restored")).pop());
+    expect(restored && restored.text).toBe("link to alpha restored; 0 queued messages sent");
     expect(A.manager.getRoom(room)!.read().some((m) => m.text === "MCP offline draft")).toBe(false);
     expect(await call("chat_leave", { name: "Kira" })).toBe("Kira disconnected");
     await waitFor("Kira gone on A", () => !A.manager.getRoom(room)!.getAgent("Kira"));
-  }, 30_000);
+  });
 
   it("web contract: pending with both ids, dispatch and message both sent, pending in list, select and init, discovery refetch events, no remote admin", async () => {
     const { default: WebSocket } = await import("ws");
@@ -380,11 +385,11 @@ describe("linked servers: two servers in one process", () => {
       ws.close();
       netB.cut(false);
     }
-  }, 40_000);
+  });
 
   it("the member leaves from B and is removed on A", async () => {
     const r = await post(B.baseUrl, "/api/agent/leave", { name: "Curzon", pid: PID });
     expect(r.status).toBe(200);
     await waitFor("Curzon gone on A", () => !A.manager.getRoom(room)!.getAgent("Curzon"));
-  }, 20_000);
+  });
 });
