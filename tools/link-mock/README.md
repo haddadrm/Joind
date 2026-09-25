@@ -64,6 +64,14 @@ printed on start. Open it in a browser. The web token is injected into
   queued entry is delivered (at 200 ms) and every socket drops (at 400 ms),
   so the reconnect `init` carries the rest. With a flood of 501 this is the
   gate's eviction case: the late snapshot still lists the delivered entry.
+- Tasks per room: `general` and `ramiy530:cpm-engine` each have a task
+  `#1` (ids are per room). `/api/tasks`, `/api/tasks/count` and
+  `/api/tasks/update` work per room, and `/mock/state` lists every task
+  update as submitted (`taskUpdates`), so a card answered against the wrong
+  room shows up there. The round 6 case: open `general`, open the task
+  panel, `GET /mock/slow-select?ms=4000`, then select `cpm-engine`. The
+  reconnect `init` lands before the late response, and the panel must show
+  the cpm-engine task.
 - `GET /mock/state` shows the viewer, active room, link and queue.
 
 Screenshots go to `tools/link-mock/shots/` (gitignored).
@@ -146,9 +154,19 @@ can match these or tell the UI side to change them:
    Its links, rooms and messages still apply.
    **Select overtaken by a reconnect.** If a socket `init` lands while a
    selection request is in flight and the room is still the one selected,
-   the whole response is skipped. `init` already painted that room from
+   the response's snapshot is skipped. `init` already painted that room from
    newer data, and applying the older message list would hide messages
-   delivered in between.
+   delivered in between. Room-scoped state that `init` does not reset
+   still switches: the task list, badge and open task panel are reset and
+   refetched for the selected room.
+   **Tasks follow the room.** Task ids are per room, so the task list
+   records the room it belongs to. Selecting a room clears the previous
+   room's cards at once and fetches the new room's. A reconnect `init`
+   that lands in a different room does the same. Task responses for a room
+   that is no longer active are dropped. Answering a card is refused
+   unless its list belongs to the active room. Nothing else needs this
+   treatment. Select does not reset typing, stale markers or reactions,
+   and pins and the decisions badge are not per room.
 9. **Pending states.** An entry's `state` is absent (queued: amber "queued,
    not delivered"), `waiting` (muted "waiting to register at home") or
    `held` (danger "held, not delivered" with a "Held: <reason>" line). The
