@@ -479,11 +479,22 @@ export class MirrorRoom extends ChatRoom {
       if (!this.insertedAt.has(m.id)) this.insertedAt.set(m.id, ++this.insertSeq);
     }
     this.messages = [...byId.values()].sort((a, b) => a.id - b.id);
+    const before = this.roster;
     this.roster = new Map(snap.members.map((a) => [a.name, a]));
     if (snap.name) this.name = snap.name;
     this.homeMessageCount = Math.max(this.homeMessageCount, this.messages.length);
     if (!announce) return;
     for (const m of gone) this.emitMirrored("message-deleted", { id: m.id });
+    // The roster too: the subscription resumes from the snapshot's cursor, so
+    // membership events from the outage never arrive. A browser holding the
+    // old roster would keep a member who left, or a host it no longer has
+    // (gate round 11, finding 1). A leave for each name gone, a join for each
+    // name new or changed; an unchanged member is left alone.
+    for (const [name, a] of before) if (!this.roster.has(name)) this.emitMirrored("leave", a);
+    for (const [name, a] of this.roster) {
+      const prev = before.get(name);
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(a)) this.emitMirrored("join", a);
+    }
     for (const m of incoming) if (!had.has(m.id)) this.emitMirrored("message", m);
   }
 

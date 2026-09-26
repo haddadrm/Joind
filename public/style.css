@@ -833,6 +833,13 @@ body {
   white-space: nowrap;
 }
 .pill-status { font-size: 10px; color: var(--text-muted); font-style: italic; white-space: nowrap; }
+.pill-host {
+  font-size: 10px;
+  color: var(--text-muted);
+  border-left: 1px solid var(--border);
+  padding-left: 6px;
+  white-space: nowrap;
+}
 
 /* ================================================================
    CHAT AREA + MESSAGES
@@ -2795,7 +2802,7 @@ body {
   /* Pills compact */
   .agent-pills { gap: 3px; }
   .agent-pill { padding: 2px 6px 2px 5px; font-size: 11px; gap: 3px; }
-  .pill-role, .pill-status { display: none; }
+  .pill-role, .pill-status, .pill-host { display: none; }
   .pill-dot { width: 6px; height: 6px; }
 
   .you-pill { padding: 3px 8px 3px 6px; font-size: 11px; gap: 4px; }

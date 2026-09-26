@@ -581,6 +581,14 @@ function renderPills() {
       role.textContent = a.role;
       pill.appendChild(role);
     }
+    // Linked servers: a hosted member's terminal lives on a peer server; the
+    // room sees who is woken elsewhere. Local members carry no host.
+    if (a.host) {
+      var hostEl = document.createElement('span');
+      hostEl.className = 'pill-host';
+      hostEl.textContent = 'via ' + a.host;
+      pill.appendChild(hostEl);
+    }
     // Proof-of-life age: presence can look fine while nothing runs (a hung
     // resident keeps heartbeating). Show how long since the agent last
     // posted, once it passes 30 minutes; the tooltip carries both ages.
@@ -592,6 +600,7 @@ function renderPills() {
     var seenAge = a.lastSeen ? Math.max(0, nowMs - a.lastSeen) : null;
     var quietAge = postAge != null ? postAge : (a.joinedAt ? Math.max(0, nowMs - a.joinedAt) : null);
     pill.title = (a.name || '') +
+      (a.host ? ' · hosted on ' + a.host : '') +
       (seenAge != null ? ' · seen ' + formatAge(seenAge) + ' ago' : '') +
       (postAge != null ? ' · last posted ' + formatAge(postAge) + ' ago' : ' · no posts this session');
     if (quietAge != null && quietAge > 30 * 60000) {
@@ -658,7 +667,7 @@ function showPopover(anchor, agent) {
   hdrName.style.fontWeight = '700';
   var pid = document.createElement('span');
   pid.className = 'pop-pid';
-  pid.textContent = 'PID ' + agent.pid;
+  pid.textContent = agent.host ? 'via ' + agent.host : 'PID ' + agent.pid;
   hdr.appendChild(hdrName); hdr.appendChild(pid);
   pop.appendChild(hdr);
 
