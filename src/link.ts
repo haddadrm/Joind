@@ -565,7 +565,15 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     // One registration transition of a name at a time: this join holds the
     // lock until it commits or abandons, so a restore can never land after
     // a newer join (gate round 2, finding 2).
+    // Timing of a remote join (the join-latency trace): the wait for the
+    // name's lock, then the register round trip.
+    const tLock = Date.now();
     const release = await m.lockName(name);
+    const lockMs = Date.now() - tLock;
+    const tRegister = Date.now();
+    const timing = (outcome: string): void => {
+      console.log(`  [join] ${name} -> ${convId}: lock wait ${lockMs} ms, register round trip ${Date.now() - tRegister} ms (${outcome})`);
+    };
     // Recorded as unconfirmed before the request (write-ahead): whatever
     // happens to the reply, the record says the home may hold this id.
     try {
@@ -579,6 +587,7 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
       // Nothing is kept here yet: the join may still be superseded (gate
       // round 1, finding 3). The caller commits or abandons.
       const out: RemoteRegistered = { ok: true, online: res.online ?? [], homeRegistration: res.registration, hostedRegistration: registration, role: t.role, terminalSummary };
+      timing("registered");
       this.joinLocks.set(out, release);
       return out;
     } catch (err) {
@@ -586,12 +595,14 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
         // Refused for good: the home holds nothing under this id, and the
         // record forgets it at once (gate round 10, finding 4).
         m.refusedMemberRegistration(name, registration);
+        timing(`refused ${err.status}`);
         release();
         const body = err.body as { candidates?: unknown } | undefined;
         return { ok: false, status: err.status, error: err.message, ...(body?.candidates ? { candidates: body.candidates } : {}) };
       }
       // A link error: the id stays unconfirmed (the home may hold it) and
       // recovery releases it unless a member here takes it.
+      timing("link error");
       release();
       return { ok: false, status: 503, error: `the link to ${r.server} is down (${(err as Error).message}); a remote room can be joined only while its home server answers` };
     }

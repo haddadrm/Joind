@@ -18,7 +18,7 @@ import type { TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
-import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, liveServerSocket, resolveWezTermExe, weztermEnvForGui, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, socketForGui, socketGuiPid, weztermGuiOf, type ProcessEntry } from "./terminals.js";
+import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, liveServerSocket, resolveWezTermExe, weztermEnvForGui, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, socketForGui, socketGuiPid, weztermGuiOf, anyLiveGuiSocket, type ProcessEntry } from "./terminals.js";
 import { listOrcaTerminals, ORCA_HANDLE, type OrcaTerminalState } from "./orca.js";
 
 const execFileAsync = promisify(execFile);
@@ -36,6 +36,10 @@ export interface PaneResolverDeps {
   autoDetect: (socket: string, gui: number) => Promise<number | undefined>;
   /** Resolve the wezterm executable, independently of any GUI being reachable. */
   ensureExe?: () => Promise<boolean>;
+  /** Whether any WezTerm GUI is alive with a socket. When none is, a join
+   *  that names no pane binds none, and the process table (1.6 to 4.4 s on a
+   *  loaded Windows host, measured 26 Sep 2026) is not asked. */
+  anyLiveGui?: () => boolean;
   log?: (line: string) => void;
 }
 
@@ -71,6 +75,10 @@ export async function resolvePaneForJoin(
 ): Promise<PaneResolution> {
   const log = deps.log ?? ((line: string) => console.log(`  [wezterm] ${line}`));
   const drop = (note: string): PaneResolution => { log(note); return { paneId: null, note }; };
+  // No pane named and no WezTerm GUI alive: no pane can be bound (a pane
+  // binds only through its own live GUI's socket), and any pane held before
+  // belongs to a GUI that is gone. Clear it without the process enumeration.
+  if (requested == null && deps.anyLiveGui && !deps.anyLiveGui()) return { paneId: null };
   const pidGui = pid > 0 ? await deps.guiOf(pid) : "unknown";
 
   if (requested != null) {
@@ -128,6 +136,7 @@ export function defaultPaneResolverDeps(manager: ConversationManager, tree: Proc
     listPaneIds: (socket) => listWezTermPaneIds(socket),
     autoDetect: (socket, gui) => autoDetectWezTermPane(manager, socket, gui),
     ensureExe: () => resolveWezTermExe(),
+    anyLiveGui: () => anyLiveGuiSocket(),
   };
 }
 
@@ -478,11 +487,13 @@ export function registerTools(
 
       // Bind a WezTerm pane or an Orca terminal only when it is live and
       // really this process's (one process enumeration shared by both checks).
+      const tValidate = Date.now();
       const tree = processTreeOnce();
       const [paneResolution, { orcaTerminal: resolvedOrca, note: orcaNote }] = await Promise.all([
         resolvePaneForJoin(name, pid, weztermPaneId, defaultPaneResolverDeps(manager, tree)),
         resolveOrcaForJoin(name, pid, orcaTerminal, defaultOrcaResolverDeps(manager, tree)),
       ]);
+      if (remote?.isRemoteId(convId)) console.log(`  [join] ${name} -> ${convId}: terminal validation ${Date.now() - tValidate} ms (MCP)`);
       const { paneId: resolvedPaneId, note: paneNote } = paneResolution;
 
       // Re-fetch after the await: a conversation deleted meanwhile must not

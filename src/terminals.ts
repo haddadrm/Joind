@@ -452,6 +452,18 @@ export function findWeztermSocket(deps: SocketFinderDeps = {}): string | undefin
   }
 }
 
+/** Whether any WezTerm GUI is alive with a socket in the socket directory:
+ *  a listing and a signal-0 probe per file, no process enumeration. With
+ *  none, no pane can be bound (a pane binds only through its own GUI's
+ *  socket; see socketForGui), so a join that names no pane has nothing to
+ *  look up in the process table for WezTerm. */
+export function anyLiveGuiSocket(deps: { dir?: string; list?: (dir: string) => string[]; alive?: (pid: number) => boolean } = {}): boolean {
+  const dir = deps.dir ?? weztermSocketDir();
+  const list = deps.list ?? ((d: string) => { try { return readdirSync(d); } catch { return []; } });
+  const alive = deps.alive ?? pidAlive;
+  return list(dir).some((f) => { const pid = socketGuiPid(f); return pid !== null && alive(pid); });
+}
+
 /** The socket of one GUI instance, when that GUI is alive and its socket
  *  file is listed in the socket directory (a listing, not existsSync: see
  *  findWeztermSocket, a live socket file cannot be stat'ed on Windows). */

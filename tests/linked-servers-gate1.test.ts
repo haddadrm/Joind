@@ -34,6 +34,9 @@ vi.mock("../src/terminals.js", async () => {
       let p: Promise<Map<number, never>> | null = null;
       return () => (p ??= (() => { const h = holds.shift(); if (!h) return Promise.resolve(new Map()); h.taken = true; return h.promise; })());
     },
+    // Validation parks a join in the process table; with no live WezTerm GUI
+    // a join naming no pane would skip it (link-join-latency), so one is live here.
+    anyLiveGuiSocket: () => true,
   };
 });
 

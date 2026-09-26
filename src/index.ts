@@ -878,12 +878,14 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (owned) { res.status(409).json(owned); return; }
     const joinToken = manager.beginJoin(name, convId, pid, requestedPane, requestedOrcaHandle(requestedOrca), typeof discoveredGui === "number" ? discoveredGui : undefined);
     // Same invariant as the agent joins: a pane or Orca terminal is bound only when it is live and this process's.
+    const tValidate = Date.now();
     const tree = processTreeOnce();
     const [paneResolution, orcaResolution] = await Promise.all([
       // The UI invite names the GUI whose socket its scan ran through: a pane is a pair.
       resolvePaneForJoin(name, pid || 0, requestedPane, defaultPaneResolverDeps(manager, tree), typeof discoveredGui === "number" ? discoveredGui : undefined),
       resolveOrcaForJoin(name, pid || 0, requestedOrca, defaultOrcaResolverDeps(manager, tree)),
     ]);
+    if (linkRegistry.isRemoteId(convId)) console.log(`  [join] ${name} -> ${convId}: terminal validation ${Date.now() - tValidate} ms (UI invite)`);
     const weztermPaneId = paneResolution.paneId;
     const boundOrca = orcaResolution.orcaTerminal;
     const room = manager.getRoom(convId);
@@ -1707,6 +1709,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   }
 
   app.post("/api/agent/join", express.json(), async (req, res) => {
+    const tJoin = Date.now();
     let { name, pid, conversation, wtSession, weztermPaneId } = req.body as {
       name?: string; pid?: number; conversation?: string; wtSession?: string; weztermPaneId?: number;
     };
@@ -1756,11 +1759,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
     // Bind a WezTerm pane or an Orca terminal only when it is live and really
     // this process's (one process enumeration shared by both checks).
+    const tValidate = Date.now();
     const tree = processTreeOnce();
     const [paneResolution, orcaResolution] = await Promise.all([
       resolvePaneForJoin(name, pid || 0, weztermPaneId, defaultPaneResolverDeps(manager, tree), discoveredGui),
       resolveOrcaForJoin(name, pid || 0, requestedOrca, defaultOrcaResolverDeps(manager, tree)),
     ]);
+    if (linkRegistry.isRemoteId(convId)) console.log(`  [join] ${name} -> ${convId}: terminal validation ${Date.now() - tValidate} ms (${Date.now() - tJoin} ms since the request)`);
     const boundPane = paneResolution.paneId;
     const boundOrca = orcaResolution.orcaTerminal;
 
@@ -1788,7 +1793,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui, registration);
     manager.bindAgent(name, convId, pid, boundPane, boundOrca, paneResolution.gui, registration);
     room.touch(name);
-    if (remoteReg) { linkRegistry.commitMember(convId, name, remoteReg); await linkRegistry.joined(convId); }
+    if (remoteReg) {
+      linkRegistry.commitMember(convId, name, remoteReg);
+      const tFill = Date.now();
+      await linkRegistry.joined(convId);
+      console.log(`  [join] ${name} -> ${convId}: joined, mirror fill ${Date.now() - tFill} ms, ${Date.now() - tJoin} ms since the request`);
+    }
     if (wtSession) { tabNames[wtSession] = name; saveTabNames(tabNames); }
 
     // Name the WezTerm tab if available

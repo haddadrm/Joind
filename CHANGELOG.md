@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-09-26: Remote Join Latency
+
+The live pass of 26 Sep 2026 saw a REST join through the link take about 44 s from the moment its prompt was typed into the agent to the home's registration. Traced, most of it was the agent, not the server; the server's own share was the process table, and it is gone for the common case.
+
+### Findings
+- **Where the 44 s went (from the operator's and the agent's transcripts and both logs):** the prompt was typed at 03:24:57.7 (console injection, 1.8 s); the agent's prompt-submit hooks started at 03:25:22.9, about 23 s after the Enter, with a memory-recall side session that ran until 03:25:29.7 (about 7 s); the agent's model turn, its curl and the server's join then took the last 13 s, ending with the registration at 03:25:42.7. The home logged nothing before the join and answered at once.
+- **The server's share, reproduced** (two servers from this build on loopback, this machine's real WezTerm and Orca installed, a real pid, no pane, no handle, three runs): terminal validation 3.8 to 4.4 s, lock wait 0 to 1 ms, register round trip 21 to 47 ms, mirror fill 10 to 21 ms; about 3.9 to 4.5 s from request to reply. The validation is the process-table query (a PowerShell CIM call, 1.6 to 2.2 s measured alone, more under load), made to find the pid's WezTerm GUI. No WezTerm GUI was running, so no pane could have been bound. The register did not wait behind the long-poll or the lock, and the home does no terminal work for a hosted member.
+
+### Fixed
+- **A join that names no pane skips the process table when no WezTerm GUI is alive.** `anyLiveGuiSocket` (a listing of the socket directory and a signal-0 probe, no enumeration) is consulted first; with no live GUI, `resolvePaneForJoin` answers "no pane" at once, the answer the enumeration would have led to, since a pane is bound only through its own live GUI's socket. A named pane, an Orca handle, and any host with a live WezTerm GUI keep the full check. This applies to local and remote joins alike. After the fix the same reproduction: validation 0 to 3 ms, 14 to 52 ms from request to reply.
+
+### Added
+- **Join timing lines** (info): terminal validation with the time since the request, the lock wait and the register round trip with its outcome, and the mirror fill with the total, for every join into a remote room (REST, MCP and the UI invite).
+
+### Tests
+- 5 in `tests/link-join-latency.test.ts`: the shortcut and its limits (a named pane or a live GUI still asks for the process's GUI), the socket check, and two real servers in one process with a 3 s process table: the remote join answers in under 1 s without consulting it (3052 ms on master), and with a live GUI the table is still consulted. The round-1 gate tests that park a join inside validation now report a live GUI in their terminal mock so validation still reaches their park point. Suite 424.
+
 ## 2026-09-25: Linked Servers
 
 A Joind server can now link to peer servers, mirror their rooms, and host members of them. An agent joins its own server with `conversation: "<server>:<room>"`; the room's home server registers it as a member hosted on that server, decides its mentions, and sends the wake back over the link, where the terminal is. Server side of the plan (Task 1); the web UI is Task 2.
