@@ -31,7 +31,7 @@ afterEach(() => { vi.useRealTimers(); rmSync(dir, { recursive: true, force: true
 /** A room wired the way index.ts wires it: its own id, the shared store. */
 function wiredRoom(store: CursorStore, id: string): ChatRoom {
   const room = new ChatRoom();
-  room.getCursor = (name) => store.cursorFor(id, name, room.highWaterId());
+  room.getCursor = (name) => store.storedCursor(id, name, room.highWaterId());
   return room;
 }
 
@@ -113,6 +113,18 @@ describe("CursorStore: one cursor per room and name", () => {
     store.advance("r", "A", 1);
     expect(() => store.flush()).not.toThrow();
     expect(lines.some((l) => /could not save agent-cursors.json/.test(l))).toBe(true);
+  });
+
+  it("an absent cursor is undefined from storedCursor (no lower bound), 0 only from cursorFor (counts)", () => {
+    const lines: string[] = [];
+    const store = new CursorStore(dir, { log: (l) => lines.push(l) });
+    expect(store.storedCursor("cpm", "Curzon", 1900)).toBeUndefined();
+    expect(store.cursorFor("cpm", "Curzon", 1900)).toBe(0);
+    store.advance("cpm", "Curzon", 1850);
+    expect(store.storedCursor("cpm", "Curzon", 1900)).toBe(1850);
+    store.advance("big", "Curzon", 10029);
+    expect(store.storedCursor("big", "Curzon", 1900)).toBe(1900); // past the end: read as the end
+    expect(lines).toHaveLength(1);
   });
 
   it("unread counts use the cursor they are given", () => {
@@ -231,6 +243,40 @@ describe("wake prompts: the room's own cursor, never past the mention", () => {
     }
   });
 
+  it("follow-up: a member with no cursor in the room gets since = mention - 1, never 0", async () => {
+    const store = new CursorStore(dir, { log: () => undefined });
+    const room = wiredRoom(store, "c-1");
+    try {
+      room.join("Curzon", 4242);
+      for (let i = 0; i < 20; i++) room.send("Rami", `history ${i}`);
+      const mention = room.send("Rami", "@Curzon first wake after the upgrade");
+      await fire();
+      expect(sinceOf(state.prompts[0])).toBe(mention.id - 1);
+    } finally {
+      room.destroy();
+    }
+  });
+
+  it("follow-up: a hosted member with no cursor on its host gets since = mention - 1; with no mention id (an older home) it stays 0", async () => {
+    const store = new CursorStore(dir, { log: () => undefined });
+    const mirror = wiredRoom(store, "home:c-home");
+    try {
+      mirror.join("Curzon", 4242, undefined, undefined, undefined, undefined, "reg-1");
+      for (let i = 0; i < 20; i++) mirror.send("Rami", `history ${i}`);
+      const mention = mirror.send("Rami", "the replicated mention");
+      const first = mirror.wakeForPeer("Rami", "Curzon", "reg-1", "\"cpm\" on home", mention.id);
+      await fire();
+      expect((await first).ok).toBe(true);
+      expect(sinceOf(state.prompts[0])).toBe(mention.id - 1);
+      const older = mirror.wakeForPeer("Rami", "Curzon", "reg-1", "\"cpm\" on home");
+      await fire();
+      expect((await older).ok).toBe(true);
+      expect(sinceOf(state.prompts[1])).toBe(0);
+    } finally {
+      mirror.destroy();
+    }
+  });
+
   it("a cursor below the mention is used as it is (the clamp only ever lowers it)", async () => {
     const store = new CursorStore(dir, { log: () => undefined });
     const room = wiredRoom(store, "c-1");
@@ -313,7 +359,8 @@ describe("wake prompts: the room's own cursor, never past the mention", () => {
       await vi.advanceTimersByTimeAsync(3100);
       await fire();
       expect((await pending).ok).toBe(true);
-      expect(sinceOf(state.prompts[0])).toBe(0);
+      // No cursor here: no lower bound, so just before the (late) mention.
+      expect(sinceOf(state.prompts[0])).toBe(98);
     } finally {
       mirror.destroy();
     }

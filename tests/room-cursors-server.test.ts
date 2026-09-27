@@ -109,6 +109,20 @@ describe("room-scoped cursors through the server", { timeout: 20_000 }, () => {
     expect(await unreadIn(PID_SMALL)).toBe(smallUnread);
   });
 
+  it("follow-up: a listen without since and with no cursor in the room starts at the room's end, not at message 1", async () => {
+    const roomId = S.manager.createConversation("fresh").id;
+    const room = S.manager.getRoom(roomId)!;
+    for (let i = 0; i < 10; i++) room.send("Rami", `old ${i}`);
+    expect((await call(S.baseUrl, "POST", "/api/agent/join", { name: "Kira", pid: 999_977, conversation: roomId })).status).toBe(200);
+    const quiet = await call(S.baseUrl, "GET", `/api/agent/listen?sender=Kira&pid=999_977&timeoutMs=300`.replace("999_977", "999977"));
+    expect(quiet.json.messages).toEqual([]);
+    const waiting = call(S.baseUrl, "GET", `/api/agent/listen?sender=Kira&pid=999977&timeoutMs=5000`);
+    await new Promise((r) => setTimeout(r, 200));
+    const fresh = room.send("Rami", "new after the listen started");
+    const got = await waiting;
+    expect((got.json.messages as Array<{ id: number }>).map((m) => m.id)).toEqual([fresh.id]);
+  });
+
   it("a read that returns messages advances the small room's cursor, and only it", async () => {
     expect(smallUnread).toBeGreaterThan(0);
     await call(S.baseUrl, "GET", `/api/agent/read?sender=Scotty&pid=${PID_SMALL}&limit=100`);

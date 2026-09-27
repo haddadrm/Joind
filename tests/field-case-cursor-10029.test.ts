@@ -41,6 +41,8 @@ const WEB = "c".repeat(64);
 const PID_BIG = 999_961;      // odd fake pids no Windows process can have
 const PID_CPM = 999_963;
 const PID_HOSTED = 999_967;
+const PID_NO_CURSOR_LOCAL = 999_969;
+const PID_NO_CURSOR_HOSTED = 999_979;
 const BIG_ROOM_SIZE = 10_044;
 const FIELD_CURSOR = 10_029;
 const CPM_LAST_ID = 1_900;
@@ -72,7 +74,12 @@ function config(dir: string, instance: string, port: number, peer: string, peerP
 }
 
 async function call(base: string, method: "GET" | "POST", path: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
-  const res = await fetch(`${base}${path}`, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
+  // A fresh connection per call: filling a 10,044-message room blocks the
+  // event loop for seconds, past the server's keep-alive timeout, and a
+  // pooled connection closed meanwhile would read ECONNRESET.
+  const headers: Record<string, string> = { Connection: "close" };
+  if (body) headers["Content-Type"] = "application/json";
+  const res = await fetch(`${base}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const text = await res.text();
   return { status: res.status, json: text ? JSON.parse(text) as Record<string, unknown> : {} };
 }
@@ -150,6 +157,33 @@ describe("field case (Y530, cpm-engine #1907): cursor 10029 from a 10,044-messag
     expect(since).not.toBe(FIELD_CURSOR);
     const read = await call(A.baseUrl, "GET", `/api/agent/read?sender=Scotty&pid=${PID_CPM}&since=${since}`);
     expect((read.json.messages as ChatMessage[]).map((m) => m.id)).toContain(mention.id);
+  });
+
+  it("follow-up (Curzon after his rejoin): a local member with no cursor at all gets since = mention - 1 and the read returns the mention", async () => {
+    const roomId = A.manager.createConversation("cpm-engine, no cursor").id;
+    const room = A.manager.getRoom(roomId)!;
+    fillTo(room, CPM_LAST_ID - 1);
+    expect((await call(A.baseUrl, "POST", "/api/agent/join", { name: "Curzon", pid: PID_NO_CURSOR_LOCAL, conversation: roomId })).status).toBe(200);
+    const mention = room.send("Rami", "@Curzon first wake, no cursor anywhere");
+    const prompt = await waitFor("the wake prompt", () => prompts.find((p) => p.pid === PID_NO_CURSOR_LOCAL));
+    expect(sinceOf(prompt.text)).toBe(mention.id - 1);
+    const read = await call(A.baseUrl, "GET", `/api/agent/read?sender=Curzon&pid=${PID_NO_CURSOR_LOCAL}&since=${sinceOf(prompt.text)}`);
+    const ids = (read.json.messages as ChatMessage[]).map((m) => m.id);
+    expect(ids[0]).toBe(mention.id);
+  });
+
+  it("follow-up: a hosted member with no cursor at all gets since = mention - 1 on its host, and the first read through the host returns the mention", async () => {
+    const homeId = A.manager.createConversation("cpm-engine home, no cursor").id;
+    const home = A.manager.getRoom(homeId)!;
+    fillTo(home, CPM_LAST_ID - 1);
+    const join = await call(B.baseUrl, "POST", "/api/agent/join", { name: "Curzon", pid: PID_NO_CURSOR_HOSTED, conversation: `alpha:${homeId}` });
+    expect(join.status).toBe(200);
+    await waitFor("the hosted member on the home", () => home.getAgent("Curzon")?.host === "bravo");
+    const mention = home.send("Rami", "@Curzon first hosted wake, no cursor anywhere");
+    const prompt = await waitFor("the host's wake prompt", () => prompts.find((p) => p.pid === PID_NO_CURSOR_HOSTED));
+    expect(sinceOf(prompt.text)).toBe(mention.id - 1);
+    const read = await call(B.baseUrl, "GET", `/api/agent/read?sender=Curzon&pid=${PID_NO_CURSOR_HOSTED}&since=${sinceOf(prompt.text)}`);
+    expect((read.json.messages as ChatMessage[]).map((m) => m.id)[0]).toBe(mention.id);
   });
 
   it("a hosted member through the mirror: the host's prompt and the read through the host return the home's mention", async () => {

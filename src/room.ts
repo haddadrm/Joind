@@ -265,7 +265,8 @@ export interface PresenceUpdate {
 
 export interface ChatRoomOptions {
   chatFilePath?: string;
-  getCursor?: (agentName: string) => number;
+  /** The agent's read cursor in this room; undefined when it has none. */
+  getCursor?: (agentName: string) => number | undefined;
   onChoice?: (messageId: number, value: string, by: string, at: number) => void;
   onPin?: (messageId: number, pinned: boolean, at: number) => void;
   onTag?: (messageId: number, tag: string, at: number) => void;
@@ -320,7 +321,7 @@ export class ChatRoom extends EventEmitter {
   private hostedUnreachable = new Set<string>();
   private staleInterval: ReturnType<typeof setInterval> | null = null;
   private agentTurnCount = 0; // consecutive agent turns since last human message
-  getCursor: (agentName: string) => number;
+  getCursor: (agentName: string) => number | undefined;
   turnGuard: { enabled: boolean; limit: number } | null = null;
   private onChoice?: (messageId: number, value: string, by: string, at: number) => void;
   private onPin?: (messageId: number, pinned: boolean, at: number) => void;
@@ -335,7 +336,7 @@ export class ChatRoom extends EventEmitter {
         ? { chatFilePath: chatFilePathOrOptions }
         : (chatFilePathOrOptions ?? {});
 
-    this.getCursor = options.getCursor ?? (() => 0);
+    this.getCursor = options.getCursor ?? (() => undefined);
     this.onChoice = options.onChoice;
     this.onPin = options.onPin;
     this.onTag = options.onTag;
@@ -733,8 +734,15 @@ export class ChatRoom extends EventEmitter {
     // mention, whatever the stored cursor says. (A read returns at most its
     // limit of the latest messages, 50 by default, so a mention with more
     // than that after it is still paged out, as before.)
+    // An agent with no cursor in this room has no lower bound: the prompt
+    // starts just before the mention (not at 0, which would ask for the whole
+    // history). Without a mention id (an older home) there is nothing better
+    // to offer than 0; the read's page limit still bounds it.
     const cursor = this.getCursor(agent.name);
-    const since = mentionId != null && Number.isInteger(mentionId) && mentionId > 0 ? Math.max(0, Math.min(cursor, mentionId - 1)) : cursor;
+    const mention = mentionId != null && Number.isInteger(mentionId) && mentionId > 0 ? mentionId : undefined;
+    const since = mention !== undefined
+      ? Math.max(0, Math.min(cursor ?? Number.POSITIVE_INFINITY, mention - 1))
+      : (cursor ?? 0);
     return (
       `[joind] @${agent.name} mentioned by ${sender}${where}.${roleHint} ` +
       `Read: curl -s "${base}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}" then ` +

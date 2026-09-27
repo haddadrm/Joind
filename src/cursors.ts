@@ -65,7 +65,20 @@ export class CursorStore {
    * since is clamped below the mention.
    */
   cursorFor(roomId: string, agentName: string, roomLastId: number): number {
-    const cursor = this.get(roomId, agentName);
+    return this.storedCursor(roomId, agentName, roomLastId) ?? 0;
+  }
+
+  /**
+   * As cursorFor, but undefined when this agent has never read this room.
+   * An absent cursor is "no lower bound known", not 0: a wake prompt or a
+   * first listen built from 0 would hand the agent the whole room's history
+   * (field case: every member's first wake after the room-scoped upgrade,
+   * since legacy entries are ignored and a rejoin creates none).
+   */
+  storedCursor(roomId: string, agentName: string, roomLastId: number): number | undefined {
+    const stored = this.rooms.get(roomId)?.get(agentName);
+    if (stored === undefined) return undefined;
+    const cursor = stored;
     if (cursor > roomLastId) {
       const key = `${roomId}\u0000${agentName}`;
       if (!this.loggedForeign.has(key)) {

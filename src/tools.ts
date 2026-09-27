@@ -729,8 +729,11 @@ export function registerTools(
       }
       const timeoutMs = clampListenTimeout(timeoutSec != null ? timeoutSec * 1000 : undefined);
       target.room.touch(sender);
-      const sinceInRoom = since == null || !(since > target.room.highWaterId());
-      const result = await waitForMessage(target.room, sender, since, timeoutMs, {
+      // As /api/agent/listen: no since starts from the stored room cursor, or
+      // the room's end when there is none, never from message 1.
+      const start = since ?? (cursorStore?.storedCursor(target.entry.conversationId, sender, target.room.highWaterId()) ?? target.room.highWaterId());
+      const sinceInRoom = !(start > target.room.highWaterId());
+      const result = await waitForMessage(target.room, sender, start, timeoutMs, {
         mentionsOnly,
         signal: extra.signal,
       });

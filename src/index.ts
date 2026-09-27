@@ -264,8 +264,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   // Apply cursor provider to all existing and future rooms. Cursors are per
   // room: message ids mean nothing outside the room they were read in.
-  function cursorProviderFor(roomId: string, room: ChatRoom): (name: string) => number {
-    return (name: string) => cursorStore.cursorFor(roomId, name, room.highWaterId());
+  function cursorProviderFor(roomId: string, room: ChatRoom): (name: string) => number | undefined {
+    return (name: string) => cursorStore.storedCursor(roomId, name, room.highWaterId());
   }
   function applyCursorProvider(): void {
     for (const conv of manager.listConversations()) {
@@ -1855,7 +1855,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
     const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
     if (!ctx) return;
-    const since = req.query.since != null ? Number(req.query.since) : undefined;
+    // No since: start from this agent's cursor in this room, or, with none,
+    // from the room's end (wait for what comes next). Never from message 1,
+    // which would replay the room's history into a first listen.
+    const since = req.query.since != null
+      ? Number(req.query.since)
+      : (cursorStore.storedCursor(ctx.convId, sender, ctx.room.highWaterId()) ?? ctx.room.highWaterId());
     const timeoutMs = clampListenTimeout(
       req.query.timeoutMs != null ? Number(req.query.timeoutMs) : undefined
     );
