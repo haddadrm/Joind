@@ -1,3 +1,4 @@
+import { DEFAULT_PLAN } from "../src/target.js";
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
@@ -266,6 +267,7 @@ describe("inject fallback", () => {
     await inject(4242, "hello", 0, undefined, undefined, {
       wezterm: async () => { calls.push("wezterm"); throw new Error("failed to connect to Socket(gui-sock-1)"); },
       windows: async (pid) => { calls.push(`windows:${pid}`); },
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async (pid) => { calls.push(`unix:${pid}`); },
       platform: "win32",
     });
@@ -276,6 +278,7 @@ describe("inject fallback", () => {
     await expect(inject(4242, "hello", 0, undefined, undefined, {
       wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
       windows: async () => {},
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async () => { throw new Error("Unix injection failed: PID 4242 not found in any tmux pane"); },
       platform: "linux",
     })).rejects.toThrow(/failed to connect to Socket/);
@@ -286,6 +289,7 @@ describe("inject fallback", () => {
     const backends = {
       wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
       windows: async (pid: number) => { calls.push(`windows:${pid}`); },
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async () => {},
       platform: "win32" as const,
     };
@@ -305,6 +309,7 @@ describe("inject fallback", () => {
     const backends = {
       wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
       windows: async (pid: number) => { calls.push(`windows:${pid}`); },
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async (pid: number) => { calls.push(`unix:${pid}`); },
       platform: "linux" as const,
     };
@@ -327,6 +332,7 @@ describe("inject fallback", () => {
     const backends = {
       wezterm: async () => { throw new Error("failed to connect to Socket(gui-sock-1)"); },
       windows: async () => {},
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async (pid: number, _text: string, guard?: () => void) => {
         verdict = "skip";   // the target leaves during tmux discovery
         guard?.();          // the backend re-asks before send-keys
@@ -343,6 +349,7 @@ describe("inject fallback", () => {
     await expect(inject(0, "hello", 0, undefined, undefined, {
       wezterm: async () => { throw new Error("wezterm send-text exit 1"); },
       windows: async () => {},
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async () => {},
       platform: "win32",
     })).rejects.toThrow(/send-text exit 1/);

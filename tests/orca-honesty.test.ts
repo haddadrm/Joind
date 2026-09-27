@@ -1,3 +1,4 @@
+import { DEFAULT_PLAN } from "../src/target.js";
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
@@ -222,6 +223,7 @@ describe("inject() prefers Orca and falls back through the guard", () => {
       orca: async (h) => { log.push(`orca:${h}`); },
       wezterm: async (p) => { log.push(`wezterm:${p}`); },
       windows: async (p) => { log.push(`console:${p}`); },
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async (p) => { log.push(`console:${p}`); },
       platform: "linux",
       ...over,

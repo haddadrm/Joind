@@ -1,3 +1,4 @@
+import { DEFAULT_PLAN } from "../src/target.js";
 import { describe, it, expect } from "vitest";
 import { readFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
@@ -73,6 +74,7 @@ describe("finding 2: Orca's internal retry asks the guard first", () => {
       orca: (h, t, o) => injectOrca(h, t, { ...o, run: async (args) => { calls.push(args); return res(calls.length === 1 ? ambiguous : accepted); } }),
       wezterm: async () => { throw new Error("not used"); },
       windows: async (p) => { typed.push(p); },
+      classify: async () => DEFAULT_PLAN, // never the host's real lookup: its speed varies by machine
       unix: async (p) => { typed.push(p); },
       platform: "linux",
     };
