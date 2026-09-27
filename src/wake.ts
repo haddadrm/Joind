@@ -92,6 +92,8 @@ export class WakeCoordinator {
    *  they drain. */
   private executing = new Map<string, number>();
   private released = new Set<string>();
+  /** When each warn key last heard an "unidentified target" line. */
+  private lastUnidentifiedAt = new Map<string, number>();
 
   constructor(
     private opts: { retryDelayMs?: number; warnCooldownMs?: number; sleep?: (ms: number) => Promise<void> } = {}
@@ -107,6 +109,7 @@ export class WakeCoordinator {
     this.released.delete(warnKey);
     this.permanentWarned.delete(warnKey);
     this.lastWarnAt.delete(warnKey);
+    this.lastUnidentifiedAt.delete(warnKey);
     this.generation.set(warnKey, (this.generation.get(warnKey) ?? 0) + 1);
   }
 
@@ -124,6 +127,7 @@ export class WakeCoordinator {
     this.generation.delete(warnKey);
     this.permanentWarned.delete(warnKey);
     this.lastWarnAt.delete(warnKey);
+    this.lastUnidentifiedAt.delete(warnKey);
   }
 
   /**
@@ -181,6 +185,29 @@ export class WakeCoordinator {
       if (left > 0) this.executing.set(warnKey, left); else this.executing.delete(warnKey);
       this.reclaim(warnKey);
     }
+  }
+
+  /**
+   * A wake landed but its target could not be identified (one Enter was
+   * pressed; a Codex or Copilot session may need another by hand). Worth a
+   * line once per room and agent per cooldown, like a transient failure, so
+   * a burst of mentions says it once. forget() (a new session) resets it.
+   */
+  shouldNoteUnidentified(warnKey: string, generation: number, now: number = Date.now()): boolean {
+    // The attempt belonged to a session that has since been replaced: its
+    // notice is not the new session's, and must not spend its cooldown.
+    if (this.sessionOf(warnKey) !== generation) return false;
+    const cooldown = this.opts.warnCooldownMs ?? 10 * 60_000;
+    const last = this.lastUnidentifiedAt.get(warnKey);
+    if (last !== undefined && now - last < cooldown) return false;
+    this.lastUnidentifiedAt.set(warnKey, now);
+    return true;
+  }
+
+  /** The session generation of a warn key: bumped by forget(). An attempt
+   *  records it when it starts, to judge later whether its session lives. */
+  sessionOf(warnKey: string): number {
+    return this.generation.get(warnKey) ?? 0;
   }
 
   private shouldWarn(warnKey: string, kind: WakeFailureKind): boolean {

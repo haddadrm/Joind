@@ -25,15 +25,15 @@ describe("a lookup that did not answer is the unknown plan, a confident one deci
       now: () => t,
       log: (l) => lines.push(l),
     });
-    expect(plan).toEqual(UNKNOWN_PLAN);
+    expect(plan).toMatchObject(UNKNOWN_PLAN);
     expect(plan).toMatchObject({ doubleEnter: false, delayMs: 300 });
     expect(lines).toEqual(["  [target] pid=150184 target lookup timed out after 10000 ms; target unidentified; pressing Enter once (a Codex or Copilot session may need Enter by hand)"]);
   });
 
   it("an errored lookup and a hidden command line are the unknown plan too", async () => {
     const lines: string[] = [];
-    expect(await classifyTarget(1, "win32", { read: async () => { throw new LookupFailed("pwsh exited 1", "error"); }, log: (l) => lines.push(l) })).toEqual(UNKNOWN_PLAN);
-    expect(await classifyTarget(2, "win32", { read: async () => { throw new LookupFailed("hidden", "hidden"); }, log: (l) => lines.push(l) })).toEqual(UNKNOWN_PLAN);
+    expect(await classifyTarget(1, "win32", { read: async () => { throw new LookupFailed("pwsh exited 1", "error"); }, log: (l) => lines.push(l) })).toMatchObject(UNKNOWN_PLAN);
+    expect(await classifyTarget(2, "win32", { read: async () => { throw new LookupFailed("hidden", "hidden"); }, log: (l) => lines.push(l) })).toMatchObject(UNKNOWN_PLAN);
     expect(lines[0]).toMatch(/pid=1 target lookup failed after \d+ ms \(pwsh exited 1\); target unidentified; pressing Enter once/);
     expect(lines[1]).toMatch(/pid=2 target lookup could not see the command line/);
   });
@@ -60,7 +60,7 @@ describe("a lookup that did not answer is the unknown plan, a confident one deci
       const lines: string[] = [];
       const p = classifyTarget(3, "win32", { read: () => new Promise<string | null>(() => undefined), log: (l) => lines.push(l) });
       await vi.advanceTimersByTimeAsync(LOOKUP_WAIT_LIMIT_MS);
-      expect(await p).toEqual(UNKNOWN_PLAN);
+      expect(await p).toMatchObject(UNKNOWN_PLAN);
       expect(lines[0]).toMatch(/timed out/);
     } finally {
       vi.useRealTimers();
@@ -218,7 +218,7 @@ describe("gate round 5: a query that did not answer never reads as \"no such pro
     for (const r of failing) await expect(win(r)([5], "win32")).rejects.toMatchObject({ reason: "error" });
     // Through classifyTarget: the unknown plan, not the default.
     const batcher = new CommandLineBatcher(win(failing[0]), "win32");
-    expect(await classifyTarget(5, "win32", { batcher, log: () => undefined })).toEqual(UNKNOWN_PLAN);
+    expect(await classifyTarget(5, "win32", { batcher, log: () => undefined })).toMatchObject(UNKNOWN_PLAN);
     // An answered empty list is an answer: no such process.
     expect((await win({ stdout: "[]", stderr: "", exitCode: 0 })([5], "win32")).lines.get(5)).toBeNull();
   });

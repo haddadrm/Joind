@@ -492,7 +492,7 @@ export class LinkClient extends EventEmitter {
     const body: PeerWakeBody = { room: req.room, name: req.name, hostedRegistration: req.hostedRegistration, sender: req.sender, prompt: req.prompt };
     try {
       const r = await this.request<HostedWakeResult>("POST", "/api/peer/wake", { body, timeoutMs: this.opts.wakeTimeoutMs });
-      return { ok: r.ok === true, kind: r.kind, attempts: Number(r.attempts ?? 1), reason: r.reason, warn: r.warn };
+      return { ok: r.ok === true, kind: r.kind, attempts: Number(r.attempts ?? 1), reason: r.reason, warn: r.warn, unidentified: typeof r.unidentified === "string" ? r.unidentified.slice(0, 200) : undefined };
     } catch (err) {
       if (err instanceof LinkDownError) return { ok: false, kind: "unreachable", attempts: 1, reason: err.message };
       const e = err as PeerRefusedError;

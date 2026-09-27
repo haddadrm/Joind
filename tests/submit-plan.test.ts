@@ -81,7 +81,7 @@ describe("classifyTarget: one read per wake, never a failed wake", () => {
   it("a failed lookup is the unknown plan and is not cached", async () => {
     let calls = 0;
     const failing = async (): Promise<string | null> => { calls++; throw new Error("powershell timed out"); };
-    expect(await classifyTarget(9, "win32", { read: failing, log: () => undefined })).toEqual(UNKNOWN_PLAN);
+    expect(await classifyTarget(9, "win32", { read: failing, log: () => undefined })).toMatchObject(UNKNOWN_PLAN);
     const unreadable = async (): Promise<string | null> => { calls++; return null; };
     expect(await classifyTarget(9, "win32", { read: unreadable })).toEqual(DEFAULT_PLAN);
     expect(await classifyTarget(9, "win32", { read: async () => { calls++; return "codex.exe"; } })).toEqual(CODEX_PLAN);

@@ -170,6 +170,9 @@ export interface HostedWakeResult {
   reason?: string;
   /** The host's coordinator decided this failure is worth a line now. */
   warn?: boolean;
+  /** The wake landed, but the host could not identify the member's
+   *  terminal application (it pressed Enter once): why, in words. */
+  unidentified?: string;
 }
 
 export type HostedWaker = (req: HostedWakeRequest) => Promise<HostedWakeResult>;
@@ -198,6 +201,27 @@ export function wakeFailureLine(name: string, kind: WakeFailureKind | "unreachab
   return `Could not wake ${name} just now (terminal injection failed after a retry). They will see this on their next read.`;
 }
 
+/** The honest line for a wake that was typed but whose terminal application
+ *  could not be identified, so it got a single Enter. */
+/**
+ * A reason for an unidentified target, as this build words it, or null. A
+ * hosted member's host sends its reason over the link: it is accepted only
+ * in one of the shapes this code produces (with a bounded number), rebuilt
+ * from its parts, never posted as received.
+ */
+export function unidentifiedReasonFrom(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const timed = /^(lookup timed out|lookup failed|resolving its script timed out) after (\d{1,4})(?:\.(\d))? s$/.exec(raw);
+  if (timed) return `${timed[1]} after ${timed[2]}.${timed[3] ?? "0"} s`;
+  if (raw === "its command line is not readable" || raw === "lookup failed") return raw;
+  return null;
+}
+
+export function unidentifiedLine(name: string, reason: string, host?: string): string {
+  const on = host ? ` on their host ${host}` : "";
+  return `Typed into ${name}${on} but could not identify its terminal (${reason}); a Codex or Copilot session may need Enter by hand.`;
+}
+
 /** What one run of the local wake machinery did. */
 interface WakeCoreResult {
   outcome: WakeOutcome;
@@ -207,6 +231,11 @@ interface WakeCoreResult {
   /** Which line: "partial" when this attempt typed the text itself,
    *  "unconfirmed" when an Orca send may or may not have typed it. */
   partialKind: "partial" | "unconfirmed";
+  /** The attempt that finished typed the prompt but could not identify the
+   *  target's application (one Enter): why. Unset otherwise. */
+  unidentified?: string;
+  /** The session generation the last attempt started under. */
+  session: number;
 }
 
 export interface RoomEvent {
@@ -647,9 +676,12 @@ export class ChatRoom extends EventEmitter {
     this.wakesInFlight.add(name);
     let moved = false;
     try {
-      const { outcome, partialLine, partialKind } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent));
+      const { outcome, partialLine, partialKind, unidentified, session } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent));
       if (outcome.ok) {
         moved = outcome.result === "moved";
+        if (outcome.result === "done" && unidentified && !this.destroyed && this.agents.has(name) && wakes.shouldNoteUnidentified(this.warnKey(name), session)) {
+          this.addSystem(unidentifiedLine(name, unidentified));
+        }
         if (partialLine && !this.destroyed && this.agents.has(name)) {
           this.addSystem(wakeFailureLine(name, partialKind, undefined));
         }
@@ -681,6 +713,8 @@ export class ChatRoom extends EventEmitter {
     // registration changed to what is still that terminal. Never replay; say so.
     let partialLine = false;
     let partialKind: "partial" | "unconfirmed" = "partial";
+    let unidentified: string | undefined;
+    let session = wakes.sessionOf(this.warnKey(name));
     const outcome = await wakes.run([...held], this.warnKey(name), async () => {
       const agent = this.agents.get(name);
       if (this.destroyed || !agent?.active) return "skip";
@@ -693,12 +727,17 @@ export class ChatRoom extends EventEmitter {
       const prompt = promptFor(agent);
       partialLine = false;
       partialKind = "partial";
+      unidentified = undefined;
+      session = wakes.sessionOf(this.warnKey(name));
       console.log(`  → Injecting into ${name} (${identity})...`);
       try {
         await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), agent.weztermGui != null ? undefined : getWeztermEnv(), undefined, {
           // A pane of a known GUI goes through that GUI's socket only; a GUI
           // that is gone fails the WezTerm route (guarded console fallback).
           weztermGui: agent.weztermGui,
+          // The plan could not identify the target: it gets one Enter, and
+          // the room may say so (warn-once per room and agent).
+          onUnidentified: (reason) => { unidentified = reason; },
           // Orca's own input path first when the join bound a handle.
           orcaTerminal: agent.orcaTerminal,
           // Between the Orca or WezTerm failure and the console fallback the target
@@ -757,7 +796,7 @@ export class ChatRoom extends EventEmitter {
       }
       return "done";
     });
-    return { outcome, partialLine, partialKind };
+    return { outcome, partialLine, partialKind, unidentified, session };
   }
 
   /**
@@ -792,6 +831,13 @@ export class ChatRoom extends EventEmitter {
     if (sameSession) {
       if (result.ok) {
         this.hostedUnreachable.delete(name);
+        // The host typed the prompt but could not identify the member's
+        // terminal application: the same warn-once line, naming the host.
+        // Anything the host sends that is not one of our own reason shapes
+        // becomes a fixed wording: its text never reaches the room or a log.
+        if (result.unidentified !== undefined && wakes.shouldNoteUnidentified(this.warnKey(name), wakes.sessionOf(this.warnKey(name)))) {
+          this.addSystem(unidentifiedLine(name, unidentifiedReasonFrom(result.unidentified) ?? "reason not given", host));
+        }
       } else {
         console.error(`  x Hosted wake failed for ${name} on ${host} (${result.kind}, ${result.attempts} attempt(s)): ${result.reason}`);
         const unreachable = result.kind === "unreachable";
@@ -824,7 +870,7 @@ export class ChatRoom extends EventEmitter {
       } finally {
         this.wakesInFlight.delete(name);
       }
-      const { outcome, partialLine, partialKind } = core;
+      const { outcome, partialLine, partialKind, unidentified } = core;
       if (!outcome.ok) {
         return { ok: false, kind: outcome.kind, attempts: outcome.attempts, reason: outcome.reason, warn: outcome.warn };
       }
@@ -833,7 +879,7 @@ export class ChatRoom extends EventEmitter {
           ? { ok: false, kind: "unconfirmed", attempts: outcome.attempts, warn: true, reason: "the Orca send answered ambiguously and the registration changed; not re-issued" }
           : { ok: false, kind: "partial", attempts: outcome.attempts, warn: true, reason: "the text is in the input box" };
       }
-      if (outcome.result === "done") return { ok: true, attempts: outcome.attempts };
+      if (outcome.result === "done") return unidentified ? { ok: true, attempts: outcome.attempts, unidentified } : { ok: true, attempts: outcome.attempts };
       if (outcome.result === "skip") return { ok: false, kind: "no-console", attempts: outcome.attempts, warn: true, reason: `${name} left this host before the wake ran` };
       // "moved": the member now lives in a different terminal; wake that one.
     }

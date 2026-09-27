@@ -37,6 +37,11 @@ const PERMANENT_CODES = new Set([
   "terminal_closed",
 ]);
 
+/** Error codes this build recognises from `orca terminal send`; any other
+ *  code is reported as "unrecognised_code", never as sent (a code is text
+ *  from Orca and could echo the prompt). */
+const KNOWN_CODES = new Set([...PERMANENT_CODES, "runtime_unavailable", "transport_error", "timeout", "invalid_request", "not_accepted"]);
+
 /** Thrown when no usable Orca CLI exists on this host. */
 export class OrcaCliUnavailable extends Error {}
 
@@ -356,7 +361,7 @@ export function orcaSendFailure(handle: string, r: OrcaResult): SendFailure | nu
     // Only Orca's error code is kept, and only when it looks like one: its
     // free-form message could echo the prompt, and it reaches logs and rooms.
     const rawCode: unknown = j.error?.code;
-    const code = typeof rawCode === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(rawCode) ? rawCode : "unrecognised_code";
+    const code = typeof rawCode === "string" && KNOWN_CODES.has(rawCode) ? rawCode : "unrecognised_code";
     if (PERMANENT_CODES.has(code)) {
       return { message: `orca terminal ${handle} unavailable (${code})`, permanent: true };
     }

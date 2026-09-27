@@ -26,7 +26,8 @@
  * unsubmitted). A confident read ("this command line is no known target")
  * is the single-Enter default; a read that timed out, failed, or could not
  * see the command line is UNKNOWN_PLAN, and says so in the log. It presses
- * Enter once, after the longer 300 ms pause: a second Enter sent blind is
+ * Enter once, after the longer 300 ms pause on WezTerm and the console (tmux
+ * takes no pause before its first Enter, for any plan): a second Enter sent blind is
  * not harmless (gate round 5: into a Claude Code session that is mid-turn,
  * the first Enter queues the prompt and a permission dialog that opens in
  * the gap would take the second Enter as its confirmation). An unsubmitted
@@ -57,6 +58,9 @@ export interface SubmitPlan {
   doubleEnter: boolean;
   /** Pause between the text and the Enter, and between the two Enters. */
   delayMs: number;
+  /** Kind "unknown" only: why the target stayed unidentified, in words for
+   *  the room ("lookup timed out after 10.0 s"). */
+  reason?: string;
 }
 
 export const DEFAULT_PLAN: SubmitPlan = Object.freeze({ kind: "default", doubleEnter: false, delayMs: 50 });
@@ -444,6 +448,13 @@ function batcher(platform: NodeJS.Platform): CommandLineBatcher {
  *  past it is a lookup that did not answer. */
 export const LOOKUP_WAIT_LIMIT_MS = 2 * LOOKUP_TIMEOUT_MS + 1000;
 
+function seconds(ms: number): string { return (Math.max(0, ms) / 1000).toFixed(1); }
+
+/** UNKNOWN_PLAN with the reason the room line quotes. */
+export function unknownPlan(reason: string): SubmitPlan {
+  return Object.freeze({ ...UNKNOWN_PLAN, reason });
+}
+
 /** Reads in flight, by pid: wakes that overlap on one process share one. */
 const inFlight = new Map<number, Promise<SubmitPlan>>();
 
@@ -491,9 +502,11 @@ export function classifyTarget(pid: number, platform: NodeJS.Platform = process.
       const p = await classifyCommandLineResolved(r.line, { realpath: deps.realpath, deadlineMs: LOOKUP_TIMEOUT_MS - (now() - started) });
       const ms = now() - started;
       const shared = r.batch > 1 ? `, one query for ${r.batch} pids` : "";
-      log(p.kind === "unknown"
-        ? `  [target] pid=${pid} lookup ${ms} ms via ${r.via}${shared}: resolving the script timed out; target unidentified; pressing Enter once (a Codex or Copilot session may need Enter by hand)`
-        : `  [target] pid=${pid} lookup ${ms} ms via ${r.via}${shared}: ${p.kind}`);
+      if (p.kind === "unknown") {
+        log(`  [target] pid=${pid} lookup ${ms} ms via ${r.via}${shared}: resolving the script timed out; target unidentified; pressing Enter once (a Codex or Copilot session may need Enter by hand)`);
+        return unknownPlan(`resolving its script timed out after ${seconds(ms)} s`);
+      }
+      log(`  [target] pid=${pid} lookup ${ms} ms via ${r.via}${shared}: ${p.kind}`);
       return p;
     },
     (err: unknown) => {
@@ -502,7 +515,10 @@ export function classifyTarget(pid: number, platform: NodeJS.Platform = process.
         ? (err.reason === "timeout" ? `timed out after ${ms} ms` : err.reason === "hidden" ? `could not see the command line after ${ms} ms` : `failed after ${ms} ms (${err.message.slice(0, 100)})`)
         : `failed after ${ms} ms (${(err instanceof Error ? err.message : String(err)).split("\n")[0].slice(0, 100)})`;
       log(`  [target] pid=${pid} target lookup ${why}; target unidentified; pressing Enter once (a Codex or Copilot session may need Enter by hand)`);
-      return UNKNOWN_PLAN;
+      const reason = err instanceof LookupFailed
+        ? (err.reason === "timeout" ? `lookup timed out after ${seconds(ms)} s` : err.reason === "hidden" ? "its command line is not readable" : `lookup failed after ${seconds(ms)} s`)
+        : `lookup failed after ${seconds(ms)} s`;
+      return unknownPlan(reason);
     }
   ).finally(() => {
     if (inFlight.get(pid) === plan) inFlight.delete(pid);

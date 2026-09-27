@@ -251,6 +251,13 @@ describe("injectOrca: a started send that did not answer is unconfirmed", () => 
     expect(logs.join("\n")).not.toMatch(/SECRET|req_good-1/);
   });
 
+  it("gate round 8: an Orca error code this build does not know is reported as unrecognised_code, never as sent", async () => {
+    const err = await injectOrca(H, "p", { run: async () => res({ ok: false, error: { code: "SECRET_PROMPT" } }) }).catch((e: unknown) => e);
+    expect((err as Error).message).toBe("orca send failed (unrecognised_code)");
+    const known = await injectOrca(H, "p", { run: async () => res({ ok: false, error: { code: "runtime_unavailable" } }) }).catch((e: unknown) => e);
+    expect((known as Error).message).toBe("orca send failed (runtime_unavailable)");
+  });
+
   it("logs one line on success", async () => {
     await injectOrca(H, "x", { run: async () => res(accepted) });
     expect(logs.filter((l) => new RegExp(`terminal=${H} accepted in \\d+ms`).test(l))).toHaveLength(1);

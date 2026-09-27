@@ -8,7 +8,7 @@
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { injectOrca, UnconfirmedDeliveryError } from "./orca.js";
-import { classifyTarget, forgetTarget, DEFAULT_PLAN, UNKNOWN_PLAN, type SubmitPlan } from "./target.js";
+import { classifyTarget, forgetTarget, unknownPlan, DEFAULT_PLAN, type SubmitPlan } from "./target.js";
 import { socketForGui } from "./terminals.js";
 
 const execFileAsync = promisify(execFile);
@@ -220,6 +220,10 @@ export interface InjectOptions {
    *  that is gone fails the route, so the guarded console fallback runs,
    *  instead of the pane number being typed into another GUI's pane. */
   weztermGui?: number;
+  /** Told once per wake when the plan is kind "unknown" (the target could
+   *  not be identified, so it gets one Enter), with the reason in words. The
+   *  room decides whether to say it; a wake that then fails says nothing. */
+  onUnidentified?: (reason: string) => void;
 }
 
 /** Backends, injectable for tests. */
@@ -277,7 +281,10 @@ export async function inject(
   // that presses Enter itself needs it (the Orca path does not).
   let planPromise: Promise<SubmitPlan> | null = null;
   const plan = (): Promise<SubmitPlan> => {
-    planPromise ??= resolvePlan(pid, platform, backends);
+    planPromise ??= resolvePlan(pid, platform, backends).then((p) => {
+      if (p.kind === "unknown") options.onUnidentified?.(p.reason ?? "lookup failed");
+      return p;
+    });
     return planPromise;
   };
   let primary: unknown;
@@ -362,7 +369,9 @@ function assertStillTarget(options: InjectOptions): void {
 }
 
 /** The target's submit plan; a classifier that fails or throws is the
- *  unknown plan (one Enter after 300 ms), never a failed wake. */
+ *  unknown plan (one Enter; after 300 ms on WezTerm and the console, at
+ *  once on tmux, which takes no pause before its first Enter), never a
+ *  failed wake. */
 async function resolvePlan(pid: number, platform: NodeJS.Platform, backends: InjectBackends): Promise<SubmitPlan> {
   try {
     const p = await (backends.classify ?? classifyTarget)(pid, platform);
@@ -371,7 +380,7 @@ async function resolvePlan(pid: number, platform: NodeJS.Platform, backends: Inj
   } catch (err) {
     const why = err instanceof Error ? err.message.split("\n")[0].slice(0, 100) : String(err);
     console.log(`  [inject] pid=${pid} target lookup failed (${why}); target unidentified; pressing Enter once (a Codex or Copilot session may need Enter by hand)`);
-    return UNKNOWN_PLAN;
+    return unknownPlan("lookup failed");
   }
 }
 
