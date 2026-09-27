@@ -7,7 +7,7 @@
 
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import { injectOrca } from "./orca.js";
+import { injectOrca, UnconfirmedDeliveryError } from "./orca.js";
 import { classifyTarget, forgetTarget, DEFAULT_PLAN, type SubmitPlan } from "./target.js";
 import { socketForGui } from "./terminals.js";
 
@@ -192,6 +192,11 @@ export class WakeFallbackAborted extends Error {
   }
 }
 
+/** How the text reached the terminal when the post-text guard is asked:
+ *  "keys", typed by this attempt (WezTerm, tmux); "orca", handed to an Orca
+ *  send that answered ambiguously, so it may or may not be there. */
+export type AfterTextRoute = "keys" | "orca";
+
 export interface InjectOptions {
   /** Orca terminal handle: when set, Orca's own input path is tried first
    *  (before WezTerm and the console). */
@@ -205,7 +210,7 @@ export interface InjectOptions {
    * identity having changed ("moved"), and to ignore lock growth; see the
    * room's afterTextGuard. Absent, fallbackGuard is asked.
    */
-  afterTextGuard?: () => "proceed" | "skip" | "moved";
+  afterTextGuard?: (route: AfterTextRoute) => "proceed" | "skip" | "moved";
   /** Called after an Orca or WezTerm failure and before the console fallback: the
    *  caller re-checks that the target is still the same live session.
    *  Anything but "proceed" aborts the fallback with WakeFallbackAborted. */
@@ -259,8 +264,10 @@ export async function inject(
     }
   };
   // Once the text is in: the post-text guard (see InjectOptions.afterTextGuard).
-  const afterText = (): void => {
-    const verdict = (options.afterTextGuard ?? options.fallbackGuard)?.() ?? "proceed";
+  // `route` tells the guard what is known: "keys" typed the text itself,
+  // "orca" handed it to an Orca send whose outcome was ambiguous.
+  const afterText = (route: AfterTextRoute = "keys"): void => {
+    const verdict = (options.afterTextGuard ? options.afterTextGuard(route) : options.fallbackGuard?.()) ?? "proceed";
     if (verdict !== "proceed") {
       if (pid > 0) forgetTarget(pid);
       throw new WakeFallbackAborted(verdict);
@@ -280,12 +287,16 @@ export async function inject(
     const handle = options.orcaTerminal;
     const orca = backends.orca ?? injectOrca;
     via = `orca terminal ${handle}`;
-    // Orca's own retry is re-checked by the same guard as the console fallback.
+    // Orca's own retry follows a send that may have typed the prompt, so it
+    // is re-checked by the post-text guard: it stops for a target that left
+    // or moved to a different terminal, and proceeds through lock growth on
+    // the same terminal (the re-issue is idempotent under Orca's retry id; a
+    // fresh wake in its place would type the prompt twice).
     // No second Enter here: `orca terminal send --enter` submitted to a real
     // Codex CLI in one go in the injection matrix (25 s to reply), where every
     // single-Enter keystroke route needed a second one. Orca presses Enter
     // separately from the text, which is what Codex waits for.
-    attempt = () => orca(handle, text, { beforeRetry: guard });
+    attempt = () => orca(handle, text, { beforeRetry: () => afterText("orca") });
   } else if (weztermPaneId != null) {
     via = `wezterm pane ${weztermPaneId}`;
     attempt = async () => {
@@ -309,6 +320,12 @@ export async function inject(
       // The text is already in the terminal: typing it again elsewhere would
       // put the prompt in twice. Report it; never fall back.
       if (err instanceof PartialDeliveryError) throw err;
+      // Orca had the text and never said what it did with it: typing it
+      // again through the console could submit the prompt twice.
+      if (err instanceof UnconfirmedDeliveryError) {
+        console.log(`  [inject] ${via}: delivery unconfirmed; no console fallback${pid > 0 ? ` to pid ${pid}` : ""}`);
+        throw err;
+      }
       if (!(pid > 0)) throw err;
       primary = err;
       const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);

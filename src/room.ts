@@ -6,9 +6,10 @@
 import { EventEmitter } from "events";
 import { writeFileSync } from "fs";
 import { dirname } from "path";
-import { inject, WakeFallbackAborted } from "./inject.js";
+import { inject, WakeFallbackAborted, type AfterTextRoute } from "./inject.js";
 import { cancelRoomListens } from "./listen.js";
 import { WakeCoordinator, type WakeFailureKind, type WakeOutcome } from "./wake.js";
+import { ORCA_SEND_TIMEOUT_MS } from "./orca.js";
 
 // The base URL an injected prompt tells the woken agent to call back on.
 // Must be the address the server actually binds (single-interface): a
@@ -181,6 +182,13 @@ export function wakeFailureLine(name: string, kind: WakeFailureKind | "unreachab
     return `Could not wake ${name}: their host ${host ?? "server"} is unreachable (${reason ?? "no answer"}). They will see this when the link returns.`;
   }
   if (kind === "partial") return `Could not submit the prompt to ${name}; the text is in their input box.`;
+  if (kind === "unconfirmed") {
+    const on = host ? ` on their host ${host}` : "";
+    // Only a real timeout names the limit; a send that ended early for any
+    // other reason did not "take 15 s".
+    const within = /\btimed out\b/.test(reason ?? "") ? ` within ${Math.round(ORCA_SEND_TIMEOUT_MS / 1000)} s` : "";
+    return `Orca did not confirm delivery to ${name}${on}${within}; not retried through the console to avoid a double prompt. The prompt may or may not have arrived; ${name} will see this on their next read.`;
+  }
   if (kind === "no-console" && /^orca /i.test(reason ?? "")) {
     return `Could not wake ${name}: their Orca terminal is not reachable from ${where} (${reason}). They will see mentions only when they read on their own schedule, or after rejoining with a live orcaTerminal.`;
   }
@@ -196,6 +204,9 @@ interface WakeCoreResult {
   /** The text is in the terminal and the registration changed to what is
    *  still that terminal: never replayed, the partial-delivery line is owed. */
   partialLine: boolean;
+  /** Which line: "partial" when this attempt typed the text itself,
+   *  "unconfirmed" when an Orca send may or may not have typed it. */
+  partialKind: "partial" | "unconfirmed";
 }
 
 export interface RoomEvent {
@@ -636,11 +647,11 @@ export class ChatRoom extends EventEmitter {
     this.wakesInFlight.add(name);
     let moved = false;
     try {
-      const { outcome, partialLine } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent));
+      const { outcome, partialLine, partialKind } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent));
       if (outcome.ok) {
         moved = outcome.result === "moved";
         if (partialLine && !this.destroyed && this.agents.has(name)) {
-          this.addSystem(wakeFailureLine(name, "partial", undefined));
+          this.addSystem(wakeFailureLine(name, partialKind, undefined));
         }
       } else {
         console.error(`  ✗ Injection failed for ${name} (${outcome.kind}, ${outcome.attempts} attempt(s)): ${outcome.reason}`);
@@ -669,6 +680,7 @@ export class ChatRoom extends EventEmitter {
     // Set by the post-text guard: the text is in the terminal and the agent's
     // registration changed to what is still that terminal. Never replay; say so.
     let partialLine = false;
+    let partialKind: "partial" | "unconfirmed" = "partial";
     const outcome = await wakes.run([...held], this.warnKey(name), async () => {
       const agent = this.agents.get(name);
       if (this.destroyed || !agent?.active) return "skip";
@@ -680,6 +692,7 @@ export class ChatRoom extends EventEmitter {
       if (lockKeysFor(agent).some((k) => !held.has(k))) return "moved";
       const prompt = promptFor(agent);
       partialLine = false;
+      partialKind = "partial";
       console.log(`  → Injecting into ${name} (${identity})...`);
       try {
         await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), agent.weztermGui != null ? undefined : getWeztermEnv(), undefined, {
@@ -710,7 +723,7 @@ export class ChatRoom extends EventEmitter {
           // terminal. Stopping now would leave a prompt half-typed, and a
           // later wake for this or another agent would type behind it: the
           // worse outcome. Only two things stop it:
-          afterTextGuard: () => {
+          afterTextGuard: (route: AfterTextRoute) => {
             const live = this.agents.get(name);
             if (this.destroyed || !live?.active) {
               // The agent left: nobody to submit for. The text stays.
@@ -723,6 +736,7 @@ export class ChatRoom extends EventEmitter {
             if (sameTerminal(held, live)) {
               console.log(`  [wake] ${name}'s registration changed (${identity} -> ${terminalIdentity(live)}) but it is the terminal holding the prompt; not typing it again`);
               partialLine = true;
+              partialKind = route === "orca" ? "unconfirmed" : "partial";
               return "skip";
             }
             // A different terminal: the old one keeps the unsent text; the
@@ -741,7 +755,7 @@ export class ChatRoom extends EventEmitter {
       }
       return "done";
     });
-    return { outcome, partialLine };
+    return { outcome, partialLine, partialKind };
   }
 
   /**
@@ -808,11 +822,15 @@ export class ChatRoom extends EventEmitter {
       } finally {
         this.wakesInFlight.delete(name);
       }
-      const { outcome, partialLine } = core;
+      const { outcome, partialLine, partialKind } = core;
       if (!outcome.ok) {
         return { ok: false, kind: outcome.kind, attempts: outcome.attempts, reason: outcome.reason, warn: outcome.warn };
       }
-      if (partialLine) return { ok: false, kind: "partial", attempts: outcome.attempts, warn: true, reason: "the text is in the input box" };
+      if (partialLine) {
+        return partialKind === "unconfirmed"
+          ? { ok: false, kind: "unconfirmed", attempts: outcome.attempts, warn: true, reason: "the Orca send answered ambiguously and the registration changed; not re-issued" }
+          : { ok: false, kind: "partial", attempts: outcome.attempts, warn: true, reason: "the text is in the input box" };
+      }
       if (outcome.result === "done") return { ok: true, attempts: outcome.attempts };
       if (outcome.result === "skip") return { ok: false, kind: "no-console", attempts: outcome.attempts, warn: true, reason: `${name} left this host before the wake ran` };
       // "moved": the member now lives in a different terminal; wake that one.

@@ -23,7 +23,10 @@
 /** "partial": the text reached the terminal but the Enter that submits it
  *  could not be sent (PartialDeliveryError). Never retried: a retry would
  *  type the whole prompt again behind the one already in the input box. */
-export type WakeFailureKind = "no-console" | "transient" | "partial";
+/** "unconfirmed": the text was handed to a delivery process (Orca's send)
+ *  that never reported the outcome (UnconfirmedDeliveryError). It may have
+ *  landed. Never retried and never a console fallback, for the same reason. */
+export type WakeFailureKind = "no-console" | "transient" | "partial" | "unconfirmed";
 
 /** What an attempt did. "skip": the target was gone by the time its turn
  *  came; "moved": the target now lives in a different terminal (the caller
@@ -62,6 +65,7 @@ const NO_CONSOLE_PATTERNS = [
 export function classifyWakeFailure(err: unknown): WakeFailureKind {
   // By name, so this module needs no import from inject.ts.
   if (err instanceof Error && err.name === "PartialDeliveryError") return "partial";
+  if (err instanceof Error && err.name === "UnconfirmedDeliveryError") return "unconfirmed";
   const text = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
   return NO_CONSOLE_PATTERNS.some((re) => re.test(text)) ? "no-console" : "transient";
 }
@@ -180,9 +184,10 @@ export class WakeCoordinator {
   }
 
   private shouldWarn(warnKey: string, kind: WakeFailureKind): boolean {
-    // Each partial delivery is its own prompt left unsent in an input box:
-    // always worth a line, never folded into a cooldown.
-    if (kind === "partial") return true;
+    // Each partial delivery is its own prompt left unsent in an input box,
+    // and each unconfirmed one its own prompt of unknown fate: always worth
+    // a line, never folded into a cooldown.
+    if (kind === "partial" || kind === "unconfirmed") return true;
     if (kind === "no-console") {
       if (this.permanentWarned.has(warnKey)) return false;
       this.permanentWarned.add(warnKey);

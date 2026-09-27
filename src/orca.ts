@@ -16,6 +16,7 @@
 
 import { spawn } from "child_process";
 import { existsSync } from "fs";
+import { performance } from "perf_hooks";
 import { dirname, join } from "path";
 
 /** A well-formed Orca terminal handle. Anything else (a flag, a path, an
@@ -38,6 +39,39 @@ const PERMANENT_CODES = new Set([
 
 /** Thrown when no usable Orca CLI exists on this host. */
 export class OrcaCliUnavailable extends Error {}
+
+/** How long one `orca terminal send` may run before it is killed. */
+export const ORCA_SEND_TIMEOUT_MS = 15000;
+
+/**
+ * An Orca process ended without an exit code: killed by a signal (the spawn
+ * timeout, or anything else), or a process error. `started` says whether the
+ * process was running: when it was, its arguments (for a send, the prompt
+ * text) were already handed over, and whatever it did with them is unknown.
+ * `timedOut` is true only for a kill at or after the time limit.
+ */
+export class OrcaRunError extends Error {
+  constructor(message: string, public readonly started: boolean, public readonly signal: string | null, public readonly timedOut: boolean) {
+    super(message);
+    this.name = "OrcaRunError";
+  }
+}
+
+/**
+ * `orca terminal send` was running with the text and did not answer within
+ * its limit: Orca may have typed and submitted the prompt, or not. Never
+ * answered with a console fallback or a coordinator retry, either of which
+ * would type the prompt a second time if Orca did deliver it (field log,
+ * 27 Sep 2026: the agent got the same prompt twice). classifyWakeFailure
+ * reports it as "unconfirmed".
+ */
+export class UnconfirmedDeliveryError extends Error {
+  readonly phase = "text-handed-over" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "UnconfirmedDeliveryError";
+  }
+}
 
 /**
  * The Orca CLI executable: ORCA_CLI when set (a .cmd or .bat is swapped for
@@ -66,7 +100,9 @@ export function resolveOrcaCli(env: NodeJS.ProcessEnv = process.env, platform: N
 }
 
 export interface OrcaResult {
-  /** Parsed JSON envelope, or null when stdout was not JSON. */
+  /** Parsed JSON envelope, or null when stdout was not JSON. A result is
+   *  only ever produced by a process that ran and exited, so a send result
+   *  with no JSON is a started send whose outcome is unknown. */
   json: OrcaEnvelope | null;
   code: number | null;
   stdout: string;
@@ -79,8 +115,27 @@ export interface OrcaEnvelope {
   error?: { code?: string; message?: string; data?: { orchestrationRequestId?: string } };
 }
 
+/** The slice of a child process runOrca uses. */
+export interface OrcaProcess {
+  stdout: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown } | null;
+  stderr: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown } | null;
+  on(event: "spawn", listener: () => void): unknown;
+  on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  on(event: "error", listener: (err: NodeJS.ErrnoException) => void): unknown;
+  on(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+}
+export type SpawnOrca = (exe: string, args: string[], opts: { timeout: number; windowsHide: boolean; stdio: ["ignore", "pipe", "pipe"] }) => OrcaProcess;
+
+export interface RunOrcaDeps {
+  /** Injectable for tests; the suite never starts a real Orca. */
+  spawnFn?: SpawnOrca;
+  /** Monotonic clock in ms, injectable for tests (whether a kill came at
+   *  the time limit); defaults to performance.now, never the wall clock. */
+  now?: () => number;
+}
+
 /** The one place an Orca process is started. No shell, argv only. */
-export function runOrca(args: string[], timeoutMs: number): Promise<OrcaResult> {
+export function runOrca(args: string[], timeoutMs: number, deps: RunOrcaDeps = {}): Promise<OrcaResult> {
   let exe: string;
   try {
     exe = resolveOrcaCli();
@@ -88,17 +143,33 @@ export function runOrca(args: string[], timeoutMs: number): Promise<OrcaResult> 
     return Promise.reject(err);
   }
   return new Promise((resolve, reject) => {
-    const proc = spawn(exe, args, { timeout: timeoutMs, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const opts: Parameters<SpawnOrca>[2] = { timeout: timeoutMs, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] };
+    const proc: OrcaProcess = deps.spawnFn ? deps.spawnFn(exe, args, opts) : spawn(exe, args, opts);
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", (d) => { stdout += d; });
-    proc.stderr.on("data", (d) => { stderr += d; });
+    // Set once the process is running: from then on it holds its argv.
+    let started = false;
+    proc.on("spawn", () => { started = true; });
+    proc.stdout?.on("data", (d) => { stdout += d; });
+    proc.stderr?.on("data", (d) => { stderr += d; });
+    const now = deps.now ?? (() => performance.now());
+    const t0 = now();
+    // When the process itself ended: "close" waits for its streams too, and
+    // a stream held open by a grandchild can close long after the kill.
+    let exitedAt: number | null = null;
+    proc.on("exit", () => { exitedAt ??= now(); });
+    const what = `orca ${args.slice(0, 2).join(" ")}`;
     proc.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") reject(new OrcaCliUnavailable(`orca cli unavailable: ${exe} not found`));
-      else reject(err);
+      if (err.code === "ENOENT" && !started) reject(new OrcaCliUnavailable(`orca cli unavailable: ${exe} not found`));
+      else reject(new OrcaRunError(`${what} error (${err.code ?? err.message.split("\n")[0].slice(0, 80)})${started ? " after it started" : " before it started"}`, started, null, false));
     });
     proc.on("close", (code, signal) => {
-      if (signal) { reject(new Error(`orca ${args.slice(0, 2).join(" ")} killed (${signal}) after ${timeoutMs}ms`)); return; }
+      if (signal) {
+        const elapsed = Math.round((exitedAt ?? now()) - t0);
+        const timedOut = elapsed >= timeoutMs;
+        reject(new OrcaRunError(timedOut ? `${what} killed (${signal}) after ${timeoutMs}ms` : `${what} killed (${signal}) after ${elapsed}ms, before its ${timeoutMs}ms limit`, started, signal, timedOut));
+        return;
+      }
       let json: OrcaEnvelope | null = null;
       try { json = JSON.parse(stdout.trim()) as OrcaEnvelope; } catch { json = null; }
       resolve({ json, code, stdout, stderr });
@@ -146,18 +217,31 @@ export function parseOrcaTerminalList(json: OrcaEnvelope | null): Map<string, Or
  *   "orca terminal <h> unavailable (<code>)"  permanent (no-console class)
  *   "orca cli unavailable: ..."                permanent (no Orca here)
  *   "orca send failed (<code>)"                transient (retried once)
+ *   UnconfirmedDeliveryError                   unconfirmed (never retried,
+ *                                              never a console fallback)
+ * A send whose process started had the text. Unless Orca answered (JSON:
+ * accepted, or an error that says no input was taken), its outcome is
+ * unknown: a kill (the 15 s limit or any signal), a process error, or an
+ * exit with no readable JSON is an UnconfirmedDeliveryError. A process that
+ * never started sent nothing and stays an ordinary error.
  * An ambiguous transport failure that reports a retry-request id is
  * re-issued once with that id (Orca binds the id to the payload and the
- * terminal incarnation, so the re-issue can never type twice) before it is
- * reported as transient.
+ * terminal incarnation, so the re-issue can never type twice). From that
+ * first ambiguous answer on, only an accepted re-issue settles it: a
+ * re-issue that cannot start, or any other answer, leaves the first send's
+ * outcome unknown, so it is an UnconfirmedDeliveryError too. The guard asked
+ * before the re-issue is the caller's post-text guard: it stops only for a
+ * target that left or moved to a different terminal, never for lock growth
+ * on the same terminal, where the idempotent re-issue is the safe answer.
  */
 export interface InjectOrcaOptions {
   /** Process runner, injectable for tests. */
   run?: typeof runOrca;
-  /** Asked before the internal retry: the first send took time, and the
-   *  target may have left, been replaced, or now need locks this wake does
-   *  not hold. It throws (the caller's WakeFallbackAborted) to stop the
-   *  retry; a retry can deliver input the first request never did. */
+  /** Asked before the internal retry: the first send took time and may
+   *  have typed the prompt, and the target may have left or moved to a
+   *  different terminal. It throws (the caller's WakeFallbackAborted) to
+   *  stop the retry; a retry can deliver input the first request never did,
+   *  into a terminal the agent no longer uses. */
   beforeRetry?: () => void;
 }
 
@@ -166,18 +250,91 @@ export async function injectOrca(handle: string, text: string, opts: InjectOrcaO
   if (!ORCA_HANDLE.test(handle)) throw new Error(`orca terminal ${JSON.stringify(handle).slice(0, 80)} unavailable (malformed_handle)`);
   console.log(`  [inject:orca] terminal=${handle} len=${text.length}`);
   const base = ["terminal", "send", "--terminal", handle, "--text", text, "--enter", "--json"];
-  let r = await run(base, 15000);
-  let failure = orcaSendFailure(handle, r);
+  const startedAt = Date.now();
+  const unconfirmed = (why: string, timedOut: boolean): UnconfirmedDeliveryError => {
+    console.log(`  [inject:orca] terminal=${handle} ${why}; outcome unknown, classified unconfirmed: no retry, no console fallback`);
+    return new UnconfirmedDeliveryError(timedOut
+      ? `orca terminal ${handle}: the send timed out without confirming delivery within ${Math.round(ORCA_SEND_TIMEOUT_MS / 1000)} s (${why})`
+      : `orca terminal ${handle}: the send ended without confirming delivery (${why})`);
+  };
+  // One send. A started send that did not answer is an unknown outcome,
+  // never a failure: the text was handed over and Orca may have typed it.
+  const send = async (args: string[]): Promise<OrcaResult> => {
+    let r: OrcaResult;
+    try {
+      r = await run(args, ORCA_SEND_TIMEOUT_MS);
+    } catch (err) {
+      if (err instanceof OrcaRunError && err.started) throw unconfirmed(err.message, err.timedOut);
+      throw err;
+    }
+    if (!isOrcaSendAnswer(r.json)) throw unconfirmed(`orca terminal send exited ${r.code} with no readable answer`, false);
+    return r;
+  };
+  // Reading an answer never escapes as an ordinary error: the send started.
+  const readAnswer = (r: OrcaResult, context: string): SendFailure | null => {
+    try {
+      return orcaSendFailure(handle, r);
+    } catch (err) {
+      const why = err instanceof Error ? err.message.split("\n")[0].slice(0, 120) : String(err);
+      throw unconfirmed(`${context}the answer could not be read (${why})`, false);
+    }
+  };
+  let r = await send(base);
+  let failure = readAnswer(r, "");
   if (failure && failure.retryId && !failure.permanent) {
+    // The first send may have typed the prompt. Only an accepted re-issue
+    // (idempotent under the retry id) settles that; anything else leaves it
+    // unknown, and an unknown outcome is never answered by typing again.
+    const first = failure.message;
+    // Throws the caller's WakeFallbackAborted: the agent left (nothing to
+    // wake) or lives in a different terminal now (wake that one instead).
     opts.beforeRetry?.();
-    console.log(`  [inject:orca] ${failure.message}; re-issuing once with --retry-request ${failure.retryId}`);
-    r = await run([...base, "--retry-request", failure.retryId, "--wait-submit", "2"], 15000);
-    failure = orcaSendFailure(handle, r);
+    console.log(`  [inject:orca] ${first}; re-issuing once with --retry-request ${failure.retryId}`);
+    try {
+      r = await send([...base, "--retry-request", failure.retryId, "--wait-submit", "2"]);
+    } catch (err) {
+      if (err instanceof UnconfirmedDeliveryError) throw err;
+      const why = err instanceof Error ? err.message.split("\n")[0].slice(0, 120) : String(err);
+      throw unconfirmed(`${first}; the re-issue did not run (${why})`, false);
+    }
+    failure = readAnswer(r, `${first}; re-issue: `);
+    if (failure) throw unconfirmed(`${first}; the re-issue answered ${failure.message}`, false);
   }
   if (failure) throw new Error(failure.message);
+  console.log(`  [inject:orca] terminal=${handle} accepted in ${Date.now() - startedAt}ms`);
 }
 
 interface SendFailure { message: string; permanent: boolean; retryId?: string; }
+
+/**
+ * True only for a well-formed answer to `orca terminal send --json`: ok:true
+ * with a boolean send.accepted, or ok:false with a string error code. Any
+ * other output (no JSON, truncated JSON, `{}`, an array, a bare value, an
+ * envelope missing those fields) says nothing about whether the text was
+ * typed, so the send's outcome is unknown.
+ */
+export function isOrcaSendAnswer(json: unknown): json is OrcaEnvelope {
+  if (json === null || typeof json !== "object" || Array.isArray(json)) return false;
+  const j = json as { ok?: unknown; result?: unknown; error?: unknown };
+  if (j.ok === true) {
+    const result = j.result;
+    if (result === null || typeof result !== "object") return false;
+    const send = (result as { send?: unknown }).send;
+    return send !== null && typeof send === "object" && typeof (send as { accepted?: unknown }).accepted === "boolean";
+  }
+  if (j.ok === false) {
+    const error = j.error;
+    if (error === null || typeof error !== "object" || Array.isArray(error)) return false;
+    const e = error as { code?: unknown; message?: unknown; data?: unknown };
+    if (typeof e.code !== "string") return false;
+    if (e.message !== undefined && typeof e.message !== "string") return false;
+    if (e.data === undefined) return true;
+    if (e.data === null || typeof e.data !== "object" || Array.isArray(e.data)) return false;
+    const id = (e.data as { orchestrationRequestId?: unknown }).orchestrationRequestId;
+    return id === undefined || typeof id === "string";
+  }
+  return false;
+}
 
 /** null when Orca accepted the input; otherwise what went wrong. */
 export function orcaSendFailure(handle: string, r: OrcaResult): SendFailure | null {
@@ -188,12 +345,14 @@ export function orcaSendFailure(handle: string, r: OrcaResult): SendFailure | nu
     return { message: `orca send failed (not_accepted) for terminal ${handle}`, permanent: false };
   }
   if (j?.ok === false) {
-    const code = j.error?.code ?? "unknown_error";
-    const detail = (j.error?.message ?? "").split("\n")[0].slice(0, 160);
+    const code = typeof j.error?.code === "string" ? j.error.code : "unknown_error";
+    const message: unknown = j.error?.message;
+    const detail = (typeof message === "string" ? message : "").split("\n")[0].slice(0, 160);
     if (PERMANENT_CODES.has(code)) {
       return { message: `orca terminal ${handle} unavailable (${code})`, permanent: true };
     }
-    return { message: `orca send failed (${code}): ${detail}`, permanent: false, retryId: j.error?.data?.orchestrationRequestId };
+    const retryId: unknown = j.error?.data?.orchestrationRequestId;
+    return { message: `orca send failed (${code}): ${detail}`, permanent: false, retryId: typeof retryId === "string" ? retryId : undefined };
   }
   const tail = (r.stderr || r.stdout).trim().split("\n")[0]?.slice(0, 160) ?? "";
   return { message: `orca send failed (exit ${r.code}, no JSON): ${tail}`, permanent: false };
