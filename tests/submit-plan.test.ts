@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   classifyCommandLine, classifyTarget, resetTargetCache,
-  CODEX_PLAN, COPILOT_PLAN, DEFAULT_PLAN, type SubmitPlan,
+  CODEX_PLAN, COPILOT_PLAN, DEFAULT_PLAN, UNKNOWN_PLAN, type SubmitPlan,
 } from "../src/target.js";
 import { inject, injectWezTerm, type InjectBackends, type SendTextProcess, type SpawnSendText } from "../src/inject.js";
 
@@ -76,10 +76,12 @@ describe("classifyTarget: one read per wake, never a failed wake", () => {
     expect(calls).toBe(1);
   });
 
-  it("a failed lookup is the default plan and is not cached", async () => {
+  // 27 Sep 2026: a lookup that did not answer is not an answer. It gets the
+  // unknown plan (logged as such), never a silent default.
+  it("a failed lookup is the unknown plan and is not cached", async () => {
     let calls = 0;
     const failing = async (): Promise<string | null> => { calls++; throw new Error("powershell timed out"); };
-    expect(await classifyTarget(9, "win32", { read: failing })).toEqual(DEFAULT_PLAN);
+    expect(await classifyTarget(9, "win32", { read: failing, log: () => undefined })).toEqual(UNKNOWN_PLAN);
     const unreadable = async (): Promise<string | null> => { calls++; return null; };
     expect(await classifyTarget(9, "win32", { read: unreadable })).toEqual(DEFAULT_PLAN);
     expect(await classifyTarget(9, "win32", { read: async () => { calls++; return "codex.exe"; } })).toEqual(CODEX_PLAN);
@@ -203,7 +205,7 @@ describe("inject(): the plan is worked out once per wake and reaches every backe
     expect(lookups).toBe(0);
   });
 
-  it("a classifier that throws is a single-Enter wake, not a failed one", async () => {
+  it("a classifier that throws is an unknown-plan wake (one Enter after 300 ms), not a failed one", async () => {
     const consoleCalls: Array<[number, boolean]> = [];
     const backends: InjectBackends = {
       wezterm: async () => {},
@@ -213,6 +215,6 @@ describe("inject(): the plan is worked out once per wake and reaches every backe
       classify: async () => { throw new Error("boom"); },
     };
     await inject(100, "ping", undefined, undefined, undefined, backends);
-    expect(consoleCalls).toEqual([[50, false]]);
+    expect(consoleCalls).toEqual([[300, false]]);
   });
 });

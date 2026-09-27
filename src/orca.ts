@@ -289,7 +289,7 @@ export async function injectOrca(handle: string, text: string, opts: InjectOrcaO
     // Throws the caller's WakeFallbackAborted: the agent left (nothing to
     // wake) or lives in a different terminal now (wake that one instead).
     opts.beforeRetry?.();
-    console.log(`  [inject:orca] ${first}; re-issuing once with --retry-request ${failure.retryId}`);
+    console.log(`  [inject:orca] ${first}; re-issuing once with Orca's retry id`);
     try {
       r = await send([...base, "--retry-request", failure.retryId, "--wait-submit", "2"]);
     } catch (err) {
@@ -300,11 +300,19 @@ export async function injectOrca(handle: string, text: string, opts: InjectOrcaO
     failure = readAnswer(r, `${first}; re-issue: `);
     if (failure) throw unconfirmed(`${first}; the re-issue answered ${failure.message}`, false);
   }
+  if (failure?.ambiguous && !failure.permanent) throw unconfirmed(`${failure.message}; ambiguous, with no usable retry id`, false);
   if (failure) throw new Error(failure.message);
   console.log(`  [inject:orca] terminal=${handle} accepted in ${Date.now() - startedAt}ms`);
 }
 
-interface SendFailure { message: string; permanent: boolean; retryId?: string; }
+interface SendFailure {
+  message: string;
+  permanent: boolean;
+  /** A well-formed Orca retry id: the failure was ambiguous and may be re-issued with it. */
+  retryId?: string;
+  /** Ambiguous, but with no usable retry id: the outcome is unknown. */
+  ambiguous?: boolean;
+}
 
 /**
  * True only for a well-formed answer to `orca terminal send --json`: ok:true
@@ -345,15 +353,22 @@ export function orcaSendFailure(handle: string, r: OrcaResult): SendFailure | nu
     return { message: `orca send failed (not_accepted) for terminal ${handle}`, permanent: false };
   }
   if (j?.ok === false) {
-    const code = typeof j.error?.code === "string" ? j.error.code : "unknown_error";
-    const message: unknown = j.error?.message;
-    const detail = (typeof message === "string" ? message : "").split("\n")[0].slice(0, 160);
+    // Only Orca's error code is kept, and only when it looks like one: its
+    // free-form message could echo the prompt, and it reaches logs and rooms.
+    const rawCode: unknown = j.error?.code;
+    const code = typeof rawCode === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(rawCode) ? rawCode : "unrecognised_code";
     if (PERMANENT_CODES.has(code)) {
       return { message: `orca terminal ${handle} unavailable (${code})`, permanent: true };
     }
     const retryId: unknown = j.error?.data?.orchestrationRequestId;
-    return { message: `orca send failed (${code}): ${detail}`, permanent: false, retryId: typeof retryId === "string" ? retryId : undefined };
+    if (retryId === undefined) return { message: `orca send failed (${code})`, permanent: false };
+    // Orca's retry id is an opaque token: only a well-formed one is used,
+    // and it is never logged. One that is present but malformed still says
+    // the failure was ambiguous, so the send's outcome is unknown.
+    if (typeof retryId !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(retryId)) {
+      return { message: `orca send failed (${code})`, permanent: false, ambiguous: true };
+    }
+    return { message: `orca send failed (${code})`, permanent: false, retryId };
   }
-  const tail = (r.stderr || r.stdout).trim().split("\n")[0]?.slice(0, 160) ?? "";
-  return { message: `orca send failed (exit ${r.code}, no JSON): ${tail}`, permanent: false };
+  return { message: `orca send failed (exit ${r.code}, no JSON)`, permanent: false };
 }

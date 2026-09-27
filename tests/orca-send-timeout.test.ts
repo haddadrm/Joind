@@ -226,6 +226,31 @@ describe("injectOrca: a started send that did not answer is unconfirmed", () => 
     }
   });
 
+  it("an Orca error message that echoes the prompt never reaches the error or the logs; only a well-formed code does", async () => {
+    const echo = res({ ok: false, error: { code: "runtime_unavailable", message: "could not type SECRET PROMPT TEXT" } });
+    const err = await injectOrca(H, "SECRET PROMPT TEXT", { run: async () => echo }).catch((e: unknown) => e);
+    expect((err as Error).message).toBe("orca send failed (runtime_unavailable)");
+    let n = 0;
+    const ambiguousEcho = res({ ok: false, error: { code: "transport_error", message: "SECRET PROMPT TEXT", data: { orchestrationRequestId: "req_1" } } });
+    const err2 = await injectOrca(H, "SECRET PROMPT TEXT", { run: async () => (++n === 1 ? ambiguousEcho : res({ ok: false, error: { code: "SECRET PROMPT TEXT", message: "SECRET PROMPT TEXT" } })) }).catch((e: unknown) => e);
+    expect(err2).toBeInstanceOf(UnconfirmedDeliveryError);
+    expect((err2 as Error).message).not.toMatch(/SECRET/);
+    expect(logs.join("\n")).not.toMatch(/SECRET/);
+  });
+
+  it("the retry id is never logged; a malformed one is ambiguous with no usable id: unconfirmed, no re-issue", async () => {
+    let calls = 0;
+    const bad = res({ ok: false, error: { code: "transport_error", message: "x", data: { orchestrationRequestId: "SECRET PROMPT TEXT" } } });
+    const err = await injectOrca(H, "p", { run: async () => { calls++; return bad; } }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnconfirmedDeliveryError);
+    expect(calls).toBe(1);
+    let n = 0;
+    const args: string[][] = [];
+    await injectOrca(H, "p", { run: async (a) => { args.push(a); return ++n === 1 ? res({ ok: false, error: { code: "transport_error", data: { orchestrationRequestId: "req_good-1" } } }) : res(accepted); } });
+    expect(args[1]).toContain("req_good-1");
+    expect(logs.join("\n")).not.toMatch(/SECRET|req_good-1/);
+  });
+
   it("logs one line on success", async () => {
     await injectOrca(H, "x", { run: async () => res(accepted) });
     expect(logs.filter((l) => new RegExp(`terminal=${H} accepted in \\d+ms`).test(l))).toHaveLength(1);

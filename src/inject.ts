@@ -8,7 +8,7 @@
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { injectOrca, UnconfirmedDeliveryError } from "./orca.js";
-import { classifyTarget, forgetTarget, DEFAULT_PLAN, type SubmitPlan } from "./target.js";
+import { classifyTarget, forgetTarget, DEFAULT_PLAN, UNKNOWN_PLAN, type SubmitPlan } from "./target.js";
 import { socketForGui } from "./terminals.js";
 
 const execFileAsync = promisify(execFile);
@@ -362,14 +362,16 @@ function assertStillTarget(options: InjectOptions): void {
 }
 
 /** The target's submit plan; a classifier that fails or throws is the
- *  single-Enter default, never a failed wake. */
+ *  unknown plan (one Enter after 300 ms), never a failed wake. */
 async function resolvePlan(pid: number, platform: NodeJS.Platform, backends: InjectBackends): Promise<SubmitPlan> {
   try {
     const p = await (backends.classify ?? classifyTarget)(pid, platform);
-    console.log(`  [inject] target=${p.kind} delay=${p.delayMs}ms doubleEnter=${p.doubleEnter}`);
+    console.log(`  [inject] pid=${pid} target=${p.kind} delay=${p.delayMs}ms doubleEnter=${p.doubleEnter}`);
     return p;
-  } catch {
-    return DEFAULT_PLAN;
+  } catch (err) {
+    const why = err instanceof Error ? err.message.split("\n")[0].slice(0, 100) : String(err);
+    console.log(`  [inject] pid=${pid} target lookup failed (${why}); target unidentified; pressing Enter once (a Codex or Copilot session may need Enter by hand)`);
+    return UNKNOWN_PLAN;
   }
 }
 

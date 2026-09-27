@@ -725,23 +725,25 @@ export class ChatRoom extends EventEmitter {
           // worse outcome. Only two things stop it:
           afterTextGuard: (route: AfterTextRoute) => {
             const live = this.agents.get(name);
+            // On the Orca route the text may or may not have been typed.
+            const what = route === "orca" ? "an unconfirmed Orca send to" : "the prompt reached";
             if (this.destroyed || !live?.active) {
-              // The agent left: nobody to submit for. The text stays.
-              console.log(`  [wake] ${name} left after the prompt reached ${identity}; the unsent text remains in that terminal`);
+              // The agent left: nobody to submit for. Any text stays.
+              console.log(`  [wake] ${name} left after ${what} ${identity}; ${route === "orca" ? "not re-issued" : "the unsent text remains in that terminal"}`);
               return "skip";
             }
             if (terminalIdentity(live) === identity) return "proceed";
             // The registration changed. Same terminal (by lock equivalence,
             // transitively through live registrations): never replay, warn.
             if (sameTerminal(held, live)) {
-              console.log(`  [wake] ${name}'s registration changed (${identity} -> ${terminalIdentity(live)}) but it is the terminal holding the prompt; not typing it again`);
+              console.log(`  [wake] ${name}'s registration changed (${identity} to ${terminalIdentity(live)}) but it is the same terminal as ${what} it; not typing it again`);
               partialLine = true;
               partialKind = route === "orca" ? "unconfirmed" : "partial";
               return "skip";
             }
             // A different terminal: the old one keeps the unsent text; the
             // new one gets a fresh wake once this attempt releases its locks.
-            console.log(`  [wake] ${name} moved to a different terminal (${terminalIdentity(live)}) after the prompt reached ${identity}; that terminal keeps the unsent text; waking the new one`);
+            console.log(`  [wake] ${name} moved to a different terminal (${terminalIdentity(live)}) after ${what} ${identity}; ${route === "orca" ? "that terminal may hold the prompt" : "that terminal keeps the unsent text"}; waking the new one`);
             return "moved";
           },
         });

@@ -3,7 +3,7 @@ import {
   inject, injectWezTerm, injectUnix, PartialDeliveryError, WakeFallbackAborted,
   type InjectBackends, type SendTextProcess, type SpawnSendText, type UnixExec,
 } from "../src/inject.js";
-import { classifyCommandLine, classifyCommandLineResolved, classifyTarget, forgetTarget, resetTargetCache, CODEX_PLAN, COPILOT_PLAN, DEFAULT_PLAN, type SubmitPlan } from "../src/target.js";
+import { classifyCommandLine, classifyCommandLineResolved, classifyTarget, forgetTarget, resetTargetCache, CODEX_PLAN, COPILOT_PLAN, DEFAULT_PLAN, UNKNOWN_PLAN, type SubmitPlan } from "../src/target.js";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -388,9 +388,11 @@ describe("gate round 8: a runtime's first-argument script alone decides, through
     it(`resolved: ${label}`, async () => { expect(await classifyCommandLineResolved(line, { realpath: fakeRealpath })).toEqual(plan); });
   }
 
-  it("a realpath that never answers is the default plan once the deadline passes", async () => {
+  // 27 Sep 2026: a resolve that ran out of time is no answer, so it gets the
+  // unknown plan; a resolve that failed (above) is an answer.
+  it("a realpath that never answers is the unknown plan once the deadline passes", async () => {
     const never = (): Promise<string> => new Promise<string>(() => {});
-    expect(await classifyCommandLineResolved("node /usr/local/bin/cx", { realpath: never, deadlineMs: 20 })).toEqual(DEFAULT_PLAN);
+    expect(await classifyCommandLineResolved("node /usr/local/bin/cx", { realpath: never, deadlineMs: 20 })).toEqual(UNKNOWN_PLAN);
   });
 
   it("realpath is never asked for a relative script, a script already identified, or an options-first line", async () => {
