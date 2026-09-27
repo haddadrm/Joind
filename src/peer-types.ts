@@ -116,6 +116,8 @@ export interface PeerWakeBody {
   hostedRegistration: string;
   sender: string;
   prompt: string;
+  /** The earliest uncovered mention id in the home room (absent from older homes). */
+  mentionId?: number;
 }
 
 /** The link could not carry the request (connection refused, timeout, 5xx). */

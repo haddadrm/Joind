@@ -20,6 +20,10 @@ export function setInjectBaseUrl(url: string): void {
   if (url && url.startsWith("http")) INJECT_BASE_URL = url.replace(/\/+$/, "");
 }
 const wakes = new WakeCoordinator();
+/** How long a host waits for a hosted member's mention to reach its mirror
+ *  before typing the wake prompt, and how often it looks. */
+const MENTION_ARRIVAL_WAIT_MS = 3000;
+const MENTION_ARRIVAL_POLL_MS = 50;
 let roomSeq = 0;
 /** What a terminal registration carries: the pid, and when known the
  *  WezTerm pane and the Orca terminal handle. */
@@ -159,6 +163,9 @@ export interface HostedWakeRequest {
   /** Mention context; the host builds the terminal prompt itself, with its
    *  own base URL, since the member reads and replies through the host. */
   prompt: string;
+  /** The earliest mention of this member not yet covered by a wake: the
+   *  host keeps the prompt's read cursor at or below it. */
+  mentionId?: number;
 }
 
 /** What the host answered, or "unreachable" when the link could not carry
@@ -288,11 +295,16 @@ export class ChatRoom extends EventEmitter {
   protected messages: ChatMessage[] = [];
   protected agents = new Map<string, Agent>();
   private nextId = 1;
+  /** The highest positive id seen here; see highWaterId(). */
+  private maxIdSeen = 0;
   private typingState = new Map<string, NodeJS.Timeout>();
   private statusTimeouts = new Map<string, NodeJS.Timeout>();
   private pendingMentions = new Map<string, NodeJS.Timeout>(); // batched mention injection
   private wakesInFlight = new Set<string>();  // targets whose wake is executing right now
   private rewakeAfter = new Set<string>();    // mentioned again while in flight: wake once more
+  /** Ids of mentions per target not yet covered by a wake that landed: the
+   *  wake prompt's read cursor never points past the earliest of them. */
+  private pendingMentionIds = new Map<string, number[]>();
   /** Warning state for wake failures is per room and agent, not per name. */
   private readonly wakeScope = `r${++roomSeq}`;
   protected destroyed = false;
@@ -515,6 +527,7 @@ export class ChatRoom extends EventEmitter {
       liveTerminals.delete(this.warnKey(name));
       wakes.release(this.warnKey(name));
       this.hostedUnreachable.delete(name);
+      this.pendingMentionIds.delete(name);
       // A dropped agent and a departed agent are different facts; say which.
       this.addSystem(
         reason === "timeout"
@@ -609,7 +622,15 @@ export class ChatRoom extends EventEmitter {
         this.emit("room", { type: "turn-guard", data: { count: this.agentTurnCount, limit: this.turnGuard.limit } } as unknown as RoomEvent);
       }
     } else {
-      for (const target of targets) this.queueWake(sender, target);
+      // One entry per target per message, however often the text names it:
+      // a message with thousands of "@A" is one mention of A.
+      for (const target of new Set(targets)) {
+        const ids = this.pendingMentionIds.get(target) ?? [];
+        // Ids only grow, so the list stays ascending: first is the earliest.
+        if (ids.length === 0 || ids[ids.length - 1] < msg.id) ids.push(msg.id);
+        this.pendingMentionIds.set(target, ids);
+        this.queueWake(sender, target);
+      }
     }
 
     console.log(`  [#${msg.id} ${sender}] ${text}`);
@@ -639,7 +660,63 @@ export class ChatRoom extends EventEmitter {
     this.pendingMentions.set(target, timeout);
   }
 
-  protected buildWakePrompt(sender: string, agent: Agent, roomLabel?: string): string {
+  /**
+   * The highest message id this room has ever held (0 when none): the next
+   * id to be assigned minus one, or the highest id a mirror inserted. It
+   * never goes down when a message is deleted, so a cursor that read the
+   * deleted newest message is still inside the room. Local lines of a
+   * mirror (negative ids) never count. Known limit: a local room that loses
+   * its newest message and then restarts reloads a lower mark, and reuses
+   * that id for its next message (pre-existing), so such a cursor is reset.
+   */
+  highWaterId(): number {
+    let seen = this.maxIdSeen;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const id = this.messages[i].id;
+      if (id > 0) { seen = Math.max(seen, id); break; }
+    }
+    this.maxIdSeen = seen;
+    return Math.max(this.nextId - 1, seen);
+  }
+
+  /** Resolve once message `id` is in this room, or after `ms` (true when it
+   *  arrived). Polls; used only by a host's wake for a hosted member. */
+  protected async awaitMessage(id: number, ms: number): Promise<boolean> {
+    // Counted in polls, not wall time: bounded however the clock behaves.
+    let left = Math.ceil(ms / MENTION_ARRIVAL_POLL_MS);
+    while (!this.getMessageById(id)) {
+      if (this.destroyed || left-- <= 0) {
+        if (!this.destroyed) console.log(`  [wake] mention #${id} had not reached this room after ${ms} ms; waking anyway`);
+        return false;
+      }
+      await new Promise<void>((r) => setTimeout(r, MENTION_ARRIVAL_POLL_MS));
+    }
+    return true;
+  }
+
+  /** A mirror inserted a home message: raise the high-water mark. */
+  protected noteMessageId(id: number): void {
+    if (id > this.maxIdSeen) this.maxIdSeen = id;
+  }
+
+  /** The mentions of `name` a wake would cover now: the earliest (for the
+   *  prompt's cursor) and the latest (what a landed wake clears). */
+  private mentionWindow(name: string): { earliest?: number; latest: number } {
+    const ids = this.pendingMentionIds.get(name);
+    if (!ids || ids.length === 0) return { latest: 0 };
+    // Ascending by construction (see send): no spread over a long list.
+    return { earliest: ids[0], latest: ids[ids.length - 1] };
+  }
+
+  /** A wake covering mentions up to `latest` landed: drop them. */
+  private mentionsCovered(name: string, latest: number): void {
+    const ids = this.pendingMentionIds.get(name);
+    if (!ids) return;
+    const left = ids.filter((id) => id > latest);
+    if (left.length > 0) this.pendingMentionIds.set(name, left); else this.pendingMentionIds.delete(name);
+  }
+
+  protected buildWakePrompt(sender: string, agent: Agent, roomLabel?: string, mentionId?: number): string {
     const base = this.injectBaseUrl ?? INJECT_BASE_URL;
     const where = roomLabel ? ` in ${roomLabel}` : "";
     const roleHint = agent.role ? ` Your role: ${agent.role}.` : "";
@@ -652,7 +729,12 @@ export class ChatRoom extends EventEmitter {
     const pidBody = (agent.pid ? `,"pid":${agent.pid}` : "") +
       (agent.weztermPaneId != null && agent.weztermGui != null ? `,"paneId":${agent.weztermPaneId},"weztermGui":${agent.weztermGui}` : "") +
       (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "");
-    const since = this.getCursor(agent.name);
+    // Never past the mention: the read the prompt asks for starts before the
+    // mention, whatever the stored cursor says. (A read returns at most its
+    // limit of the latest messages, 50 by default, so a mention with more
+    // than that after it is still paged out, as before.)
+    const cursor = this.getCursor(agent.name);
+    const since = mentionId != null && Number.isInteger(mentionId) && mentionId > 0 ? Math.max(0, Math.min(cursor, mentionId - 1)) : cursor;
     return (
       `[joind] @${agent.name} mentioned by ${sender}${where}.${roleHint} ` +
       `Read: curl -s "${base}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}" then ` +
@@ -673,12 +755,16 @@ export class ChatRoom extends EventEmitter {
     if (!queued?.active || name === sender) return;
     // A hosted member's terminal is on its host: route, never inject here.
     if (queued.host) return this.wakeHostedMember(sender, name, queued);
-    this.wakesInFlight.add(name);
     let moved = false;
+    const mention = this.mentionWindow(name);
+    this.wakesInFlight.add(name);
     try {
-      const { outcome, partialLine, partialKind, unidentified, session } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent));
+      const { outcome, partialLine, partialKind, unidentified, session } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent, undefined, mention.earliest));
       if (outcome.ok) {
         moved = outcome.result === "moved";
+        // Landed (or the agent left): these mentions are covered. A wake that
+        // failed, or moved, keeps them for the next prompt.
+        if (outcome.result !== "moved") this.mentionsCovered(name, mention.latest);
         if (outcome.result === "done" && unidentified && !this.destroyed && this.agents.has(name) && wakes.shouldNoteUnidentified(this.warnKey(name), session)) {
           this.addSystem(unidentifiedLine(name, unidentified));
         }
@@ -810,6 +896,7 @@ export class ChatRoom extends EventEmitter {
   private async wakeHostedMember(sender: string, name: string, agent: Agent): Promise<void> {
     const host = agent.host ?? "";
     const hostedRegistration = hostedRegistrations.get(agent);
+    const mention = this.mentionWindow(name);
     this.wakesInFlight.add(name);
     let result: HostedWakeResult;
     try {
@@ -817,7 +904,7 @@ export class ChatRoom extends EventEmitter {
         result = { ok: false, kind: "unreachable", attempts: 0, reason: `no link to ${host} is configured on this server` };
       } else {
         console.log(`  -> Routing wake for ${name} to host ${host}...`);
-        result = await this.hostedWaker({ host, room: this.homeId, name, hostedRegistration, sender, prompt: `@${name} mentioned by ${sender}` })
+        result = await this.hostedWaker({ host, room: this.homeId, name, hostedRegistration, sender, prompt: `@${name} mentioned by ${sender}`, mentionId: mention.earliest })
           .catch((err: unknown): HostedWakeResult => ({ ok: false, kind: "unreachable", attempts: 1, reason: err instanceof Error ? err.message : String(err) }));
       }
     } finally {
@@ -831,6 +918,7 @@ export class ChatRoom extends EventEmitter {
     if (sameSession) {
       if (result.ok) {
         this.hostedUnreachable.delete(name);
+        this.mentionsCovered(name, mention.latest);
         // The host typed the prompt but could not identify the member's
         // terminal application: the same warn-once line, naming the host.
         // Anything the host sends that is not one of our own reason shapes
@@ -857,7 +945,11 @@ export class ChatRoom extends EventEmitter {
    * mention; nothing is said in this room (the home server posts the line).
    * `roomLabel` names the home room in the prompt.
    */
-  async wakeForPeer(sender: string, name: string, registration: string, roomLabel: string): Promise<HostedWakeResult> {
+  async wakeForPeer(sender: string, name: string, registration: string, roomLabel: string, mentionId?: number): Promise<HostedWakeResult> {
+    // The home decided on the mention before this mirror may have received
+    // it: give replication a moment, so the read the prompt asks for finds
+    // it. Bounded; a mention that has not arrived by then is waked anyway.
+    if (mentionId != null) await this.awaitMessage(mentionId, MENTION_ARRIVAL_WAIT_MS);
     for (let round = 0; round < 5; round++) {
       const agent = this.agents.get(name);
       if (this.destroyed || !agent?.active || agent.host || memberRegistrations.get(agent) !== registration) {
@@ -866,7 +958,7 @@ export class ChatRoom extends EventEmitter {
       this.wakesInFlight.add(name);
       let core: WakeCoreResult;
       try {
-        core = await this.wakeCore(sender, name, agent, (live) => this.buildWakePrompt(sender, live, roomLabel));
+        core = await this.wakeCore(sender, name, agent, (live) => this.buildWakePrompt(sender, live, roomLabel, mentionId));
       } finally {
         this.wakesInFlight.delete(name);
       }
@@ -1218,6 +1310,7 @@ export class ChatRoom extends EventEmitter {
     for (const t of this.pendingMentions.values()) clearTimeout(t);
     this.pendingMentions.clear();
     this.rewakeAfter.clear();
+    this.pendingMentionIds.clear();
     this.wakesInFlight.clear();
     // No queued or in-flight wake may inject, warn or re-queue after this.
     for (const agent of this.agents.values()) {

@@ -28,7 +28,7 @@ import { injectBaseUrlFor } from "./wake.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ConversationManager, newRegistrationId, isTerminalLess } from "./manager.js";
-import { visibleToViewer, type ChatMessage } from "./room.js";
+import { visibleToViewer, type ChatMessage, type ChatRoom } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
@@ -262,18 +262,22 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // Apply turn guard to existing and future rooms
   applyTurnGuard();
 
-  // Apply cursor provider to all existing and future rooms
+  // Apply cursor provider to all existing and future rooms. Cursors are per
+  // room: message ids mean nothing outside the room they were read in.
+  function cursorProviderFor(roomId: string, room: ChatRoom): (name: string) => number {
+    return (name: string) => cursorStore.cursorFor(roomId, name, room.highWaterId());
+  }
   function applyCursorProvider(): void {
     for (const conv of manager.listConversations()) {
       const room = manager.getRoom(conv.id);
-      if (room) room.getCursor = (name) => cursorStore.get(name);
+      if (room) room.getCursor = cursorProviderFor(conv.id, room);
     }
   }
   applyCursorProvider();
 
-  manager.on("room-created", (room) => {
+  manager.on("room-created", (room: ChatRoom, id: string) => {
     if (turnGuard.enabled) room.turnGuard = turnGuard;
-    room.getCursor = (name: string) => cursorStore.get(name);
+    room.getCursor = cursorProviderFor(id, room);
   });
 
   // --- Notification bell: high-signal feed for the human ---
@@ -1246,9 +1250,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const paneId = req.query.paneId != null ? Number(req.query.paneId) : undefined;
     const ctx = agentRoom(sender, res, pid, paneId, orcaOf(req), weztermGuiOf(req), registrationOf(req));
     if (!ctx) return;
-    const cursor = cursorStore.get(sender);
+    const cursor = cursorStore.cursorFor(ctx.convId, sender, ctx.room.highWaterId());
     const newMsgs = ctx.room.read(cursor, 100000, undefined, sender);
-    const unread = cursorStore.getUnreadCount(sender, newMsgs);
+    const unread = cursorStore.getUnreadCount(cursor, sender, newMsgs);
     res.json(unread);
   });
 
@@ -1862,13 +1866,19 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const abort = new AbortController();
     req.on("close", () => abort.abort());
     ctx.room.touch(sender);
+    const sinceInRoom = since == null || !(since > ctx.room.highWaterId());
     const result = await waitForMessage(ctx.room, sender, since, timeoutMs, {
       mentionsOnly,
       signal: abort.signal,
     });
     ctx.room.touch(sender);
     if (result.aborted) return;
-    if (result.lastId > 0) cursorStore.advance(sender, result.lastId);
+    // A listen's lastId also steps over traffic it did not deliver (not for
+    // this agent, or not a mention); that is the caller's cursor moving
+    // forward, trusted only when its since was inside this room. A since from
+    // elsewhere moves the stored cursor only to what was delivered.
+    const listenAdvance = sinceInRoom ? result.lastId : (result.messages.length > 0 ? result.messages[result.messages.length - 1].id : 0);
+    if (listenAdvance > 0) cursorStore.advance(ctx.convId, sender, listenAdvance, ctx.room.highWaterId());
     res.json(result);
   });
 
@@ -1885,7 +1895,11 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     ctx.room.touch(sender);
     const messages = ctx.room.read(since, limit, from, sender);
     const lastId = messages.length > 0 ? messages[messages.length - 1].id : (since ?? 0);
-    if (lastId > 0) cursorStore.advance(sender, lastId);
+    // The read stays literal (an empty list for a since past the room's end
+    // is the honest answer). The stored cursor moves only to a message this
+    // read returned: a since alone proves nothing was read (it may come from
+    // another room), so an empty read never marks anything read.
+    if (messages.length > 0) cursorStore.advance(ctx.convId, sender, messages[messages.length - 1].id, ctx.room.highWaterId());
     res.json({ messages, lastId });
   });
 
@@ -2041,7 +2055,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!tmpl) { res.status(404).json({ error: "Template not found" }); return; }
     const missing = tmpl.roles.filter((r) => !cast[r]);
     if (missing.length > 0) { res.status(400).json({ error: "Missing roles", missing }); return; }
-    const session = startSession(templateId, cast, goal ?? "", startedBy ?? "human", room, (name) => cursorStore.get(name));
+    const roomId = manager.getActiveId();
+    const session = startSession(templateId, cast, goal ?? "", startedBy ?? "human", room, (name) => (roomId ? cursorStore.cursorFor(roomId, name, room.highWaterId()) : 0));
     if (!session) { res.status(500).json({ error: "Failed" }); return; }
     res.json(session);
   });

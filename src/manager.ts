@@ -325,7 +325,7 @@ export class ConversationManager extends EventEmitter {
         }
       });
       this.conversations.set(id, room);
-      this.emit("room-created", room);
+      this.emit("room-created", room, id);
     }
     return room;
   }
@@ -359,7 +359,7 @@ export class ConversationManager extends EventEmitter {
       this.emit("room", { ...event, conversationId: entry.id });
     });
     // The same per-room wiring as a local room (cursor provider for prompts).
-    this.emit("room-created", entry.room);
+    this.emit("room-created", entry.room, entry.id);
   }
 
   unregisterRemoteRoom(id: string): void {

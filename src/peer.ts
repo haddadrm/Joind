@@ -508,7 +508,9 @@ export class PeerHub {
       // members only in its own rooms.
       const mirror = this.opts.registry?.mirror(`${peer}:${room}`);
       if (!mirror) { res.status(404).json({ error: "Conversation not found" }); return; }
-      const result = await mirror.wakeFromHome(sender, name, hostedRegistration);
+      // The home's earliest uncovered mention: a positive integer, else none.
+      const mentionId = typeof body.mentionId === "number" && Number.isInteger(body.mentionId) && body.mentionId > 0 ? body.mentionId : undefined;
+      const result = await mirror.wakeFromHome(sender, name, hostedRegistration, mentionId);
       res.json(result);
     });
 

@@ -479,6 +479,7 @@ export class MirrorRoom extends ChatRoom {
       if (!this.insertedAt.has(m.id)) this.insertedAt.set(m.id, ++this.insertSeq);
     }
     this.messages = [...byId.values()].sort((a, b) => a.id - b.id);
+    for (const m of incoming) this.noteMessageId(m.id);
     const before = this.roster;
     this.roster = new Map(snap.members.map((a) => [a.name, a]));
     if (snap.name) this.name = snap.name;
@@ -507,6 +508,7 @@ export class MirrorRoom extends ChatRoom {
   private insertMessage(m: ChatMessage): boolean {
     if (typeof m.id !== "number" || this.messages.some((x) => x.id === m.id)) return false;
     this.insertedAt.set(m.id, ++this.insertSeq);
+    this.noteMessageId(m.id);
     const last = this.messages[this.messages.length - 1];
     if (!last || last.id < m.id) this.messages.push(m);
     else this.messages.splice(this.messages.findIndex((x) => x.id > m.id), 0, m);
@@ -1167,8 +1169,8 @@ export class MirrorRoom extends ChatRoom {
   /** Wake a local member for a mention decided on the home server. The
    *  prompt names the home room and this server's base URL (the member reads
    *  and replies through this mirror). */
-  wakeFromHome(sender: string, name: string, hostedRegistration: string): Promise<HostedWakeResult> {
+  wakeFromHome(sender: string, name: string, hostedRegistration: string, mentionId?: number): Promise<HostedWakeResult> {
     const label = `"${this.name}" on ${this.server} (conversation ${this.id})`;
-    return this.wakeForPeer(sender, name, hostedRegistration, label);
+    return this.wakeForPeer(sender, name, hostedRegistration, label, mentionId);
   }
 }

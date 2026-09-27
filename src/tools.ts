@@ -696,7 +696,7 @@ export function registerTools(
       const msgs = target.room.read(since, limit, from, sender);
       // Advance unread cursor
       if (cursorStore && sender && msgs.length > 0) {
-        cursorStore.advance(sender, msgs[msgs.length - 1].id);
+        cursorStore.advance(target.entry.conversationId, sender, msgs[msgs.length - 1].id, target.room.highWaterId());
       }
       const formatted = msgs
         .map((m) => {
@@ -729,6 +729,7 @@ export function registerTools(
       }
       const timeoutMs = clampListenTimeout(timeoutSec != null ? timeoutSec * 1000 : undefined);
       target.room.touch(sender);
+      const sinceInRoom = since == null || !(since > target.room.highWaterId());
       const result = await waitForMessage(target.room, sender, since, timeoutMs, {
         mentionsOnly,
         signal: extra.signal,
@@ -737,8 +738,11 @@ export function registerTools(
       if (result.aborted) {
         return { content: [{ type: "text" as const, text: "(listen cancelled)" }] };
       }
-      if (cursorStore && result.lastId > 0) {
-        cursorStore.advance(sender, result.lastId);
+      // As /api/agent/listen: step over undelivered traffic only for a since
+      // inside this room; otherwise only to what was delivered.
+      const listenAdvance = sinceInRoom ? result.lastId : (result.messages.length > 0 ? result.messages[result.messages.length - 1].id : 0);
+      if (cursorStore && listenAdvance > 0) {
+        cursorStore.advance(target.entry.conversationId, sender, listenAdvance, target.room.highWaterId());
       }
       if (result.messages.length === 0) {
         return { content: [{ type: "text" as const, text: `(no new messages after ${timeoutMs / 1000}s; lastId=${result.lastId}; call chat_listen again)` }] };
@@ -1044,9 +1048,9 @@ export function registerTools(
         if (!target) {
           return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
         }
-        const cursor = cursorStore.get(name);
+        const cursor = cursorStore.cursorFor(target.entry.conversationId, name, target.room.highWaterId());
         const newMsgs = target.room.read(cursor, 100000, undefined, name);
-        const unread = cursorStore.getUnreadCount(name, newMsgs);
+        const unread = cursorStore.getUnreadCount(cursor, name, newMsgs);
         if (unread.count === 0) {
           return { content: [{ type: "text" as const, text: "No unread messages" }] };
         }
