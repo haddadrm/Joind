@@ -48,7 +48,7 @@ async function call(base: string, method: string, path: string, body?: unknown, 
   return { status: res.status, json };
 }
 
-/** Every web write that now requires the token, with a body that would otherwise act. */
+/** Every web write that requires the token, with a body that would otherwise act. */
 const GUARDED: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [
   { method: "POST", path: "/api/messages/delete", body: { id: 1 } },
   { method: "POST", path: "/api/notifications/read", body: {} },
@@ -59,6 +59,7 @@ const GUARDED: Array<{ method: string; path: string; body?: Record<string, unkno
   { method: "POST", path: "/api/role", body: { name: "Kira", role: "owned" } },
   { method: "POST", path: "/api/roles", body: { emoji: "x", label: "intruder" } },
   { method: "DELETE", path: "/api/roles/reviewer" },
+  { method: "POST", path: "/api/conversations/new", body: { name: "intruder-room" } },
   { method: "POST", path: "/api/conversations/rename", body: { id: "ROOM", name: "owned" } },
   { method: "POST", path: "/api/conversations/star", body: { id: "ROOM", starred: true } },
   { method: "POST", path: "/api/conversations/delete", body: { id: "ROOM" } },
@@ -120,6 +121,7 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     expect(S.manager.getRoom(room)!.read(undefined, 100).map((m) => m.id)).toEqual([1, 2, 3, 4, 5]);
     expect(S.manager.listConversations().map((c) => `${c.id}:${c.name}:${String(c.starred)}`).sort()).toEqual(convsBefore);
     expect(S.manager.getRoom(room)!.getAgent("Intruder")).toBeUndefined();
+    expect(S.manager.listConversations().some((c) => c.name === "intruder-room" || c.name === "imp")).toBe(false);
   });
 
   it("accepts the token from the header, a JSON body or the query", async () => {

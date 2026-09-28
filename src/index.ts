@@ -1579,6 +1579,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/new", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { name } = (req.body || {}) as { name?: string };
     const meta = manager.createConversation(name);
     res.json({ conversation: meta });

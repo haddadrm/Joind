@@ -147,7 +147,7 @@ async function call(path: string, body?: object): Promise<{ status: number; json
   try { json = JSON.parse(text) as Record<string, unknown>; } catch { json = { text }; }
   return { status: res.status, json };
 }
-const newConversation = async (name: string) => ((await call("/api/conversations/new", { name })).json.conversation as { id: string }).id;
+const newConversation = async (name: string) => ((await call("/api/conversations/new", { name, token: TOKEN })).json.conversation as { id: string }).id;
 const select = async (id: string) => { expect((await call("/api/conversations/select", { id, token: TOKEN })).status).toBe(200); };
 /** A terminal-less REST join: no pid, no pane, and a handle that is dropped. */
 async function joinTerminalLess(name: string, conversation: string): Promise<string | undefined> {
@@ -185,7 +185,8 @@ describe.skipIf(!existsSync(DIST))("finding 2 (REST, the real server): terminal-
     expect((await read("Repl")).status).toBe(200);
     expect((await call("/api/agent/send", { sender: "Repl", text: "hi" })).status).toBe(200);
     await select(a);
-    expect((await call("/api/rename", { oldName: "Repl", newName: "Repl-2", conversation: a })).status).toBe(200);
+    expect((await call("/api/rename", { oldName: "Repl", newName: "Repl-2", conversation: a })).status).toBe(403);
+    expect((await call("/api/rename", { oldName: "Repl", newName: "Repl-2", conversation: a, token: TOKEN })).status).toBe(200);
     expect((await read("Repl-2")).status).toBe(200);
     expect(id).toMatch(/^reg-/);
     expect((await read("Repl-2", id)).status).toBe(200); // the rename keeps the registration

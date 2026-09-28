@@ -91,7 +91,7 @@ async function call(path: string, body?: object): Promise<{ status: number; json
 }
 
 async function newConversation(name: string): Promise<string> {
-  const r = await call("/api/conversations/new", { name });
+  const r = await call("/api/conversations/new", { name, token: TOKEN });
   return (r.json.conversation as { id: string }).id;
 }
 
@@ -156,7 +156,8 @@ describe.skipIf(!existsSync(DIST))("the real server: findings 3 and 5", () => {
     it("the UI leave in room A removes A's member and A's binding, never B's", async () => {
       const { a } = await twoRegistrations();
       await select(a);
-      expect((await call("/api/leave", { name: "Codex", conversation: a })).status).toBe(200);
+      expect((await call("/api/leave", { name: "Codex", conversation: a })).status).toBe(403);
+      expect((await call("/api/leave", { name: "Codex", conversation: a, token: TOKEN })).status).toBe(200);
       expect(await readAs("Codex", P2)).toBe(200);
       expect((await call("/api/agent/leave", { name: "Codex", pid: P2 })).status).toBe(200);
     }, 20_000);
@@ -166,7 +167,7 @@ describe.skipIf(!existsSync(DIST))("the real server: findings 3 and 5", () => {
     it("renaming Codex in room A binds the new name to A, and B's registration is untouched", async () => {
       const { a } = await twoRegistrations();
       await select(a);
-      const r = await call("/api/rename", { oldName: "Codex", newName: "Codex-A", conversation: a });
+      const r = await call("/api/rename", { oldName: "Codex", newName: "Codex-A", conversation: a, token: TOKEN });
       expect(r.status).toBe(200);
       expect(await readAs("Codex-A", P1)).toBe(200);
       expect(await readAs("Codex", P2)).toBe(200);

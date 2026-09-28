@@ -40,7 +40,7 @@ async function call(path: string, body?: object): Promise<{ status: number; json
   try { json = JSON.parse(text) as Record<string, unknown>; } catch { json = { text }; }
   return { status: res.status, json };
 }
-const newConversation = async (name: string) => ((await call("/api/conversations/new", { name })).json.conversation as { id: string }).id;
+const newConversation = async (name: string) => ((await call("/api/conversations/new", { name, token: TOKEN })).json.conversation as { id: string }).id;
 async function joinAs(pid: number, conversation: string): Promise<string> {
   const r = await call("/api/agent/join", { name: "Twin", pid, conversation });
   expect(r.status).toBe(200);
