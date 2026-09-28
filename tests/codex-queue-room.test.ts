@@ -10,6 +10,8 @@ import { tmpdir } from "os";
 type QueueMode = "ok" | "enoent" | "unknown-thread" | "timeout" | "exit";
 const state = {
   queueMode: "ok" as QueueMode,
+  /** Runs inside the queue call, before its result: a rejoin in flight. */
+  onQueue: null as null | (() => void),
   queue: [] as Array<{ thread: string; home?: string; text: string }>,
   console: [] as number[],
   options: [] as Array<import("../src/inject.js").InjectOptions>,
@@ -27,6 +29,7 @@ vi.mock("../src/inject.js", async () => {
         codexQueue: async (thread, t, home) => {
           state.queue.push({ thread, home, text: t });
           const m = state.queueMode;
+          state.onQueue?.();
           const stderr = m === "unknown-thread"
             ? `Error: failed to queue session message: thread/queue/add failed: failed to read thread: invalid thread-store request: no rollout found for thread id ${thread} (code -32603)\n`
             : "Error: boom\n";
@@ -64,7 +67,7 @@ describe("a room wakes a member with a codexThread through codex queue", () => {
     logs = [];
     vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    state.queueMode = "ok"; state.queue = []; state.console = []; state.options = [];
+    state.queueMode = "ok"; state.queue = []; state.console = []; state.options = []; state.onQueue = null;
   });
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -83,6 +86,85 @@ describe("a room wakes a member with a codexThread through codex queue", () => {
   }
   const systemLines = (r: ChatRoom) => r.read(undefined, 100).filter((m) => m.sender === "system").map((m) => m.text);
   const verifyLogs = () => logs.filter((l) => /\[verify\]/.test(l));
+
+  // Codex review of b6da6f6, finding 1 (its probe, kept as is): the binding
+  // changes while the queue attempt is in flight (same pid, same thread), and
+  // the attempt then fails in a way proven to precede any handoff. No key is
+  // typed under the stale binding; one fresh wake runs under the new one
+  // (here it succeeds through the queue).
+  it.each(["registration", "home"])("REVIEW: no stale fallback after in-flight %s changes", async (change) => {
+    const r = room();
+    r.join("Data", 4242, undefined, undefined, undefined, undefined, "reg-old", THREAD, HOME);
+    state.queueMode = "enoent";
+    state.onQueue = () => {
+      state.onQueue = null;
+      r.join("Data", 4242, undefined, undefined, undefined, undefined,
+        change === "registration" ? "reg-new" : "reg-old", THREAD,
+        change === "home" ? HOME + "-new" : HOME);
+      state.queueMode = "ok";
+    };
+    try {
+      await mention(r);
+      expect(state.console).toEqual([]);
+      expect(state.queue).toHaveLength(2);
+      expect(state.queue[1].home).toBe(change === "home" ? HOME + "-new" : HOME);
+      expect(systemLines(r).some((l) => /Could not wake|did not confirm/.test(l))).toBe(false);
+    } finally { r.destroy(); }
+  });
+
+  it("finding 1, the other side: an AMBIGUOUS result with the binding changed in flight is unconfirmed, with no keys and no fresh attempt", async () => {
+    for (const mode of ["timeout", "exit"] as const) {
+      state.queue = []; state.console = [];
+      const r = room();
+      r.join("Data", 4242, undefined, undefined, undefined, undefined, "reg-old", THREAD, HOME);
+      state.queueMode = mode;
+      state.onQueue = () => {
+        state.onQueue = null;
+        r.join("Data", 4242, undefined, undefined, undefined, undefined, "reg-new", THREAD, HOME);
+      };
+      try {
+        await mention(r);
+        expect(state.console).toEqual([]);
+        expect(state.queue).toHaveLength(1);
+        expect(systemLines(r).filter((l) => /Codex did not confirm the queued prompt for Data/.test(l))).toHaveLength(1);
+      } finally { r.destroy(); }
+    }
+  });
+
+  it("finding 1: a proven failure with the binding unchanged still falls back to keys (control)", async () => {
+    const r = room();
+    r.join("Data", 4242, undefined, undefined, undefined, undefined, "reg-old", THREAD, HOME);
+    state.queueMode = "enoent";
+    try {
+      await mention(r);
+      expect(state.queue).toHaveLength(1);
+      expect(state.console).toEqual([4242]);
+    } finally { r.destroy(); }
+  });
+
+  it("finding 2: a rejoin with codexThread null clears thread and home, and the next wake is typed", async () => {
+    const r = room();
+    r.join("Data", 4242, undefined, undefined, undefined, undefined, "reg-1", THREAD, HOME);
+    r.join("Data", 4242, undefined, undefined, undefined, undefined, "reg-1", null);
+    try {
+      expect(r.getAgent("Data")!.codexThread).toBeUndefined();
+      expect(r.getAgent("Data")!.codexHome).toBeUndefined();
+      await mention(r);
+      expect(state.queue).toEqual([]);
+      expect(state.console).toEqual([4242]);
+    } finally { r.destroy(); }
+  });
+
+  it("finding 3: both callbacks carry this room's registration", async () => {
+    const r = room();
+    r.join("Data", 0, undefined, undefined, undefined, undefined, "reg-11111111-2222-4333-8444-555555555555", THREAD);
+    try {
+      await mention(r);
+      const text = state.queue[0].text;
+      expect(text).toMatch(/\/api\/agent\/read\?sender=Data&since=\d+&registration=reg-11111111-2222-4333-8444-555555555555"/);
+      expect(text).toContain(`-d '{"sender":"Data","text":"YOUR_REPLY","registration":"reg-11111111-2222-4333-8444-555555555555"}'`);
+    } finally { r.destroy(); }
+  });
 
   it("accepted: queued once with thread and home, no keys, no submit check, nothing said", async () => {
     const r = room();

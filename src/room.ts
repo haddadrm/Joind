@@ -778,9 +778,19 @@ export class ChatRoom extends EventEmitter {
     // A handle-only registration is found by its handle (the read and send
     // routes match it before pid and pane); handles are term_<id>, URL-safe.
     const orcaParam = agent.orcaTerminal ? `&orcaTerminal=${encodeURIComponent(agent.orcaTerminal)}` : "";
+    // This room's registration of the member: the one identifier every
+    // registration has. A member known by no pid, pane or handle (a Codex
+    // session woken by its thread) whose name is registered in two rooms is
+    // otherwise ambiguous (403) on both callbacks. On a host serving a hosted
+    // wake this is the host's own registration, the one its mirror resolves.
+    // Only a well-formed id is written: the reply sits in single quotes.
+    const reg = memberRegistrations.get(agent);
+    const registration = reg && /^[A-Za-z0-9_-]{1,128}$/.test(reg) ? reg : undefined;
+    const regParam = registration ? `&registration=${registration}` : "";
     const pidBody = (agent.pid ? `,"pid":${agent.pid}` : "") +
       (agent.weztermPaneId != null && agent.weztermGui != null ? `,"paneId":${agent.weztermPaneId},"weztermGui":${agent.weztermGui}` : "") +
-      (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "");
+      (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "") +
+      (registration ? `,"registration":"${registration}"` : "");
     // Never past the mention: the read the prompt asks for starts before the
     // mention, whatever the stored cursor says. (A read returns at most its
     // limit of the latest messages, 50 by default, so a mention with more
@@ -796,7 +806,7 @@ export class ChatRoom extends EventEmitter {
       : (cursor ?? 0);
     return (
       `[joind] @${agent.name} mentioned by ${sender}${where}.${roleHint} ` +
-      `Read: curl -s "${base}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}" then ` +
+      `Read: curl -s "${base}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}${regParam}" then ` +
       `Reply: curl -s -X POST ${base}/api/agent/send -H "Content-Type: application/json" ` +
       `-d '{"sender":"${agent.name}","text":"YOUR_REPLY"${pidBody}}'`
     );

@@ -1727,7 +1727,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!threadParse.ok) { res.status(400).json({ error: threadParse.error }); return; }
     const homeParse = parseCodexHome((req.body as { codexHome?: unknown }).codexHome);
     if (!homeParse.ok) { res.status(400).json({ error: homeParse.error }); return; }
-    if (homeParse.value !== undefined && threadParse.value === undefined) { res.status(400).json({ error: "codexHome needs codexThread" }); return; }
+    if (homeParse.value !== undefined && typeof threadParse.value !== "string") { res.status(400).json({ error: "codexHome needs codexThread" }); return; }
 
     // Auto-detect PID/paneId if not provided (an Orca handle names its terminal already)
     let discoveredGui: number | undefined;

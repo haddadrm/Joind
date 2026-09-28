@@ -11,11 +11,13 @@ import { tmpdir } from "os";
 import { createServer } from "net";
 
 const injected: Array<{ pid: number; codexThread?: string; codexHome?: string; queueGuard: boolean }> = [];
+const prompts: string[] = [];
 vi.mock("../src/inject.js", async () => {
   const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
   return {
     ...actual,
-    inject: vi.fn(async (pid: number, _prompt: string, _pane?: number, _exe?: string, _env?: Record<string, string>, _b?: unknown, options?: import("../src/inject.js").InjectOptions) => {
+    inject: vi.fn(async (pid: number, prompt: string, _pane?: number, _exe?: string, _env?: Record<string, string>, _b?: unknown, options?: import("../src/inject.js").InjectOptions) => {
+      prompts.push(prompt);
       injected.push({ pid, codexThread: options?.codexThread, codexHome: options?.codexHome, queueGuard: typeof options?.queueGuard === "function" });
     }),
   };
@@ -66,6 +68,13 @@ async function waitFor<T>(what: string, fn: () => T | undefined | false, ms = 12
     if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, 50));
   }
+}
+/** The read URL and the reply body a wake prompt tells the agent to use. */
+function callbacks(prompt: string): { readQuery: string; replyBody: Record<string, unknown> } {
+  const read = /Read: curl -s "([^"]+)"/.exec(prompt);
+  const reply = /-d '(\{.*\})'$/.exec(prompt);
+  if (!read || !reply) throw new Error(`no callbacks in: ${prompt}`);
+  return { readQuery: new URL(read[1]).search, replyBody: JSON.parse(reply[1]) as Record<string, unknown> };
 }
 async function post(base: string, path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -138,5 +147,64 @@ describe("codexThread through the servers", { timeout: 20_000 }, () => {
     expect(s.status).toBe(200);
     const call = await waitFor("B's injector", () => injected[0]);
     expect(call).toEqual({ pid: PID, codexThread: THREAD, codexHome: home, queueGuard: true });
+    // Finding 3, hosted: both callbacks carry B's own registration (the one
+    // B's join answered), never A's id for the hosted member, and resolve on B.
+    const cb = callbacks(prompts[0]);
+    expect(cb.readQuery).toContain(`&registration=${r.json.registration as string}`);
+    expect(cb.replyBody.registration).toBe(r.json.registration);
+    const read = await fetch(`${B.baseUrl}/api/agent/read${cb.readQuery}`);
+    expect(read.status).toBe(200);
+    const reply = await post(B.baseUrl, "/api/agent/send", { ...cb.replyBody, text: "hosted reply" });
+    expect(reply.status).toBe(200);
+  });
+
+  // Codex review of b6da6f6, finding 2 (its probe, kept as is).
+  it("REVIEW: a same-pid REST rejoin can disable the queue route", async () => {
+    const local = A.manager.createConversation("opt-out").id;
+    const base = { name: "ReviewOptOut", pid: 999975, conversation: local };
+    await post(A.baseUrl, "/api/agent/join", { ...base, codexThread: THREAD, codexHome: home });
+    const kept: Array<{ mode: string; thread: unknown }> = [];
+    for (const [mode, extra] of [["omitted", {}], ["null", { codexThread: null }], ["empty", { codexThread: "" }]] as const) {
+      const r = await post(A.baseUrl, "/api/agent/join", { ...base, ...extra });
+      expect(r.status).toBe(200);
+      kept.push({ mode, thread: r.json.codexThread });
+    }
+    expect(kept.some((x) => x.thread === undefined)).toBe(true);
+  });
+
+  it("finding 2, the contract: omitted and blank keep the thread, null clears thread and home, and the next wake is typed", async () => {
+    const local = A.manager.createConversation("opt-out-contract").id;
+    const base = { name: "OptOut", pid: 999_969, conversation: local };
+    expect((await post(A.baseUrl, "/api/agent/join", { ...base, codexThread: THREAD, codexHome: home })).json).toMatchObject({ codexThread: THREAD, codexHome: home });
+    expect((await post(A.baseUrl, "/api/agent/join", base)).json).toMatchObject({ codexThread: THREAD, codexHome: home });
+    expect((await post(A.baseUrl, "/api/agent/join", { ...base, codexThread: "  " })).json).toMatchObject({ codexThread: THREAD, codexHome: home });
+    const cleared = await post(A.baseUrl, "/api/agent/join", { ...base, codexThread: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.json.codexThread).toBeUndefined();
+    expect(cleared.json.codexHome).toBeUndefined();
+    // A home with the clear is refused: a home needs a thread.
+    expect((await post(A.baseUrl, "/api/agent/join", { ...base, codexThread: null, codexHome: home })).status).toBe(400);
+    injected.length = 0;
+    A.manager.getRoom(local)!.send("Rami", "@OptOut ping");
+    const call = await waitFor("the injector", () => injected[0]);
+    expect(call).toMatchObject({ pid: 999_969, codexThread: undefined, codexHome: undefined });
+  });
+
+  // Codex review of b6da6f6, finding 3 (its probe, kept, with the reply added).
+  it("REVIEW: thread-only registrations receive a room-disambiguated callback", async () => {
+    const one = A.manager.createConversation("callback-one").id;
+    const two = A.manager.createConversation("callback-two").id;
+    await post(A.baseUrl, "/api/agent/join", { name: "ReviewTwin", pid: 0, conversation: one, codexThread: THREAD, codexHome: home });
+    await post(A.baseUrl, "/api/agent/join", { name: "ReviewTwin", pid: 0, conversation: two, codexThread: "0199aa11-2222-7333-8444-555566667777", codexHome: home });
+    const r = A.manager.getRoom(one)!;
+    const prompt = (r as unknown as { buildWakePrompt(sender: string, agent: unknown): string }).buildWakePrompt("Rami", r.getAgent("ReviewTwin"));
+    const cb = callbacks(prompt);
+    const result = await fetch(A.baseUrl + "/api/agent/read" + cb.readQuery);
+    expect(result.status).toBe(200);
+    const reply = await post(A.baseUrl, "/api/agent/send", { ...cb.replyBody, text: "twin reply" });
+    expect(reply.status).toBe(200);
+    // It landed in room one, the room whose prompt it was, not room two.
+    expect(A.manager.getRoom(one)!.read(undefined, 50).some((m) => m.text === "twin reply")).toBe(true);
+    expect(A.manager.getRoom(two)!.read(undefined, 50).some((m) => m.text === "twin reply")).toBe(false);
   });
 });

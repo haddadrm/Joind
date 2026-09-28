@@ -77,13 +77,27 @@ export function isCodexThread(value: string): boolean {
   return UUID.test(value);
 }
 
-/** A join's codexThread or codexHome: absent (undefined), a valid value, or
- *  an error. An empty or blank string counts as absent (an unset variable in
- *  a snippet). */
+/** A join's codexHome: absent (undefined), a valid value, or an error. An
+ *  empty or blank string counts as absent (an unset variable in a snippet). */
 export type JoinParse = { ok: true; value: string | undefined } | { ok: false; error: string };
 
-export function parseCodexThread(raw: unknown): JoinParse {
-  if (raw === undefined || raw === null) return { ok: true, value: undefined };
+/**
+ * A join's codexThread. Three meanings, on purpose:
+ *   omitted, "" or blank  not given: a rejoin from the same pid keeps the
+ *                         thread it had (an unset variable in a snippet must
+ *                         not switch the wake route silently);
+ *   null                  CLEAR: the member drops its thread and home and is
+ *                         woken by keystrokes again (the remedy for a Codex
+ *                         without `codex queue`);
+ *   a UUID                bind it.
+ * JSON null is the one value that says "explicitly none", and it is the
+ * convention room.join already uses for a pane or an Orca handle.
+ */
+export type ThreadParse = { ok: true; value: string | null | undefined } | { ok: false; error: string };
+
+export function parseCodexThread(raw: unknown): ThreadParse {
+  if (raw === null) return { ok: true, value: null };
+  if (raw === undefined) return { ok: true, value: undefined };
   if (typeof raw !== "string") return { ok: false, error: "codexThread must be a string" };
   const v = raw.trim();
   if (v === "") return { ok: true, value: undefined };

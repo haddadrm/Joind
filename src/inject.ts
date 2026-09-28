@@ -207,10 +207,12 @@ export interface InjectOptions {
   codexThread?: string;
   /** The target's CODEX_HOME for the queue route; the server's own when unset. */
   codexHome?: string;
-  /** Asked immediately before `codex queue` runs (the wake waited for its
-   *  locks, and the thread is part of the registration): anything but
-   *  "proceed" aborts the wake with WakeFallbackAborted, with nothing sent
-   *  and no keystroke fallback. Absent, fallbackGuard is asked. */
+  /** The queue binding: asked immediately before `codex queue` runs, and
+   *  again (before fallbackGuard) after a failure proven to precede any
+   *  handoff, before any keystroke fallback. Anything but "proceed" aborts
+   *  the wake with WakeFallbackAborted, with nothing typed. Never asked
+   *  after an ambiguous failure: that is unconfirmed whatever changed.
+   *  Absent, fallbackGuard is asked before the queue. */
   queueGuard?: () => "proceed" | "skip" | "moved";
   /** Orca terminal handle: when set, Orca's own input path is tried first
    *  (before WezTerm and the console). */
@@ -332,10 +334,16 @@ export async function inject(
       const msg = err.message.split("\n")[0];
       const keysPossible = pid > 0 || weztermPaneId != null || options.orcaTerminal != null;
       if (!keysPossible) throw err;
-      // The queue attempt took time: never type into a terminal the caller no longer vouches for.
-      const verdict = options.fallbackGuard?.() ?? "proceed";
+      // The queue attempt took time. The whole binding it started under
+      // (registration, thread, home, terminal identity, locks: the queue
+      // guard) must still hold, and so must the fallback guard, before any
+      // key is typed. Nothing was handed over, so a changed binding is not
+      // unconfirmed: the wake stops here and the caller wakes the member
+      // afresh under its new binding ("moved"), or not at all ("skip").
+      const bound = options.queueGuard?.() ?? "proceed";
+      const verdict = bound !== "proceed" ? bound : (options.fallbackGuard?.() ?? "proceed");
       if (verdict !== "proceed") {
-        console.log(`  [inject] codex queue failed (${msg.slice(0, 120)}); no keystroke fallback: target ${verdict === "skip" ? "left" : "moved"}`);
+        console.log(`  [inject] codex queue failed before handoff (${msg.slice(0, 120)}); no keystroke fallback: target ${verdict === "skip" ? "left" : "changed"}${verdict === "moved" ? ", waking it afresh" : ""}`);
         if (pid > 0) forgetTarget(pid);
         throw new WakeFallbackAborted(verdict);
       }

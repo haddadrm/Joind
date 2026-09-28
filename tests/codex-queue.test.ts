@@ -25,12 +25,14 @@ beforeEach(() => { vi.spyOn(console, "log").mockImplementation(() => undefined);
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe("codexThread is a session UUID and nothing else", () => {
-  it("accepts a UUID, lower-cased; blank and absent are no thread", () => {
+  it("accepts a UUID, lower-cased; blank and absent are no thread; null clears", () => {
     expect(parseCodexThread(THREAD)).toEqual({ ok: true, value: THREAD });
     expect(parseCodexThread(THREAD.toUpperCase())).toEqual({ ok: true, value: THREAD });
     expect(parseCodexThread(`  ${THREAD}  `)).toEqual({ ok: true, value: THREAD });
     expect(parseCodexThread(undefined)).toEqual({ ok: true, value: undefined });
-    expect(parseCodexThread(null)).toEqual({ ok: true, value: undefined });
+    // null is the explicit clear, not "absent" (review of b6da6f6, finding 2).
+    expect(parseCodexThread(null)).toEqual({ ok: true, value: null });
+    expect(parseCodexThread("")).toEqual({ ok: true, value: undefined });
     expect(parseCodexThread("   ")).toEqual({ ok: true, value: undefined });
   });
 

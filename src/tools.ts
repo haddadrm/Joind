@@ -460,8 +460,8 @@ export function registerTools(
         orcaTerminal: z.string().optional().describe(
           "Orca terminal handle, from $env:ORCA_TERMINAL_HANDLE; enables wake-ups inside Orca"
         ),
-        codexThread: z.string().optional().describe(
-          "Codex CLI only: your session UUID (the id at the end of your rollout file name). Mentions are then queued into your session with `codex queue` instead of typed."
+        codexThread: z.string().nullable().optional().describe(
+          "Codex CLI only: your session UUID ($env:CODEX_THREAD_ID, or the id at the end of your rollout file name). Mentions are then queued into your session with `codex queue` instead of typed. Omitted keeps what this pid had; null clears it (and codexHome), back to typed wakes."
         ),
         codexHome: z.string().optional().describe(
           "Codex CLI only, with codexThread: your CODEX_HOME when it is not the server's (absolute path)."
@@ -473,7 +473,7 @@ export function registerTools(
       if (!threadParse.ok) return { content: [{ type: "text" as const, text: `Could not join: ${threadParse.error}` }] };
       const homeParse = parseCodexHome(codexHome);
       if (!homeParse.ok) return { content: [{ type: "text" as const, text: `Could not join: ${homeParse.error}` }] };
-      if (homeParse.value !== undefined && threadParse.value === undefined) return { content: [{ type: "text" as const, text: "Could not join: codexHome needs codexThread" }] };
+      if (homeParse.value !== undefined && typeof threadParse.value !== "string") return { content: [{ type: "text" as const, text: "Could not join: codexHome needs codexThread" }] };
       // Determine which conversation to join
       let convId = conversation || manager.getActiveId();
       // A remote room ("<server>:<room>") resolves through its link first.
