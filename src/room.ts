@@ -10,7 +10,7 @@ import { inject, WakeFallbackAborted, type AfterTextRoute } from "./inject.js";
 import { cancelRoomListens } from "./listen.js";
 import { WakeCoordinator, type WakeFailureKind, type WakeOutcome } from "./wake.js";
 import { ORCA_SEND_TIMEOUT_MS } from "./orca.js";
-import { beginSubmitCheck, rolloutName, SUBMIT_CHECK_WINDOW_MS, type PendingSubmitCheck, type SubmitCheckOptions } from "./submit-check.js";
+import { beginSubmitCheck, rolloutName, SUBMIT_CHECK_LIVE_HORIZON_MS, type PendingSubmitCheck, type SubmitCheckOptions } from "./submit-check.js";
 
 // The base URL an injected prompt tells the woken agent to call back on.
 // Must be the address the server actually binds (single-interface): a
@@ -230,14 +230,17 @@ export function unidentifiedLine(name: string, reason: string, host?: string): s
   return `Typed into ${name}${on} but could not identify its terminal (${reason}); a Codex or Copilot session may need Enter by hand.`;
 }
 
-/** The honest line for a wake typed into a Codex session whose prompt never
- *  reached the Codex session store: the keys were written, the Enter was
- *  not taken. It names the pid, so whoever reads it knows which terminal
- *  needs the Enter, and the time the check actually waited (30 s, or longer
- *  when a busy session held the verdict back). */
-export function notSubmittedLine(name: string, pid: number, waitedMs: number = SUBMIT_CHECK_WINDOW_MS): string {
+/** The honest line for a wake typed into a Codex session whose prompt was
+ *  not seen in the Codex session store while every live session read idle.
+ *  Never a bare negative: rollouts idle beyond the live horizon were not
+ *  read, so submission is unconfirmed, and the line says how many. It names
+ *  the pid, so whoever reads it knows which terminal may need the Enter, and
+ *  the time the check actually waited (30 s, or longer when a busy session
+ *  held the verdict back). */
+export function notSubmittedLine(name: string, pid: number, waitedMs: number, excludedStale: number, horizonMs: number = SUBMIT_CHECK_LIVE_HORIZON_MS): string {
   const who = pid > 0 ? `${name} (pid ${pid})` : name;
-  return `Typed into ${who} but NOT submitted within ${Math.round(waitedMs / 1000)} s: no matching prompt in the Codex session store. The text is probably sitting in their input box; it needs Enter by hand.`;
+  const rollouts = `${excludedStale} rollout${excludedStale === 1 ? "" : "s"}`;
+  return `Typed into ${who} but no submitted prompt seen within ${Math.round(waitedMs / 1000)} s (unconfirmed: ${rollouts} idle over ${Math.round(horizonMs / 3_600_000)} h not checked). The text may be sitting in their input box; it may need Enter by hand.`;
 }
 
 /** What one run of the local wake machinery did. */
@@ -951,13 +954,14 @@ export class ChatRoom extends EventEmitter {
       console.log(`  [verify] ${name}: not verifiable (${r.reason}); nothing said`);
       return;
     }
-    console.log(`  [verify] ${name}: NOT submitted (pid ${typed.pid}, no matching prompt in ${typed.check.sessionsDirs.join(", ")} after ${Math.round(r.waitedMs / 1000)} s)${post ? "" : "; hosted wake, not reported to the home room"}`);
+    // The horizon's exclusions sit beside the verdict, so its one assumption is auditable.
+    console.log(`  [verify] ${name}: no submitted prompt seen, unconfirmed (pid ${typed.pid}, none in ${typed.check.sessionsDirs.join(", ")} after ${Math.round(r.waitedMs / 1000)} s; ${r.excludedStale} rollout(s) idle over ${Math.round(r.horizonMs / 3_600_000)} h not checked)${post ? "" : "; hosted wake, not reported to the home room"}`);
     if (!post) return;
     // Only for the terminal that was typed into: a member that left or moved
     // meanwhile is not told about a terminal it no longer has.
     const live = this.agents.get(name);
     if (this.destroyed || !live?.active || terminalIdentity(live) !== typed.identity) return;
-    this.addSystem(notSubmittedLine(name, typed.pid, r.waitedMs));
+    this.addSystem(notSubmittedLine(name, typed.pid, r.waitedMs, r.excludedStale, r.horizonMs));
   }
 
   /**

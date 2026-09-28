@@ -209,7 +209,7 @@ describe("a busy Codex session delays the verdict, never makes one", () => {
     const r = await check.verify();
     // Last busy at the 50 s poll (it grew, carrying the end marker), then at
     // least 15 s of grace: the first quiet poll past it is at 66 s.
-    expect(r).toEqual({ result: "not-submitted", waitedMs: 66_000 });
+    expect(r).toEqual({ result: "not-submitted", waitedMs: 66_000, excludedStale: 0, horizonMs: 86_400_000 });
   });
 
   it("a turn left open an hour ago, file written recently: never taken as idle", async () => {
@@ -227,7 +227,7 @@ describe("a busy Codex session delays the verdict, never makes one", () => {
     const clock = script(() => undefined);
     const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...clock });
     await new Promise((r) => setTimeout(r, 20));
-    expect(await check.verify()).toEqual({ result: "not-submitted", waitedMs: 30_000 });
+    expect(await check.verify()).toEqual({ result: "not-submitted", waitedMs: 30_000, excludedStale: 1, horizonMs: 86_400_000 });
   });
 
   it("still busy at the cap: gives up unverified, never NOT submitted", async () => {
@@ -285,11 +285,13 @@ describe("Codex review of 987a688: never NOT submitted without seeing everything
   it("P1 turn state: a turn marker beyond the backscan cap is unknown, so unverifiable", async () => {
     // Stated through the reason: unknown turn state is reported as such.
     const fx = fixture("no-marker-in-reach");
-    writeFileSync(fx.file, event("task_complete", fx.start - 9000) + output(fx.start - 1000, "y".repeat(40_000_000)));
-    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    // A 3 MB line against a backscan limit lowered to 2 MB (the real one is
+    // 32 MB; a small fixture keeps the suite light).
+    writeFileSync(fx.file, event("task_complete", fx.start - 9000) + output(fx.start - 1000, "y".repeat(3_000_000)));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock, backscanMaxBytes: 2 * 1024 * 1024 });
     await new Promise((r) => setTimeout(r, 40));
-    expect(await check.verify()).toMatchObject({ result: "unverifiable" });
-  }, 60_000);
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/shows no turn marker within reach\); also rollout-target\.jsonl: more than 2097152 bytes to read back/) });
+  });
 
   it("P2: a store that disappears before the first look is unverifiable", async () => {
     const fx = fixture("missing-store");
@@ -321,7 +323,102 @@ describe("Codex review of 987a688: never NOT submitted without seeing everything
     const fx = fixture("control");
     writeFileSync(fx.file, event("task_complete", fx.start - 1000));
     const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
-    expect(await check.verify()).toEqual({ result: "not-submitted", waitedMs: 30_000 });
+    expect(await check.verify()).toEqual({ result: "not-submitted", waitedMs: 30_000, excludedStale: 0, horizonMs: 86_400_000 });
+  });
+});
+
+// Codex review of 2d245bf (CHANGES REQUESTED): an oversized line was dropped
+// without a gap, so a real prompt inside a 5 MiB merged message read as
+// "not-submitted" at 30 s. Anything not read cannot support a negative.
+describe("Codex review of 2d245bf: what was not read cannot support a negative", () => {
+  const prompt = "[joind] @Scotty mentioned; since=2246&pid=27092";
+  const event = (type: string, at: number, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg", payload: { type, ...extra } }) + "\n";
+  const big = (at: number) => event("user_message", at, { message: prompt + "x".repeat(5 * 1024 * 1024) });
+  function fixture(name: string, onSleep: (elapsed: number, at: number, file: string) => void = () => undefined) {
+    const store = join(root, name, "sessions");
+    const folder = join(store, "2026", "09", "28");
+    mkdirSync(folder, { recursive: true });
+    const file = join(folder, "rollout-target.jsonl");
+    const start = Date.now();
+    let now = start;
+    const clock = { now: () => now, sleep: async (ms: number) => { now += ms; onSleep(now - start, now, file); await new Promise<void>((r) => setImmediate(r)); } };
+    return { store, file, start, clock };
+  }
+
+  it("P2 reverse path (Codex's case): the prompt inside a 5 MiB message is found (lines up to 32 MB are inspected whole)", async () => {
+    const fx = fixture("big-reverse");
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    appendFileSync(fx.file, big(fx.start + 1) + event("task_complete", fx.start + 2));
+    expect(await check.verify()).toMatchObject({ result: "submitted", file: fx.file });
+  });
+
+  it("P2 reverse path: the same message past the line limit is a gap, unverifiable, never not-submitted", async () => {
+    const fx = fixture("big-reverse-gap");
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock, maxLineBytes: 1024 * 1024 });
+    appendFileSync(fx.file, big(fx.start + 1) + event("task_complete", fx.start + 2));
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/a line longer than 1048576 bytes was not inspected/) });
+  });
+
+  it("P2 reverse path: an oversized line older than a line stamped before the start is no gap", async () => {
+    const fx = fixture("big-old");
+    writeFileSync(fx.file, event("user_message", fx.start - 9000, { message: "y".repeat(2 * 1024 * 1024) }) + event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock, maxLineBytes: 1024 * 1024 });
+    expect(await check.verify()).toMatchObject({ result: "not-submitted", waitedMs: 30_000 });
+  });
+
+  it("P2 forward path: a 5 MiB message appended during the check is found", async () => {
+    const fx = fixture("big-forward", (elapsed, at, file) => { if (elapsed === 2_000) appendFileSync(file, big(at) + event("task_complete", at + 1)); });
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    expect(await check.verify()).toMatchObject({ result: "submitted", file: fx.file, afterMs: 2_000 });
+  });
+
+  it("P2 forward path: a line past the limit, arriving across polls, is a gap, unverifiable, never not-submitted", async () => {
+    // A line that arrives whole in one read is inspected whole whatever its
+    // size; the limit is on a line held across reads. So it comes in halves.
+    let line = "";
+    const fx = fixture("big-forward-gap", (elapsed, at, file) => {
+      if (elapsed === 2_000) { line = big(at); appendFileSync(file, line.slice(0, 3 * 1024 * 1024)); }
+      if (elapsed === 4_000) appendFileSync(file, line.slice(3 * 1024 * 1024) + event("task_complete", at + 1));
+    });
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock, maxLineBytes: 1024 * 1024 });
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/not inspected/) });
+  });
+
+  it("P2 partial trailing line: an unfinished last line holds the verdict; unverifiable at the cap", async () => {
+    const fx = fixture("partial", (elapsed, at, file) => {
+      // Half a user message, never finished.
+      if (elapsed === 2_000) appendFileSync(file, JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg", payload: { type: "user_message", message: "half" } }).slice(0, 60));
+    });
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/rollout-target\.jsonl ends in an unfinished line/) });
+  });
+
+  it("P2 partial trailing line: one present at first contact and finished later with the prompt is found", async () => {
+    const line = event("user_message", Date.now() + 1_000, { message: prompt });
+    const fx = fixture("partial-then-whole", (elapsed, _at, file) => { if (elapsed === 4_000) appendFileSync(file, line.slice(40)); });
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    appendFileSync(fx.file, line.slice(0, 40));
+    expect(await check.verify()).toMatchObject({ result: "submitted", file: fx.file, afterMs: 4_000 });
+  });
+
+  it("condition (ii) and the limitation of record: a turn open for over 24 h, not growing, reads not-submitted with the exclusion counted; unverifiable with an Infinity horizon", async () => {
+    for (const strict of [false, true]) {
+      const fx = fixture(strict ? "25h-strict" : "25h-default");
+      writeFileSync(fx.file, event("task_started", fx.start - 25 * 3_600_000));
+      const old = new Date(fx.start - 25 * 3_600_000);
+      utimesSync(fx.file, old, old);
+      const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock, ...(strict ? { liveHorizonMs: Number.POSITIVE_INFINITY } : {}) });
+      const r = await check.verify();
+      if (strict) expect(r).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/has a turn open/) });
+      else expect(r).toEqual({ result: "not-submitted", waitedMs: 30_000, excludedStale: 1, horizonMs: 86_400_000 });
+    }
   });
 });
 
@@ -353,7 +450,7 @@ describe("the room says a typed Codex wake was not submitted, and only then", ()
     await vi.advanceTimersByTimeAsync(1000);
     await settle(200);
   }
-  const lines = (room: ChatRoom) => room.read(undefined, 100).map((m) => m.text).filter((t) => /NOT submitted/.test(t));
+  const lines = (room: ChatRoom) => room.read(undefined, 100).map((m) => m.text).filter((t) => /no submitted prompt seen/.test(t));
   /** The check does real file I/O: give the event loop turns until it has spoken. */
   async function verified(name: string): Promise<void> {
     const said = `[verify] ${name}:`;
@@ -382,13 +479,20 @@ describe("the room says a typed Codex wake was not submitted, and only then", ()
     try {
       // The previous wake's identical prompt, submitted an hour ago.
       rollout("2026/09/26", "scotty", userMessage(room["buildWakePrompt"]("Rami", room.getAgent("Scotty")!, undefined, 1), HOUR_AGO()));
+      // And one rollout idle for over 24 h: not read, and counted in the line.
+      const stale = rollout("2026/09/01", "stale");
+      const old = new Date(Date.now() - 25 * 3_600_000);
+      utimesSync(stale, old, old);
       await mention(room);
       await verified("Scotty");
       expect(state.console).toEqual([27092]);
       expect(lines(room)).toEqual([
-        "Typed into Scotty (pid 27092) but NOT submitted within 30 s: no matching prompt in the Codex session store. The text is probably sitting in their input box; it needs Enter by hand.",
+        "Typed into Scotty (pid 27092) but no submitted prompt seen within 30 s (unconfirmed: 1 rollout idle over 24 h not checked). The text may be sitting in their input box; it may need Enter by hand.",
       ]);
-      expect(lines(room)[0]).toBe(notSubmittedLine("Scotty", 27092));
+      expect(lines(room)[0]).toBe(notSubmittedLine("Scotty", 27092, 30_000, 1));
+      expect(notSubmittedLine("Scotty", 27092, 45_000, 5)).toMatch(/within 45 s \(unconfirmed: 5 rollouts idle over 24 h not checked\)/);
+      // The exclusion count sits beside the verdict in the log too.
+      expect(logs.some((l) => l.includes("[verify] Scotty: no submitted prompt seen, unconfirmed (pid 27092,") && l.endsWith("after 30 s; 1 rollout(s) idle over 24 h not checked)"))).toBe(true);
     } finally {
       room.destroy();
     }
@@ -472,7 +576,7 @@ describe("the room says a typed Codex wake was not submitted, and only then", ()
       const r = await room.wakeForPeer("Rami", "Curzon", "reg-local", `"ops" on y530`);
       expect(r).toMatchObject({ ok: true });
       await verified("Curzon");
-      expect(logs.some((l) => /\[verify\] Curzon: NOT submitted \(pid 999991, .*\); hosted wake, not reported to the home room$/.test(l))).toBe(true);
+      expect(logs.some((l) => /\[verify\] Curzon: no submitted prompt seen, unconfirmed \(pid 999991, .*\); hosted wake, not reported to the home room$/.test(l))).toBe(true);
       expect(lines(room)).toEqual([]);
     } finally {
       room.destroy();

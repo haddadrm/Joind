@@ -46,8 +46,13 @@
  * idle (its last turn marker a task_complete or turn_aborted, or the whole
  * file read with no turn in it), nothing written for 15 s, at least 30 s
  * since the keys, and every store and file read without a gap the whole
- * time. A turn left open (task_started last), a marker too far back to
- * find, or a read that failed never yields "NOT submitted": the check keeps
+ * time. Anything not read cannot support "NOT submitted": a line longer
+ * than SUBMIT_CHECK_MAX_LINE_BYTES (32 MB; lines up to it are held and
+ * inspected whole, so a huge merged message is still searched) is a gap on
+ * either read path, and bytes not yet read or an unfinished last line hold
+ * the verdict back until they are whole. A turn left open (task_started
+ * last), a marker too far back to find, or a read that failed never yields
+ * "NOT submitted": the check keeps
  * looking up to a 10 min cap, then says "unverifiable" (logged only). With
  * no pid-to-file mapping this is judged over every live rollout, so a busy
  * neighbour delays the verdict or makes it unverifiable, never negative.
@@ -57,7 +62,13 @@
  * not read, unless it grows during the check. Without it the check could
  * never say anything: on the Y530 on 28 Sep 2026 five rollouts in each
  * store ended on a turn left open more than 24 h earlier (sessions ended
- * mid-turn).
+ * mid-turn). It is a policy, not proof, and it has a known counterexample
+ * (Codex review of 2d245bf): a session whose turn has been open for over
+ * 24 h without writing (waiting for an approval, or a silent tool) reads as
+ * idle, so a wake queued behind it can be reported not seen; with
+ * liveHorizonMs Infinity the same case is unverifiable. So the negative
+ * result carries how many rollouts the horizon left unread, and the room
+ * words it as unconfirmed, never as a bare "NOT submitted".
  *
  * Which store: the server's CODEX_HOME need not be the target's (the Y530's
  * server environment named an Orca runtime home, while a Codex started
@@ -93,12 +104,17 @@ export const SUBMIT_CHECK_BACKSCAN_MAX_BYTES = 32 * 1024 * 1024;
 const BACKSCAN_CHUNK = 64 * 1024;
 /** The most bytes read forwards from one file per poll; the rest waits for the next. */
 const MAX_READ_PER_POLL = 8 * 1024 * 1024;
-/** A single line longer than this (a huge tool output) is skipped, not held. */
-const MAX_LINE_BYTES = 4 * 1024 * 1024;
+/** The longest line held and inspected whole. A longer one (a huge tool
+ *  output, or a huge merged message) is not inspected, and that is a gap:
+ *  what was not read cannot support "NOT submitted". */
+export const SUBMIT_CHECK_MAX_LINE_BYTES = 32 * 1024 * 1024;
 
 export type SubmitCheckResult =
   | { result: "submitted"; file: string; afterMs: number }
-  | { result: "not-submitted"; waitedMs: number }
+  /** Not seen, every live rollout seen idle and fully read. Unconfirmed all
+   *  the same: `excludedStale` rollouts were not read because they had not
+   *  been written within `horizonMs` (see the file header). */
+  | { result: "not-submitted"; waitedMs: number; excludedStale: number; horizonMs: number }
   | { result: "unverifiable"; reason: string };
 
 export interface SubmitCheckOptions {
@@ -109,6 +125,10 @@ export interface SubmitCheckOptions {
   graceMs?: number;
   capMs?: number;
   liveHorizonMs?: number;
+  /** SUBMIT_CHECK_MAX_LINE_BYTES and SUBMIT_CHECK_BACKSCAN_MAX_BYTES when
+   *  unset; lowered by tests, to keep their fixtures small. */
+  maxLineBytes?: number;
+  backscanMaxBytes?: number;
   /** Injectable for tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -232,26 +252,15 @@ type TurnState = "open" | "ended" | "none" | "unknown";
 /** Where forward reading of one file stands, and what it says. */
 interface FileCursor {
   offset: number;
-  /** The unfinished last line of the previous read. */
-  carry: Buffer;
-  /** Discard up to and including the next newline (a line outgrew MAX_LINE_BYTES). */
+  /** The unfinished last line so far, in pieces (joined once, when it ends). */
+  carry: Buffer[];
+  carryLen: number;
+  /** Discard up to and including the next newline: a line outgrew the
+   *  limit and was not inspected (already noted as a gap). */
   skipToNewline: boolean;
   turn: TurnState;
   /** The size last seen: growth since is activity. */
   lastSize: number;
-}
-
-/** Split `data` on newlines into every part, the last one after the final newline. */
-function parts(data: Buffer): Buffer[] {
-  const out: Buffer[] = [];
-  let from = 0;
-  let nl: number;
-  while ((nl = data.indexOf(0x0a, from)) >= 0) {
-    out.push(data.subarray(from, nl));
-    from = nl + 1;
-  }
-  out.push(data.subarray(from));
-  return out;
 }
 
 async function readExactly(fh: FileHandle, pos: number, len: number): Promise<Buffer> {
@@ -264,8 +273,8 @@ async function readExactly(fh: FileHandle, pos: number, len: number): Promise<Bu
 /**
  * Begin a check for `prompt` now, just before the first key is typed. No
  * I/O happens here: the clock starts, nothing else. `verify()` then looks
- * every pollMs until the prompt is found, "NOT submitted" is proven (see the
- * file header), or the cap is reached.
+ * every pollMs until the prompt is found, "NOT submitted" is established
+ * (see the file header), or the cap is reached.
  */
 export function beginSubmitCheck(prompt: string, opts: SubmitCheckOptions = {}): PendingSubmitCheck {
   const now = opts.now ?? Date.now;
@@ -275,6 +284,8 @@ export function beginSubmitCheck(prompt: string, opts: SubmitCheckOptions = {}):
   const graceMs = opts.graceMs ?? SUBMIT_CHECK_GRACE_MS;
   const capMs = opts.capMs ?? SUBMIT_CHECK_CAP_MS;
   const horizonMs = opts.liveHorizonMs ?? SUBMIT_CHECK_LIVE_HORIZON_MS;
+  const maxLine = opts.maxLineBytes ?? SUBMIT_CHECK_MAX_LINE_BYTES;
+  const backscanMax = opts.backscanMaxBytes ?? SUBMIT_CHECK_BACKSCAN_MAX_BYTES;
   const dirs = opts.sessionsDirs ?? codexSessionsDirs();
   const startedAt = now();
   const needle = prompt.trim();
@@ -282,6 +293,7 @@ export function beginSubmitCheck(prompt: string, opts: SubmitCheckOptions = {}):
   /** The first thing that went unseen; once set, no negative verdict. */
   let gap: string | null = null;
   const noteGap = (why: string): void => { gap ??= why; };
+  const tooLong = (file: string): string => `${basename(file)}: a line longer than ${maxLine} bytes was not inspected`;
 
   /**
    * First contact with `file` (`size` bytes now): read it backwards until a
@@ -290,83 +302,129 @@ export function beginSubmitCheck(prompt: string, opts: SubmitCheckOptions = {}):
    * the start holds the prompt; otherwise the cursor to read on from.
    */
   async function backscan(fh: FileHandle, file: string, size: number): Promise<true | FileCursor> {
-    // The end of the last complete line; an unfinished one is read forwards later.
+    // The end of the last complete line. What follows it is an unfinished
+    // line, left to the forward reader, which holds any negative verdict
+    // back until it ends.
     let end = 0;
-    let skipFirst = false;
     for (let p = size; p > 0;) {
-      if (size - p >= MAX_LINE_BYTES) { end = size; skipFirst = true; break; } // one huge unfinished line
+      if (size - p >= maxLine) {
+        // An unfinished line already too long to hold: never inspected, and
+        // nothing before it was reached.
+        noteGap(tooLong(file));
+        return { offset: size, carry: [], carryLen: 0, skipToNewline: true, turn: "unknown", lastSize: size };
+      }
       const len = Math.min(BACKSCAN_CHUNK, p);
       p -= len;
       const i = (await readExactly(fh, p, len)).lastIndexOf(0x0a);
       if (i >= 0) { end = p + i + 1; break; }
     }
-    if (skipFirst) noteGap(`${basename(file)}: an unfinished line longer than ${MAX_LINE_BYTES} bytes`);
-    // Backwards over [0, end), whole lines only, newest first. `carry` is the
-    // head fragment of the region already read: the end of a line that
-    // starts in an earlier chunk.
-    let pos = end;
-    let carry = Buffer.alloc(0);
-    let dropLast = false;
     let boundary = false;
     let turn: "open" | "ended" | null = null;
+    /** One whole line, newest first: "match", "stop" (boundary and marker
+     *  both seen) or "go". */
+    const look = (line: string): "match" | "stop" | "go" => {
+      const at = lineTime(line);
+      if (!Number.isFinite(at)) return "go";
+      if (at >= startedAt) {
+        if (lineSubmitsPrompt(line, needle, startedAt)) return "match";
+      } else boundary = true;
+      if (turn === null) {
+        const m = turnMarker(line);
+        if (m) turn = m === "start" ? "open" : "ended";
+      }
+      return boundary && turn !== null ? "stop" : "go";
+    };
+    // A line too long to hold is skipped whole. It is a gap unless a line
+    // after it was already stamped before the start (then it is older still:
+    // rollout lines are appended in time order).
+    const skipped = (): void => { if (!boundary) noteGap(tooLong(file)); };
+    // Backwards over [0, end), whole lines only, newest first. `pieces` is
+    // the end of a line whose start lies in an earlier chunk.
+    let pos = end;
+    let pieces: Buffer[] = [];
+    let piecesLen = 0;
+    let dropping = false;
     scan: while (pos > 0) {
-      if (end - pos >= SUBMIT_CHECK_BACKSCAN_MAX_BYTES) break;
+      if (end - pos >= backscanMax) break;
       const len = Math.min(BACKSCAN_CHUNK, pos);
       pos -= len;
-      const ps = parts(Buffer.concat([await readExactly(fh, pos, len), carry]));
-      // The last part is a whole line (or empty at `end`), the first part is
-      // whole only at the file's head.
-      const lowest = pos === 0 ? 0 : 1;
-      for (let i = ps.length - 1; i >= lowest; i--) {
-        if (i === ps.length - 1 && dropLast) { dropLast = false; continue; }
-        const line = ps[i].toString("utf8");
-        const at = lineTime(line);
-        if (!Number.isFinite(at)) continue;
-        if (at >= startedAt) {
-          if (lineSubmitsPrompt(line, needle, startedAt)) return true;
-        } else boundary = true;
-        if (turn === null) {
-          const m = turnMarker(line);
-          if (m) turn = m === "start" ? "open" : "ended";
+      const chunk = await readExactly(fh, pos, len);
+      let hi = len;
+      for (;;) {
+        const nl = hi > 0 ? chunk.lastIndexOf(0x0a, hi - 1) : -1;
+        if (nl < 0) break;
+        // A whole line: chunk[nl + 1, hi) then the pieces after it.
+        if (dropping) {
+          dropping = false;
+          skipped();
+        } else {
+          const seg = chunk.subarray(nl + 1, hi);
+          const r = look((pieces.length > 0 ? Buffer.concat([seg, ...pieces]) : seg).toString("utf8"));
+          if (r === "match") return true;
+          if (r === "stop") break scan;
         }
-        if (boundary && turn !== null) break scan;
+        pieces = [];
+        piecesLen = 0;
+        hi = nl;
       }
-      carry = pos === 0 ? Buffer.alloc(0) : Buffer.from(ps[0]);
-      if (carry.length > MAX_LINE_BYTES) { carry = Buffer.alloc(0); dropLast = true; }
+      // chunk[0, hi) belongs to a line that starts earlier (or is the file's first).
+      if (!dropping && hi > 0) {
+        pieces.unshift(chunk.subarray(0, hi));
+        piecesLen += hi;
+        if (piecesLen > maxLine) { pieces = []; piecesLen = 0; dropping = true; }
+      }
+      if (pos === 0) {
+        if (dropping) skipped();
+        else if (piecesLen > 0) {
+          if (look(Buffer.concat(pieces).toString("utf8")) === "match") return true;
+        }
+      }
     }
     const whole = pos === 0;
     // Lines since the start that the backscan could not reach went unseen.
-    if (!boundary && !whole) noteGap(`${basename(file)}: more than ${SUBMIT_CHECK_BACKSCAN_MAX_BYTES} bytes to read back`);
-    return {
-      offset: end, carry: Buffer.alloc(0), skipToNewline: skipFirst,
-      turn: turn ?? (whole ? "none" : "unknown"), lastSize: size,
-    };
+    if (!boundary && !whole) noteGap(`${basename(file)}: more than ${backscanMax} bytes to read back`);
+    return { offset: end, carry: [], carryLen: 0, skipToNewline: false, turn: turn ?? (whole ? "none" : "unknown"), lastSize: size };
   }
 
-  /** Read what `file` gained since the last look, up to `size`: true when it
-   *  holds the prompt. Turn markers on the way update the cursor. */
-  async function readForward(fh: FileHandle, size: number, cur: FileCursor): Promise<boolean> {
+  /** Read what `file` gained since the last look, up to `size` (at most
+   *  MAX_READ_PER_POLL of it): true when it holds the prompt. Turn markers
+   *  on the way update the cursor. */
+  async function readForward(fh: FileHandle, file: string, size: number, cur: FileCursor): Promise<boolean> {
     if (size <= cur.offset) return false;
     const len = Math.min(size - cur.offset, MAX_READ_PER_POLL);
     const buf = await readExactly(fh, cur.offset, len);
     cur.offset += len;
-    const ps = parts(cur.carry.length > 0 ? Buffer.concat([cur.carry, buf]) : buf);
-    const rest = ps.pop() ?? Buffer.alloc(0);
-    for (const raw of ps) {
-      if (cur.skipToNewline) { cur.skipToNewline = false; continue; }
-      const line = raw.toString("utf8");
+    let from = 0;
+    let nl: number;
+    while ((nl = buf.indexOf(0x0a, from)) >= 0) {
+      const seg = buf.subarray(from, nl);
+      from = nl + 1;
+      if (cur.skipToNewline) { cur.skipToNewline = false; continue; } // its gap is already noted
+      const whole = cur.carry.length > 0 ? Buffer.concat([...cur.carry, seg]) : seg;
+      cur.carry = [];
+      cur.carryLen = 0;
+      const line = whole.toString("utf8");
       if (lineSubmitsPrompt(line, needle, startedAt)) return true;
       const m = turnMarker(line);
       if (m) cur.turn = m === "start" ? "open" : "ended";
     }
-    if (cur.skipToNewline || rest.length > MAX_LINE_BYTES) {
-      cur.carry = Buffer.alloc(0);
-      cur.skipToNewline = true;
-    } else {
-      cur.carry = Buffer.from(rest);
+    const rest = buf.subarray(from);
+    if (!cur.skipToNewline && rest.length > 0) {
+      cur.carry.push(rest);
+      cur.carryLen += rest.length;
+      if (cur.carryLen > maxLine) {
+        cur.carry = [];
+        cur.carryLen = 0;
+        cur.skipToNewline = true;
+        noteGap(tooLong(file));
+      }
     }
     return false;
   }
+
+  /** Bytes read but not yet part of a whole line, or not read yet: the file
+   *  is not fully observed, so no negative verdict may rest on it. */
+  const pendingIn = (cur: FileCursor): boolean => cur.offset < cur.lastSize || cur.carryLen > 0 || cur.skipToNewline;
 
   return {
     startedAt,
@@ -393,6 +451,8 @@ export function beginSubmitCheck(prompt: string, opts: SubmitCheckOptions = {}):
       let lastBusyAt: number | undefined;
       for (;;) {
         let busy = false;
+        /** Rollouts left unread this poll by the live horizon. */
+        let excludedStale = 0;
         const files: string[] = [];
         for (const dir of stores) {
           try {
@@ -412,8 +472,9 @@ export function beginSubmitCheck(prompt: string, opts: SubmitCheckOptions = {}):
           let fh: FileHandle | undefined;
           try {
             const st = await stat(file);
-            // Not written within the live horizon and never read: no live session.
-            if (!cur && st.mtimeMs < startedAt - horizonMs) continue;
+            // Not written within the live horizon and never read: taken as
+            // no live session (the one inference from silence), and counted.
+            if (!cur && st.mtimeMs < startedAt - horizonMs) { excludedStale++; continue; }
             fh = await open(file, "r");
             if (!cur) {
               const first = await backscan(fh, file, st.size);
@@ -424,27 +485,28 @@ export function beginSubmitCheck(prompt: string, opts: SubmitCheckOptions = {}):
               busy = true; // written since the last look
             }
             cur.lastSize = st.size;
-            if (await readForward(fh, st.size, cur)) return { result: "submitted", file, afterMs: now() - typedAt };
+            if (await readForward(fh, file, st.size, cur)) return { result: "submitted", file, afterMs: now() - typedAt };
           } catch (err) {
             noteGap(`${basename(file)} could not be read (${errText(err)})`);
           } finally {
             await fh?.close().catch(() => undefined);
           }
-          if (cur && (cur.turn === "open" || cur.turn === "unknown")) busy = true;
+          if (cur && (cur.turn === "open" || cur.turn === "unknown" || pendingIn(cur))) busy = true;
         }
         const t = now();
         const waited = t - typedAt;
         if (busy) lastBusyAt = t;
         const quietFor = lastBusyAt === undefined ? Number.POSITIVE_INFINITY : t - lastBusyAt;
         if (!busy && waited >= windowMs && quietFor >= graceMs) {
-          // Every live session seen idle and quiet: negative, unless something went unseen.
+          // Every live session seen idle, quiet and fully read: negative,
+          // unless something went unseen.
           if (gap) return { result: "unverifiable", reason: `not seen, but not everything could be read: ${gap}` };
-          return { result: "not-submitted", waitedMs: waited };
+          return { result: "not-submitted", waitedMs: waited, excludedStale, horizonMs };
         }
         if (waited >= capMs) {
           const pending = [...cursors.entries()]
-            .filter(([, c]) => c.turn === "open" || c.turn === "unknown")
-            .map(([f, c]) => `${basename(f)} ${c.turn === "open" ? "has a turn open" : "shows no turn marker within reach"}`);
+            .filter(([, c]) => c.turn === "open" || c.turn === "unknown" || pendingIn(c))
+            .map(([f, c]) => `${basename(f)} ${c.turn === "open" ? "has a turn open" : c.turn === "unknown" ? "shows no turn marker within reach" : "ends in an unfinished line"}`);
           const why = pending.slice(0, 3).join("; ") || "sessions kept writing";
           return { result: "unverifiable", reason: `not seen in ${Math.round(waited / 1000)} s and no idle state was observed (${why})${gap ? `; also ${gap}` : ""}` };
         }
