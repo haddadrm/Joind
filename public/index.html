@@ -6,7 +6,10 @@
   <title>Joind</title>
   <link rel="stylesheet" href="style.css?v=21">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Vendored and pinned (no CDN): marked renders Markdown, DOMPurify sanitizes it (public/sanitize.js). -->
+  <script src="vendor/marked-17.0.5.umd.js"></script>
+  <script src="vendor/purify-3.4.16.min.js"></script>
+  <script src="sanitize.js?v=21"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>

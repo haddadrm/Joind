@@ -1147,24 +1147,57 @@ function renderChoices(container, msg) {
   }
 }
 
+// Message bodies are Markdown. marked keeps raw HTML, so its output always
+// goes through the sanitizer (public/sanitize.js, DOMPurify with an
+// allowlist) before it reaches the DOM; without both, the text is shown as
+// plain text. Mentions and #N links are added afterwards as DOM nodes.
 function renderContent(parent, text, conv) {
   if (!text) { parent.textContent = ''; return; }
-  if (typeof marked !== 'undefined') {
+  if (typeof marked !== 'undefined' && typeof window.joindSanitizeHtml === 'function') {
     // Ensure real newlines (WebSocket/JSON may deliver literal \n)
     text = text.replace(/\\n/g, '\n');
-    var html = marked.parse(text);
-    html = html.replace(/@(\w[\w-]*)/g, function(match, name) {
-      var c = getSenderColor(name);
-      var safe = name.replace(/[<>"'&]/g, function(ch) {
-        return {'<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;",'&':'&amp;'}[ch] || ch;
-      });
-      return '<span class="mention" style="color:' + c + ';background:' + c + '20">@' + safe + '</span>';
-    });
-    parent.innerHTML = html;
+    parent.innerHTML = window.joindSanitizeHtml(marked.parse(text));
+    decorateMentions(parent);
   } else {
+    parent.textContent = '';
     renderTextWithMentions(parent, text);
   }
   linkifyMessageRefs(parent, conv || currentConvId());
+}
+
+// @name in rendered text becomes a coloured mention span, built with
+// textContent. Code, pre and links are left as they are.
+var MENTION_SKIP = { A: true, CODE: true, PRE: true, KBD: true };
+function decorateMentions(root) {
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: function(node) {
+      for (var p = node.parentNode; p && p !== root; p = p.parentNode) {
+        if (p.nodeType === 1 && (MENTION_SKIP[p.nodeName] || (p.classList && p.classList.contains('mention')))) return NodeFilter.FILTER_REJECT;
+      }
+      return node.nodeValue && node.nodeValue.indexOf('@') >= 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    }
+  });
+  var nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(function(node) {
+    var parts = node.nodeValue.split(/(@\w[\w-]*)/g);
+    if (parts.length < 2) return;
+    var frag = document.createDocumentFragment();
+    parts.forEach(function(part) {
+      if (/^@\w/.test(part)) {
+        var c = getSenderColor(part.slice(1));
+        var span = document.createElement('span');
+        span.className = 'mention';
+        span.style.color = c;
+        span.style.background = c + '20';
+        span.textContent = part;
+        frag.appendChild(span);
+      } else if (part) {
+        frag.appendChild(document.createTextNode(part));
+      }
+    });
+    node.parentNode.replaceChild(frag, node);
+  });
 }
 
 function renderTextWithMentions(parent, text) {
