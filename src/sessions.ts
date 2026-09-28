@@ -264,8 +264,16 @@ export function onMessage(sender: string, room: ChatRoom): void {
   }
 }
 
-export function getActiveSessions(): Session[] {
-  return [...activeSessions.values()];
+/** A session as the API answers it: everything but its live timer handle,
+ *  which is circular and cannot be serialized (it made every answer about
+ *  an active session a 500). */
+export function sessionView(s: Session): Omit<Session, "timeoutHandle"> {
+  const { timeoutHandle: _timer, ...rest } = s;
+  return rest;
+}
+
+export function getActiveSessions(): Array<Omit<Session, "timeoutHandle">> {
+  return [...activeSessions.values()].map(sessionView);
 }
 
 export function cancelSession(id: number, room: ChatRoom): boolean {

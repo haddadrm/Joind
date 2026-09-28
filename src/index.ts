@@ -57,6 +57,7 @@ import {
   onMessage as sessionOnMessage,
   getActiveSessions,
   cancelSession,
+  sessionView,
 } from "./sessions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1341,12 +1342,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/message/:id/edit", express.json(), (req, res) => {
+    // The token first: without it, nothing about the active room is revealed.
+    if (!requireWebToken(req, res)) return;
     const room = activeRoom(res);
     if (!room) return;
     // Edits of a remote room are made on its home server (gate round 1, finding 10).
     if (room instanceof MirrorRoom) { res.status(400).json({ error: "Messages in a remote room are edited on its home server" }); return; }
-    const { sender, newText, token } = req.body as { sender?: string; newText?: string; token?: string };
-    if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
+    const { sender, newText } = req.body as { sender?: string; newText?: string };
     const messageId = Number(req.params.id);
     if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
     if (!sender || !newText) { res.status(400).json({ error: "sender and newText required" }); return; }
@@ -1409,10 +1411,11 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   // --- Inline decision choices ---
   app.post("/api/message/:id/choose", express.json(), (req, res) => {
+    // The token first: without it, nothing about the active room is revealed.
+    if (!requireWebToken(req, res)) return;
     const room = activeRoom(res);
     if (!room) return;
-    const { value, by, token } = req.body as { value?: string; by?: string; token?: string };
-    if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
+    const { value, by } = req.body as { value?: string; by?: string };
     const messageId = Number(req.params.id);
     if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
     if (!value || !by) { res.status(400).json({ error: "value and by required" }); return; }
@@ -1614,9 +1617,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/select", express.json(), async (req, res) => {
-    const { id, token } = (req.body ?? {}) as { id?: string; token?: string };
+    if (!requireWebToken(req, res)) return;
+    const { id } = (req.body ?? {}) as { id?: string };
     if (!id) { res.status(400).json({ error: "id required" }); return; }
-    if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     // A remote room the link has not listed yet is looked up once.
     if (linkRegistry.isRemoteId(id)) await linkRegistry.prepare(id);
     const ok = manager.setActive(id);
@@ -2215,7 +2218,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const roomId = manager.getActiveId();
     const session = startSession(templateId, cast, goal ?? "", startedBy ?? "human", room, (name) => (roomId ? cursorStore.cursorFor(roomId, name, room.highWaterId()) : 0));
     if (!session) { res.status(500).json({ error: "Failed" }); return; }
-    res.json(session);
+    res.json(sessionView(session));
   });
 
   app.post("/api/session/cancel", express.json(), (req, res) => {

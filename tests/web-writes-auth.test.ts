@@ -7,10 +7,28 @@
  * registration, as the open /mcp tools do).
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { createServer } from "net";
+
+// No wake may reach a terminal: keystroke injection is a no-op here.
+vi.mock("../src/inject.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
+  const target = await vi.importActual<typeof import("../src/target.js")>("../src/target.js");
+  return {
+    ...actual,
+    inject: (pid: number, text: string, pane?: number, exe?: string, env?: Record<string, string>, _b?: unknown, options?: import("../src/inject.js").InjectOptions) =>
+      actual.inject(pid, text, pane, exe, env, {
+        orca: async () => undefined,
+        wezterm: async () => { throw new Error("no wezterm in this test"); },
+        windows: async () => { throw new Error("no console in this test"); },
+        unix: async () => undefined,
+        platform: "linux",
+        classify: async () => target.CODEX_PLAN,
+      }, options),
+  };
+});
 
 vi.mock("../src/terminals.js", async () => {
   const actual = await vi.importActual<typeof import("../src/terminals.js")>("../src/terminals.js");
@@ -72,6 +90,14 @@ const GUARDED: Array<{ method: string; path: string; body?: Record<string, unkno
   { method: "DELETE", path: "/api/crew/anyone" },
   { method: "POST", path: "/api/launch", body: { crewName: "intruder", harness: "claude" } },
   { method: "POST", path: "/api/launch/abc/inject" },
+  // Guarded before this lane (their token checks are kept, and tested here too).
+  { method: "POST", path: "/api/web/register", body: { name: "Mallory" } },
+  { method: "POST", path: "/api/send", body: { sender: "Mallory", text: "owned", conversation: "ROOM" } },
+  { method: "POST", path: "/api/dm/send", body: { to: "Kira", text: "owned" } },
+  { method: "POST", path: "/api/message/1/edit", body: { sender: "Kira", newText: "owned" } },
+  { method: "POST", path: "/api/message/1/choose", body: { value: "a", by: "Mallory" } },
+  { method: "POST", path: "/api/conversations/select", body: { id: "ROOM" } },
+  { method: "POST", path: "/api/pending/delete", body: { conversation: "ROOM", clientId: "c1" } },
 ];
 
 describe("web writes require the web token", { timeout: 30_000 }, () => {
@@ -122,6 +148,10 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     expect(S.manager.listConversations().map((c) => `${c.id}:${c.name}:${String(c.starred)}`).sort()).toEqual(convsBefore);
     expect(S.manager.getRoom(room)!.getAgent("Intruder")).toBeUndefined();
     expect(S.manager.listConversations().some((c) => c.name === "intruder-room" || c.name === "imp")).toBe(false);
+    expect(S.manager.getRoom(room)!.getMessageById(1)!.text).toBe("ops 1");
+    // Resolve is two-path: without a token it is the agent path (as MCP
+    // chat_resolve); a wrong web token is refused.
+    expect((await call(S.baseUrl, "POST", "/api/message/1/resolve", { token: "f".repeat(64), conversation: room })).status).toBe(403);
   });
 
   it("answers /api/send without a token the same for a real and an unknown room", async () => {
@@ -218,27 +248,102 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     expect((await call(S.baseUrl, "POST", "/api/message/1/tag", { tag: "status" })).status).toBe(200);
     expect((await call(S.baseUrl, "POST", "/api/state", { conversation: room, key: "k", value: "v" })).status).toBe(200);
   });
-  // Last: with the token these calls act (a room is deleted, a crew entry
-  // written), so they run on a scratch conversation after everything else.
-  it("lets every guarded route past the guard with the token", async () => {
-    const scratch = S.manager.createConversation("scratch").id;
-    for (let n = 1; n <= 3; n++) S.manager.getRoom(scratch)!.send("Kira", `scratch ${n}`);
-    S.manager.setActive(scratch);
-    const results: string[] = [];
-    const answers = new Map<string, Answer>();
-    for (const r of GUARDED) {
-      const body = r.body === undefined ? undefined : JSON.parse(JSON.stringify(r.body).replace(/"ROOM"/g, JSON.stringify(scratch))) as Record<string, unknown>;
-      const a = await call(S.baseUrl, r.method, r.path, body, { "X-Joind-Token": WEB });
-      results.push(`${r.method} ${r.path} ${a.status}`);
-      answers.set(`${r.method} ${r.path}`, a);
-      expect(a.status, `${r.method} ${r.path} with the token`).not.toBe(403);
-      expect(a.status, `${r.method} ${r.path} with the token`).toBeLessThan(500);
-    }
-    // The token made the writes land: the delete (first, in the active
-    // scratch room) removed its message, and the conversation delete went through.
-    expect(answers.get("POST /api/messages/delete")).toEqual({ status: 200, json: { ok: true } });
-    expect(answers.get("POST /api/conversations/delete")?.status).toBe(200);
-    expect(S.manager.listConversations().some((c) => c.id === scratch)).toBe(false);
-    expect(results.length).toBe(GUARDED.length);
+  // Last: with the token each guarded write is made for real and checked,
+  // on conversations of its own. Two cannot succeed safely in a test (a real
+  // launch starts an agent process; an undelivered-message delete needs a
+  // remote room), so they must reach their own validation instead.
+  it("lets each guarded write succeed with the token, and the write lands", async () => {
+    const h = { "X-Joind-Token": WEB };
+    // Routes guarded before this lane read the token from the body; the page sends both.
+    const send = (method: string, path: string, body?: Record<string, unknown>): Promise<Answer> =>
+      call(S.baseUrl, method, path, body === undefined ? undefined : { ...body, token: WEB }, h);
+    const ok = async (method: string, path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const a = await send(method, path, body);
+      expect(a.status, `${method} ${path}: ${JSON.stringify(a.json)}`).toBe(200);
+      return (a.json ?? {}) as Record<string, unknown>;
+    };
+    const seen = new Set<string>();
+    const done = (method: string, path: string): void => { seen.add(`${method} ${path}`); };
+
+    // Nobody registered while the 403 checks ran, so this is the first name.
+    await ok("POST", "/api/web/register", { name: "Rami" }); done("POST", "/api/web/register");
+    const flow = ((await ok("POST", "/api/conversations/new", { name: "flow" })).conversation as { id: string }).id; done("POST", "/api/conversations/new");
+    expect(S.manager.getRoom(flow)).toBeDefined();
+    await ok("POST", "/api/conversations/select", { id: flow }); done("POST", "/api/conversations/select");
+    expect(S.manager.getActiveId()).toBe(flow);
+    const flowRoom = () => S.manager.getRoom(flow)!;
+
+    const m1 = (await ok("POST", "/api/send", { sender: "Rami", text: "first", conversation: flow })).id as number; done("POST", "/api/send");
+    await ok("POST", `/api/message/${m1}/edit`, { sender: "Rami", newText: "first, edited" }); done("POST", "/api/message/1/edit");
+    expect(flowRoom().getMessageById(m1)!.text).toBe("first, edited");
+    const m2 = (await ok("POST", "/api/send", { sender: "Rami", text: "pick", choices: ["a", "b"], conversation: flow })).id as number;
+    await ok("POST", `/api/message/${m2}/choose`, { value: "a", by: "Rami" }); done("POST", "/api/message/1/choose");
+    expect(flowRoom().getMessageById(m2)!.choiceResponse?.value).toBe("a");
+    const m3 = (await ok("POST", "/api/send", { sender: "Rami", text: "decide?", askFor: "Rami", conversation: flow })).id as number;
+    await ok("POST", `/api/message/${m3}/resolve`, { conversation: flow });
+    expect(flowRoom().getMessageById(m3)!.ask?.state).toBe("resolved");
+
+    expect((await call(S.baseUrl, "POST", "/api/agent/join", { name: "Worf", pid: 999_904, conversation: flow })).status).toBe(200);
+    await ok("POST", "/api/dm/send", { to: "Worf", text: "psst" }); done("POST", "/api/dm/send");
+    expect(flowRoom().read(undefined, 100, undefined, "Rami").some((m) => m.text === "psst" && m.to?.includes("Worf") === true)).toBe(true);
+
+    await ok("POST", "/api/join", { name: "Invitee", pid: 999_905 }); done("POST", "/api/join");
+    expect(flowRoom().getAgent("Invitee")).toBeDefined();
+    await ok("POST", "/api/role", { name: "Invitee", role: "reviewer" }); done("POST", "/api/role");
+    expect(flowRoom().getAgent("Invitee")!.role).toBe("reviewer");
+    await ok("POST", "/api/rename", { oldName: "Invitee", newName: "Invitee2", conversation: flow }); done("POST", "/api/rename");
+    expect(flowRoom().getAgent("Invitee2")).toBeDefined();
+    await ok("POST", "/api/leave", { name: "Invitee2", conversation: flow }); done("POST", "/api/leave");
+    expect(flowRoom().getAgent("Invitee2")).toBeUndefined();
+
+    await ok("POST", "/api/roles", { emoji: "x", label: "lane-probe" }); done("POST", "/api/roles");
+    await ok("DELETE", "/api/roles/lane-probe"); done("DELETE", "/api/roles/reviewer");
+    const tg = await ok("POST", "/api/turn-guard", { enabled: true, limit: 5 }); done("POST", "/api/turn-guard");
+    expect(tg).toMatchObject({ enabled: true, limit: 5 });
+    await ok("POST", "/api/turn-guard", { enabled: false, limit: 20 });
+    await ok("POST", "/api/notifications/read", {}); done("POST", "/api/notifications/read");
+
+    const sess = await ok("POST", "/api/session/start", { templateId: "brainstorm", cast: { facilitator: "Rami", creative_a: "Rami", creative_b: "Rami" }, goal: "g" }); done("POST", "/api/session/start");
+    expect(typeof sess.id).toBe("number");
+    // The list answers while a session is active (its live timer is not serialized).
+    const list = await call(S.baseUrl, "GET", `/api/sessions?token=${WEB}`);
+    expect(list.status).toBe(200);
+    expect((list.json as Array<{ id: number; timeoutHandle?: unknown }>).some((x) => x.id === sess.id && x.timeoutHandle === undefined)).toBe(true);
+    expect(await ok("POST", "/api/session/cancel", { id: sess.id as number })).toEqual({ ok: true }); done("POST", "/api/session/cancel");
+
+    expect(await ok("POST", "/api/messages/delete", { id: m1, conversation: flow })).toEqual({ ok: true }); done("POST", "/api/messages/delete");
+    expect(flowRoom().getMessageById(m1)).toBeUndefined();
+
+    const imp = ((await ok("POST", "/api/conversations/import", { version: 1, conversation: { name: "imported" }, messages: [] })).conversation as { id: string }).id; done("POST", "/api/conversations/import");
+    expect(S.manager.getRoom(imp)).toBeDefined();
+    await ok("POST", "/api/conversations/rename", { id: imp, name: "imported-2" }); done("POST", "/api/conversations/rename");
+    await ok("POST", "/api/conversations/star", { id: imp, starred: true }); done("POST", "/api/conversations/star");
+    const impMeta = S.manager.listConversations().find((c) => c.id === imp)!;
+    expect(impMeta.name).toBe("imported-2");
+    expect(impMeta.starred).toBe(true);
+    await ok("POST", "/api/conversations/delete", { id: imp }); done("POST", "/api/conversations/delete");
+    expect(S.manager.listConversations().some((c) => c.id === imp)).toBe(false);
+
+    const crewDir = join(dir, "crew-folder");
+    mkdirSync(crewDir, { recursive: true });
+    await ok("POST", "/api/crew", { name: "crewa", path: crewDir }); done("POST", "/api/crew");
+    await ok("PATCH", "/api/crew/crewa", { role: "builder" }); done("PATCH", "/api/crew/anyone");
+    await ok("DELETE", "/api/crew/crewa"); done("DELETE", "/api/crew/anyone");
+    const parent = join(dir, "scaffold-parent");
+    mkdirSync(parent, { recursive: true });
+    await ok("POST", "/api/crew/scaffold", { name: "scaf", parentDir: parent }); done("POST", "/api/crew/scaffold");
+    expect(existsSync(join(parent, "scaf"))).toBe(true);
+
+    // Past the guard, stopped by their own validation (see above).
+    const launch = await send("POST", "/api/launch", {});
+    expect(launch).toEqual({ status: 400, json: { error: "crewName, crewPath, harness, and joinAs are required" } }); done("POST", "/api/launch");
+    const inject = await call(S.baseUrl, "POST", "/api/launch/nope/inject", undefined, h);
+    expect(inject.status).toBe(404);
+    expect(JSON.stringify(inject.json)).toContain("nope"); done("POST", "/api/launch/abc/inject");
+    const pending = await send("POST", "/api/pending/delete", { conversation: flow, clientId: "c1" });
+    expect(pending).toEqual({ status: 404, json: { error: "No undelivered messages here: not a remote room" } }); done("POST", "/api/pending/delete");
+
+    // Every route in the guarded table was exercised with the token.
+    expect([...seen].sort()).toEqual(GUARDED.map((r) => `${r.method} ${r.path}`).sort());
   });
 });
