@@ -636,7 +636,11 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // --- File upload (images + any file type) ---
   app.post("/api/upload", express.raw({ type: "*/*", limit: "25mb" }), (req, res) => {
     const contentType = req.headers["content-type"] || "application/octet-stream";
-    const ext = contentType.split("/")[1]?.split(";")[0] || "bin";
+    // The extension is derived from the subtype but reduced to letters and
+    // digits, so it can never name an active type by accident of spelling or
+    // carry a path (the body parser already refuses separators; this holds
+    // even if that changes).
+    const ext = uploadExtension(contentType);
     const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
     const fileDir = join(DATA_DIR, "files");
     ensureDir(fileDir);
@@ -646,7 +650,16 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   // Only uploaded files are web-accessible under /data; never the whole
   // data dir (it holds conversation JSONL and other server-side state).
-  app.use("/data/files", express.static(join(DATA_DIR, "files")));
+  // Uploads come from agents and linked servers and are served from this
+  // origin, so none may run as a page here: every response is sandboxed by
+  // CSP (an opaque origin, no script) and never sniffed, and anything but a
+  // raster image or plain text is sent as a download.
+  app.use("/data/files", (req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'");
+    if (!UPLOAD_INLINE.test(req.path)) res.setHeader("Content-Disposition", "attachment");
+    next();
+  }, express.static(join(DATA_DIR, "files")));
 
   // --- REST API (scoped to active conversation) ---
 
@@ -659,6 +672,20 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     }
     return room;
   }
+
+  /** An upload's file extension from its content type: the subtype's
+   *  letters and digits only (`svg+xml` is `svg`, `plain` is `txt`), at
+   *  most 10, else `bin`. */
+  function uploadExtension(contentType: string): string {
+    const sub = (contentType.split(";")[0].split("/")[1] ?? "").trim().toLowerCase().replace(/\+xml$/, "");
+    const clean = sub.replace(/[^a-z0-9]/g, "").slice(0, 10);
+    // Common subtypes whose name is not their usual extension.
+    const known: Record<string, string> = { plain: "txt", markdown: "md", xmarkdown: "md", jpeg: "jpg" };
+    return known[clean] ?? (clean || "bin");
+  }
+
+  /** Uploaded files shown in place (raster images, plain text); the rest download. */
+  const UPLOAD_INLINE = /\.(png|jpe?g|gif|webp|avif|bmp|ico|txt|md|markdown|csv|log|json)$/i;
 
   /** Gate for browser REST calls that can return DM content: no valid web token, no data. */
   function webAuthorized(provided: string | undefined): boolean {

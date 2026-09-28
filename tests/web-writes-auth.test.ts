@@ -7,7 +7,7 @@
  * registration, as the open /mcp tools do).
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { existsSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { createServer } from "net";
@@ -145,6 +145,61 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     expect((await call(S.baseUrl, "POST", "/api/messages/delete", { id: 5 }, h)).json).toEqual({ ok: true });
     expect(S.manager.getRoom(room)!.read(undefined, 100).map((m) => m.id)).toEqual([1, 2, 3, 4]);
     expect(S.manager.getRoom(other)!.read(undefined, 100).map((m) => m.id)).toEqual([1, 3, 4, 5]);
+  });
+
+  it("serves uploads sandboxed and never as an active page from this origin", async () => {
+    const up = async (type: string, body: string): Promise<{ url: string; filename: string }> => {
+      const r = await fetch(`${S.baseUrl}/api/upload`, { method: "POST", headers: { "Content-Type": type }, body });
+      expect(r.status).toBe(200);
+      return await r.json() as { url: string; filename: string };
+    };
+    const html = await up("text/html", "<script>parent.pwned = 1</script>");
+    expect(html.filename.endsWith(".html")).toBe(true);
+    const h = await fetch(`${S.baseUrl}${html.url}`);
+    expect(h.status).toBe(200);
+    expect(h.headers.get("content-disposition")).toBe("attachment");
+    expect(h.headers.get("content-security-policy")).toContain("sandbox");
+    expect(h.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(h.headers.get("x-content-type-options")).toBe("nosniff");
+    const svg = await up("image/svg+xml", "<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'/>");
+    expect(svg.filename.endsWith(".svg")).toBe(true);
+    const sv = await fetch(`${S.baseUrl}${svg.url}`);
+    expect(sv.headers.get("content-disposition")).toBe("attachment");
+    expect(sv.headers.get("content-security-policy")).toContain("sandbox");
+    const png = await up("image/png", "not really a png");
+    const p = await fetch(`${S.baseUrl}${png.url}`);
+    expect(p.headers.get("content-disposition")).toBeNull();
+    expect(p.headers.get("content-security-policy")).toContain("sandbox");
+    expect(p.headers.get("x-content-type-options")).toBe("nosniff");
+    const txt = await up("text/plain", "notes");
+    expect((await fetch(`${S.baseUrl}${txt.url}`)).headers.get("content-disposition")).toBeNull();
+  });
+
+  it("keeps an upload inside the files directory whatever its content type says", async () => {
+    // Backslashes are path separators on Windows; a subtype must never become a path.
+    const BS = "\\";
+    const back1 = `a/x${BS}..${BS}..${BS}evil1`;
+    const back2 = `a/x${BS}..${BS}evil2`;
+    const types = [back1, back2, "text/html;x=../../evil3", "weird", "a/b.c-d"];
+    const accepted: string[] = [];
+    for (const type of types) {
+      const r = await fetch(`${S.baseUrl}/api/upload`, { method: "POST", headers: { "Content-Type": type }, body: "x" });
+      // A content type the body parser refuses writes nothing at all.
+      if (r.status !== 200) { expect(r.status, type).toBeGreaterThanOrEqual(400); continue; }
+      const j = await r.json() as { url: string; filename: string };
+      expect(j.filename, type).toMatch(/^\d+-[a-z0-9]+\.[a-z0-9]{1,10}$/);
+      expect(existsSync(join(dir, "data", "files", j.filename)), type).toBe(true);
+      accepted.push(type);
+    }
+    // The body parser refuses a subtype with separators (not a media-type
+    // token), so the handler never sees one; what it does accept is kept to
+    // letters and digits.
+    expect(accepted).not.toContain(back1);
+    expect(accepted).not.toContain(back2);
+    expect(accepted).toContain("a/b.c-d");
+    for (const where of [dir, join(dir, "data")]) {
+      for (const n of ["evil1", "evil2", "evil3"]) expect(existsSync(join(where, n)), `${where} ${n}`).toBe(false);
+    }
   });
 
   it("leaves the agent routes open (agents hold no web token)", async () => {
