@@ -10,6 +10,7 @@ import { inject, WakeFallbackAborted, type AfterTextRoute } from "./inject.js";
 import { cancelRoomListens } from "./listen.js";
 import { WakeCoordinator, type WakeFailureKind, type WakeOutcome } from "./wake.js";
 import { ORCA_SEND_TIMEOUT_MS } from "./orca.js";
+import { beginSubmitCheck, rolloutName, SUBMIT_CHECK_WINDOW_MS, type PendingSubmitCheck, type SubmitCheckOptions } from "./submit-check.js";
 
 // The base URL an injected prompt tells the woken agent to call back on.
 // Must be the address the server actually binds (single-interface): a
@@ -229,6 +230,16 @@ export function unidentifiedLine(name: string, reason: string, host?: string): s
   return `Typed into ${name}${on} but could not identify its terminal (${reason}); a Codex or Copilot session may need Enter by hand.`;
 }
 
+/** The honest line for a wake typed into a Codex session whose prompt never
+ *  reached the Codex session store: the keys were written, the Enter was
+ *  not taken. It names the pid, so whoever reads it knows which terminal
+ *  needs the Enter, and the time the check actually waited (30 s, or longer
+ *  when a busy session held the verdict back). */
+export function notSubmittedLine(name: string, pid: number, waitedMs: number = SUBMIT_CHECK_WINDOW_MS): string {
+  const who = pid > 0 ? `${name} (pid ${pid})` : name;
+  return `Typed into ${who} but NOT submitted within ${Math.round(waitedMs / 1000)} s: no matching prompt in the Codex session store. The text is probably sitting in their input box; it needs Enter by hand.`;
+}
+
 /** What one run of the local wake machinery did. */
 interface WakeCoreResult {
   outcome: WakeOutcome;
@@ -241,6 +252,10 @@ interface WakeCoreResult {
   /** The attempt that finished typed the prompt but could not identify the
    *  target's application (one Enter): why. Unset otherwise. */
   unidentified?: string;
+  /** The attempt that finished typed into a Codex session through a
+   *  keystroke route: the submit check begun just before its first key,
+   *  with the pid it typed into. Unset otherwise (Orca, other kinds). */
+  submitCheck?: { check: PendingSubmitCheck; pid: number; identity: string };
   /** The session generation the last attempt started under. */
   session: number;
 }
@@ -316,6 +331,9 @@ export class ChatRoom extends EventEmitter {
   injectBaseUrl?: string;
   /** Carries wakes of hosted members to their host (set by the manager). */
   hostedWaker?: HostedWaker;
+  /** The submit check's stores and timings; the defaults ($CODEX_HOME and
+   *  ~/.codex, 2 s polls, 30 s window) when unset. Set by tests. */
+  submitCheckOptions?: SubmitCheckOptions;
   /** Hosted members whose host was unreachable at their last wake: the line
    *  is said once per streak, and a success or a rejoin clears it. */
   private hostedUnreachable = new Set<string>();
@@ -767,7 +785,9 @@ export class ChatRoom extends EventEmitter {
     const mention = this.mentionWindow(name);
     this.wakesInFlight.add(name);
     try {
-      const { outcome, partialLine, partialKind, unidentified, session } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent, undefined, mention.earliest));
+      const { outcome, partialLine, partialKind, unidentified, submitCheck, session } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent, undefined, mention.earliest));
+      // Detached: the wake is over and its outcome stands whatever this finds.
+      if (submitCheck) void this.followSubmitCheck(name, submitCheck, true);
       if (outcome.ok) {
         moved = outcome.result === "moved";
         // Landed (or the agent left): these mentions are covered. A wake that
@@ -808,6 +828,7 @@ export class ChatRoom extends EventEmitter {
     let partialLine = false;
     let partialKind: "partial" | "unconfirmed" = "partial";
     let unidentified: string | undefined;
+    let submitCheck: WakeCoreResult["submitCheck"];
     let session = wakes.sessionOf(this.warnKey(name));
     const outcome = await wakes.run([...held], this.warnKey(name), async () => {
       const agent = this.agents.get(name);
@@ -822,8 +843,10 @@ export class ChatRoom extends EventEmitter {
       partialLine = false;
       partialKind = "partial";
       unidentified = undefined;
+      submitCheck = undefined;
       session = wakes.sessionOf(this.warnKey(name));
       console.log(`  → Injecting into ${name} (${identity})...`);
+      const pid = agent.pid;
       try {
         await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), agent.weztermGui != null ? undefined : getWeztermEnv(), undefined, {
           // A pane of a known GUI goes through that GUI's socket only; a GUI
@@ -832,6 +855,15 @@ export class ChatRoom extends EventEmitter {
           // The plan could not identify the target: it gets one Enter, and
           // the room may say so (warn-once per room and agent).
           onUnidentified: (reason) => { unidentified = reason; },
+          // A Codex session typed into by keys: start the submit check's
+          // clock and baseline now, before the first key (the first route
+          // that types starts it; a console fallback after it keeps it, which
+          // only widens what is read). Never awaited here.
+          onKeysTyping: (plan) => {
+            if (plan.kind === "codex" && !submitCheck) {
+              submitCheck = { check: beginSubmitCheck(prompt, this.submitCheckOptions), pid, identity };
+            }
+          },
           // Orca's own input path first when the join bound a handle.
           orcaTerminal: agent.orcaTerminal,
           // Between the Orca or WezTerm failure and the console fallback the target
@@ -890,7 +922,42 @@ export class ChatRoom extends EventEmitter {
       }
       return "done";
     });
-    return { outcome, partialLine, partialKind, unidentified, session };
+    // Only an attempt that finished typing is checked: a partial delivery or
+    // an aborted one has its own line (or none).
+    const typed = outcome.ok && outcome.result === "done" && !partialLine ? submitCheck : undefined;
+    return { outcome, partialLine, partialKind, unidentified, submitCheck: typed, session };
+  }
+
+  /**
+   * After a wake typed into a Codex session: look for the prompt in the Codex
+   * session store and say so only when it is missing. Runs detached from the
+   * wake (which has finished and released its locks); it never types, retries
+   * or delays anything. `post` is false on a host serving a hosted wake: the
+   * home's room owns that line, so the host only logs.
+   */
+  private async followSubmitCheck(name: string, typed: NonNullable<WakeCoreResult["submitCheck"]>, post: boolean): Promise<void> {
+    let r: Awaited<ReturnType<PendingSubmitCheck["verify"]>>;
+    try {
+      r = await typed.check.verify();
+    } catch (err) {
+      console.log(`  [verify] ${name}: not verifiable (${err instanceof Error ? err.message.split("\n")[0].slice(0, 120) : String(err)})`);
+      return;
+    }
+    if (r.result === "submitted") {
+      console.log(`  [verify] ${name}: submitted (seen in ${rolloutName(r.file)} after ${Math.round(r.afterMs / 1000)} s)`);
+      return;
+    }
+    if (r.result === "unverifiable") {
+      console.log(`  [verify] ${name}: not verifiable (${r.reason}); nothing said`);
+      return;
+    }
+    console.log(`  [verify] ${name}: NOT submitted (pid ${typed.pid}, no matching prompt in ${typed.check.sessionsDirs.join(", ")} after ${Math.round(r.waitedMs / 1000)} s)${post ? "" : "; hosted wake, not reported to the home room"}`);
+    if (!post) return;
+    // Only for the terminal that was typed into: a member that left or moved
+    // meanwhile is not told about a terminal it no longer has.
+    const live = this.agents.get(name);
+    if (this.destroyed || !live?.active || terminalIdentity(live) !== typed.identity) return;
+    this.addSystem(notSubmittedLine(name, typed.pid, r.waitedMs));
   }
 
   /**
@@ -970,7 +1037,11 @@ export class ChatRoom extends EventEmitter {
       } finally {
         this.wakesInFlight.delete(name);
       }
-      const { outcome, partialLine, partialKind, unidentified } = core;
+      const { outcome, partialLine, partialKind, unidentified, submitCheck } = core;
+      // The keys were typed here, so the Codex store to look in is this
+      // host's. The result is only logged: the wake's answer to the home is
+      // not held back for it, and the link has no later channel for the line.
+      if (submitCheck) void this.followSubmitCheck(name, submitCheck, false);
       if (!outcome.ok) {
         return { ok: false, kind: outcome.kind, attempts: outcome.attempts, reason: outcome.reason, warn: outcome.warn };
       }

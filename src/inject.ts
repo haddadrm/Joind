@@ -224,6 +224,13 @@ export interface InjectOptions {
    *  not be identified, so it gets one Enter), with the reason in words. The
    *  room decides whether to say it; a wake that then fails says nothing. */
   onUnidentified?: (reason: string) => void;
+  /** Keystroke routes only (WezTerm, the console, tmux; never Orca, whose
+   *  send answers for itself): told with the plan just before the backend
+   *  types, after the last guard. A caller that sees inject() resolve after
+   *  this knows the keys were written, not that the prompt was submitted;
+   *  the room's submit check starts here. Observation only: it must return
+   *  at once and never throw. */
+  onKeysTyping?: (plan: SubmitPlan) => void;
 }
 
 /** Backends, injectable for tests. */
@@ -316,6 +323,7 @@ export async function inject(
       }
       const p = await plan();
       guard(); // the classification awaited: is this still the session to type into?
+      options.onKeysTyping?.(p);
       await backends.wezterm(weztermPaneId, text, weztermExe, env, { plan: p, guard: afterText });
     };
   }
@@ -349,7 +357,7 @@ export async function inject(
   }
 
   try {
-    await injectConsole(pid, text, platform, backends, guard, afterText, plan);
+    await injectConsole(pid, text, platform, backends, guard, afterText, plan, options.onKeysTyping);
   } catch (err) {
     if (primary === undefined || err instanceof WakeFallbackAborted || err instanceof PartialDeliveryError) throw err;
     // Both paths failed: the first backend's error stays the reported one,
@@ -384,13 +392,17 @@ async function resolvePlan(pid: number, platform: NodeJS.Platform, backends: Inj
   }
 }
 
-async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends, guard: () => void, afterText: () => void, plan: () => Promise<SubmitPlan>): Promise<void> {
+async function injectConsole(pid: number, text: string, platform: NodeJS.Platform, backends: InjectBackends, guard: () => void, afterText: () => void, plan: () => Promise<SubmitPlan>, onKeysTyping?: (plan: SubmitPlan) => void): Promise<void> {
   const p = await plan();
   if (platform === "win32") {
     guard();
+    onKeysTyping?.(p);
     await backends.windows(pid, text, p.delayMs, p.doubleEnter);
   } else {
     guard();
+    // Told before tmux discovery, which awaits: an early start only widens
+    // the window the submit check reads, never narrows it.
+    onKeysTyping?.(p);
     // tmux discovery inside the backend awaits too; it re-asks before typing.
     await backends.unix(pid, text, guard, p, afterText);
   }
