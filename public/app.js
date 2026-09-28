@@ -245,6 +245,7 @@ function connect() {
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         allMessages = (event.data.messages || []).slice();
         historyView = null;
+        jumpSeq++;
         activeConversation = event.data.activeConversation || null;
         conversationList = event.data.conversations || [];
         // A (re)connect is a new generation: HTTP responses to requests made
@@ -1316,7 +1317,9 @@ function scrollToMessage(id) {
 
 // `#` starts a token (start of text, whitespace, or an opening bracket) and
 // the digits end at a word boundary. Code, links and mentions are skipped.
-var MSG_REF_RE = /(^|[\s(\[{])#(\d{1,12})(?!\w)/g;
+// A range token (#5-#9, #5-9: the search grammar's id range) is not a
+// reference: its first half is not linked, and its second half follows a '-'.
+var MSG_REF_RE = /(^|[\s(\[{])#(\d{1,12})(?!\w|-#?\d)/g;
 var MSG_REF_SKIP = { A: true, CODE: true, PRE: true, KBD: true, SAMP: true, SCRIPT: true, STYLE: true, TEXTAREA: true };
 
 // Set while the channel pane shows a window around an older message:
@@ -1456,12 +1459,17 @@ function openLoadedMessage(conv, msg, seq) {
     return;
   }
   if (!activeConversation || activeConversation.id !== conv) {
+    // selectConversation invalidates pending jumps (a navigation), so this
+    // jump continues under the sequence number taken after it.
+    var afterSelect;
     selectConversation(conv, function() {
-      if (seq !== jumpSeq) return;
+      if (afterSelect !== jumpSeq) return;
+      seq = afterSelect;
       var el = messageElementFor(conv, msg.id);
       if (el) { highlightMessageEl(el); return; }
       loadAroundMessage(conv, msg.id, seq);
     });
+    afterSelect = jumpSeq;
     return;
   }
   if (activeDm) {
@@ -1478,7 +1486,7 @@ function loadAroundMessage(conv, id, seq) {
     .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
     .then(function(res) {
       if (seq !== jumpSeq) return;
-      if (!activeConversation || activeConversation.id !== conv) return;
+      if (!activeConversation || activeConversation.id !== conv || activeDm) return;
       if (!res.ok || !res.body || !Array.isArray(res.body.messages)) { showRefNotice(refNotFoundText(id, res.body)); return; }
       historyView = { conv: conv, anchor: id, hasNewer: !!res.body.hasNewer, newCount: 0 };
       allMessages = res.body.messages.slice();
@@ -2802,6 +2810,7 @@ var socketInitCount = 0;
 function selectConversation(id, after) {
   var mySelect = ++convSelectSeq;
   historyView = null;
+  jumpSeq++; // a navigation: pending message jumps must not land after it
   // Close mobile drawer if open
   if (isMobileView()) closeMobileDrawer();
   activeDm = null;
@@ -3106,6 +3115,7 @@ function mergeDmThread(existing, incoming) {
 
 function selectDm(name) {
   activeDm = name;
+  jumpSeq++; // a navigation: pending message jumps must not land after it
   renderHistoryChrome();
   delete dmUnread[name];
   showComposerError('');

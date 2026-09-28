@@ -32,6 +32,9 @@ The web UI gains three things: `#N` message references become links, search take
 - The decisions panel's jump still uses its retry-until-rendered path, not the window loader.
 - Older remote history is not searchable (no peer route for older pages).
 
+### Gate
+- **Codex, round 1 on 67e3817: CHANGES REQUESTED**, one Medium and one Low; the server side was found sound (no DM leakage through the window, search, cursors or coverage; named-room reads fail closed), suite 685 and tsc clean. (Medium) A stale around-window response could replace a DM pane opened while it was in flight: the response checked only the conversation id, which `selectDm` leaves unchanged. Fixed: every navigation (`selectConversation`, `selectDm`, a socket init) invalidates pending jumps, a jump that itself switches rooms continues under the sequence number taken after its own selection, and the window is also refused while a DM pane is open. (Low) `#5-#9` linked its first half. Fixed: a reference is not followed by `-` and a digit (with or without `#`), so a range token links neither half; `#5-ish` still links. The pre-existing `innerHTML` sink was confirmed as pre-existing and non-blocking, with no new vector from this change.
+
 ## Unreleased: Hosted-Wake Verdict Over the Link
 
 A hosted wake (home A asks host B to wake a member that lives on B) runs its submit check on B, where the keys were typed. Until now its "no submitted prompt seen" verdict stayed in B's log, up to 10 minutes after B had already answered the wake. B now carries the verdict back to A, and A's room says the same unconfirmed line as for a local wake, naming the host. Design of record: HOSTED-VERDICT-DESIGN rev 2 (Codex DESIGN PASS, #2288), built as written with the two gate conditions below.
