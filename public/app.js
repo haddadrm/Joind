@@ -268,6 +268,7 @@ function connect() {
         allMessages = (event.data.messages || []).slice();
         historyView = null;
         jumpSeq++;
+        historyExitSeq++;
         activeConversation = event.data.activeConversation || null;
         conversationList = event.data.conversations || [];
         // A (re)connect is a new generation: HTTP responses to requests made
@@ -2873,6 +2874,7 @@ function selectConversation(id, after) {
   var mySelect = ++convSelectSeq;
   historyView = null;
   jumpSeq++; // a navigation: pending message jumps must not land after it
+  historyExitSeq++; // nor a pending reload of the latest page
   // Close mobile drawer if open
   if (isMobileView()) closeMobileDrawer();
   activeDm = null;
@@ -3178,6 +3180,7 @@ function mergeDmThread(existing, incoming) {
 function selectDm(name) {
   activeDm = name;
   jumpSeq++; // a navigation: pending message jumps must not land after it
+  historyExitSeq++; // nor a pending reload of the latest page
   renderHistoryChrome();
   delete dmUnread[name];
   showComposerError('');

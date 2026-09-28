@@ -762,10 +762,11 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const { sender, text, image, replyTo, choices, to, token, askFor, conversation } = req.body as {
       sender?: string; text?: string; image?: string; replyTo?: number; choices?: string[]; to?: string[]; token?: string; askFor?: string; conversation?: string;
     };
+    // The token first: without it, nothing about the rooms is revealed.
+    if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     // An explicit conversation wins over the active one (a remote room is "<server>:<room>").
     const room = typeof conversation === "string" && conversation ? manager.getRoom(conversation) : activeRoom(res);
     if (!room) { if (!res.headersSent) res.status(404).json({ error: "Conversation not found" }); return; }
-    if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     if (!sender || !text) {
       res.status(400).json({ error: "sender and text required" });
       return;

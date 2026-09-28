@@ -124,6 +124,13 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     expect(S.manager.listConversations().some((c) => c.name === "intruder-room" || c.name === "imp")).toBe(false);
   });
 
+  it("answers /api/send without a token the same for a real and an unknown room", async () => {
+    const real = await call(S.baseUrl, "POST", "/api/send", { sender: "Rami", text: "x", conversation: room });
+    const unknown = await call(S.baseUrl, "POST", "/api/send", { sender: "Rami", text: "x", conversation: "no-such-room" });
+    expect(real.status).toBe(403);
+    expect(unknown).toEqual(real);
+  });
+
   it("accepts the token from the header, a JSON body or the query", async () => {
     expect((await call(S.baseUrl, "POST", "/api/notifications/read", {}, { "X-Joind-Token": WEB })).status).toBe(200);
     expect((await call(S.baseUrl, "POST", "/api/notifications/read", { token: WEB })).status).toBe(200);
