@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { delimiter, join } from "path";
 
-// Field case, 28 Sep 2026: a Codex CLI 0.157.1 TUI in a plain pwsh console
-// took the wake text and none of its Enters; the server logged success. The
+// Field case, 28 Sep 2026: a Codex CLI 0.157.1 TUI took the wake text and
+// none of its Enters; the server logged success. The
 // submit check looks for the typed prompt in the Codex session store after a
 // keystroke wake of a Codex target, and says so only when it is missing.
 // Every store here is a temp directory; the real ~/.codex is never read
@@ -38,7 +38,7 @@ vi.mock("../src/inject.js", async () => {
 });
 
 import { ChatRoom, notSubmittedLine } from "../src/room.js";
-import { beginSubmitCheck, codexSessionsDirs, lineSubmitsPrompt, SUBMIT_CHECK_BACKTRACK_BYTES } from "../src/submit-check.js";
+import { beginSubmitCheck, codexSessionsDirs, lineSubmitsPrompt } from "../src/submit-check.js";
 
 const PROMPT = `[joind] @Scotty mentioned by Rami. Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=Scotty&since=2173&pid=27092" then Reply: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" -d '{"sender":"Scotty","text":"YOUR_REPLY","pid":27092}'`;
 
@@ -89,7 +89,7 @@ describe("the submit check reads only what a Codex session wrote after the wake 
     const f = rollout("2026/09/25", "a", userMessage("earlier work", HOUR_AGO()));
     rollout("2026/09/28", "b");
     const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...fast });
-    await new Promise((r) => setTimeout(r, 20)); // the snapshot, taken before the first key
+    await new Promise((r) => setTimeout(r, 20)); // the keys go in
     appendFileSync(f, toolOutput("x".repeat(5000)) + userMessage(PROMPT));
     const r = await check.verify();
     expect(r).toMatchObject({ result: "submitted", file: f });
@@ -125,13 +125,13 @@ describe("the submit check reads only what a Codex session wrote after the wake 
     expect(lineSubmitsPrompt("{not json \"user_message\"", PROMPT, start)).toBe(false);
   });
 
-  it("reads from just before each file's snapshot size, never the whole file", async () => {
-    // A line that WOULD match (its timestamp is in the future) sits at the
-    // head of a file, followed by three backtracks of older lines: only the
-    // byte offset keeps it out, so a whole-file read would report it.
+  it("reads back only to the last line before the start and the last turn marker, never the whole file", async () => {
+    // A line that WOULD match (stamped in the future) sits at the head of a
+    // file, then 200 KB of older lines, then an ended turn. The backward read
+    // stops at the ended turn, so a whole-file read is the only way to see it.
     const trap = userMessage(PROMPT, new Date(Date.now() + 60_000));
     const filler = userMessage("older work", HOUR_AGO());
-    rollout("2026/09/20", "big", trap + filler.repeat(Math.ceil((SUBMIT_CHECK_BACKTRACK_BYTES * 3) / filler.length)));
+    rollout("2026/09/20", "big", trap + filler.repeat(Math.ceil(200_000 / filler.length)) + turnEvent("task_complete", HOUR_AGO()));
     const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...fast });
     await new Promise((r) => setTimeout(r, 20));
     expect((await check.verify()).result).toBe("not-submitted");
@@ -194,7 +194,7 @@ describe("a busy Codex session delays the verdict, never makes one", () => {
     const clock = script(() => undefined);
     const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...clock, capMs: 120_000 });
     await new Promise((r) => setTimeout(r, 20));
-    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/stayed busy for 120 s/) });
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/not seen in 120 s .*rollout-thinking\.jsonl has a turn open/) });
   });
 
   it("busy, then idle, prompt never seen: NOT submitted only after the turn ended plus the grace", async () => {
@@ -207,13 +207,23 @@ describe("a busy Codex session delays the verdict, never makes one", () => {
     const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...clock });
     await new Promise((r) => setTimeout(r, 20));
     const r = await check.verify();
-    // Last busy at the 48 s poll (the 50 s poll reads the end marker), then
-    // at least 15 s of grace: the first quiet poll past it is at 64 s.
-    expect(r).toEqual({ result: "not-submitted", waitedMs: 64_000 });
+    // Last busy at the 50 s poll (it grew, carrying the end marker), then at
+    // least 15 s of grace: the first quiet poll past it is at 66 s.
+    expect(r).toEqual({ result: "not-submitted", waitedMs: 66_000 });
   });
 
-  it("a session that died mid-turn an hour ago does not hold the verdict", async () => {
+  it("a turn left open an hour ago, file written recently: never taken as idle", async () => {
     rollout("2026/09/26", "dead", turnEvent("task_started", HOUR_AGO()));
+    const clock = script(() => undefined);
+    const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...clock });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/rollout-dead\.jsonl has a turn open/) });
+  });
+
+  it("the one inference from silence: a rollout untouched for over 24 h holds no live session", async () => {
+    const f = rollout("2026/09/20", "ancient", turnEvent("task_started", new Date(Date.now() - 30 * 3_600_000)));
+    const old = new Date(Date.now() - 25 * 3_600_000);
+    utimesSync(f, old, old);
     const clock = script(() => undefined);
     const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...clock });
     await new Promise((r) => setTimeout(r, 20));
@@ -226,7 +236,92 @@ describe("a busy Codex session delays the verdict, never makes one", () => {
     const check = beginSubmitCheck(PROMPT, { sessionsDirs: [sessions], ...clock });
     await new Promise((r) => setTimeout(r, 20));
     const r = await check.verify();
-    expect(r).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/stayed busy for 600 s/) });
+    expect(r).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/not seen in 600 s and no idle state was observed/) });
+  });
+});
+
+// Codex review of 987a688 (CHANGES REQUESTED), its synthetic reproducer
+// ported as it was run: each case returned "not-submitted" at 30 s there.
+describe("Codex review of 987a688: never NOT submitted without seeing everything", () => {
+  const prompt = "[joind] @Scotty mentioned; since=2239&pid=27092";
+  const event = (type: string, at: number, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg", payload: { type, ...extra } }) + "\n";
+  const output = (at: number, text: string) =>
+    JSON.stringify({ timestamp: new Date(at).toISOString(), type: "response_item", payload: { type: "function_call_output", output: text } }) + "\n";
+  function fixture(name: string) {
+    const store = join(root, name, "sessions");
+    const folder = join(store, "2026", "09", "28");
+    mkdirSync(folder, { recursive: true });
+    const start = Date.now();
+    let now = start;
+    const clock = { now: () => now, sleep: async (ms: number) => { now += ms; await new Promise<void>((r) => setImmediate(r)); } };
+    return { store, file: join(folder, "rollout-target.jsonl"), start, clock, elapsed: () => now - start, setOnSleep: (fn: (elapsed: number) => void) => { clock.sleep = async (ms: number) => { now += ms; fn(now - start); await new Promise<void>((r) => setImmediate(r)); }; } };
+  }
+
+  it("P1 snapshot race: a prompt plus 150 KB written the moment the check begins is found", async () => {
+    const fx = fixture("race");
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    appendFileSync(fx.file, event("user_message", fx.start + 1, { message: prompt }) + output(fx.start + 2, "x".repeat(150_000)));
+    expect(await check.verify()).toMatchObject({ result: "submitted", file: fx.file });
+  });
+
+  it("P1 turn state: an open-turn marker buried before a 100 KB tail is found; unverifiable, not NOT submitted", async () => {
+    const fx = fixture("buried");
+    writeFileSync(fx.file, event("task_started", fx.start - 5000) + output(fx.start - 1000, "x".repeat(100_000)));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/has a turn open/) });
+  });
+
+  it("P1 turn state: a silent turn open for longer than the cap is unverifiable, not NOT submitted", async () => {
+    const fx = fixture("old-open");
+    writeFileSync(fx.file, event("task_started", fx.start - 700_000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/has a turn open/) });
+  });
+
+  it("P1 turn state: a turn marker beyond the backscan cap is unknown, so unverifiable", async () => {
+    // Stated through the reason: unknown turn state is reported as such.
+    const fx = fixture("no-marker-in-reach");
+    writeFileSync(fx.file, event("task_complete", fx.start - 9000) + output(fx.start - 1000, "y".repeat(40_000_000)));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(await check.verify()).toMatchObject({ result: "unverifiable" });
+  }, 60_000);
+
+  it("P2: a store that disappears before the first look is unverifiable", async () => {
+    const fx = fixture("missing-store");
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    await new Promise((r) => setTimeout(r, 40));
+    renameSync(fx.store, join(root, "missing-store", "sessions-unavailable"));
+    expect(await check.verify()).toMatchObject({ result: "unverifiable" });
+  });
+
+  it("P2: a store that disappears during the check is unverifiable, not NOT submitted", async () => {
+    const fx = fixture("store-goes");
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    fx.setOnSleep((elapsed) => { if (elapsed === 4_000) renameSync(fx.store, join(root, "store-goes", "gone")); });
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    const r = await check.verify();
+    expect(r).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/became unreadable/) });
+  });
+
+  it("P2: a rollout that goes out of view during the check is unverifiable, not NOT submitted", async () => {
+    const fx = fixture("file-goes");
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    fx.setOnSleep((elapsed) => { if (elapsed === 4_000) renameSync(fx.file, join(root, "file-goes", "moved.jsonl")); });
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    expect(await check.verify()).toMatchObject({ result: "unverifiable", reason: expect.stringMatching(/rollout-target\.jsonl went out of view/) });
+  });
+
+  it("control: the same idle store, fully readable, is NOT submitted at 30 s", async () => {
+    const fx = fixture("control");
+    writeFileSync(fx.file, event("task_complete", fx.start - 1000));
+    const check = beginSubmitCheck(prompt, { sessionsDirs: [fx.store], ...fx.clock });
+    expect(await check.verify()).toEqual({ result: "not-submitted", waitedMs: 30_000 });
   });
 });
 

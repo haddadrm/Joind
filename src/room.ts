@@ -856,9 +856,9 @@ export class ChatRoom extends EventEmitter {
           // the room may say so (warn-once per room and agent).
           onUnidentified: (reason) => { unidentified = reason; },
           // A Codex session typed into by keys: start the submit check's
-          // clock and baseline now, before the first key (the first route
-          // that types starts it; a console fallback after it keeps it, which
-          // only widens what is read). Never awaited here.
+          // clock now, before the first key (the first route that types
+          // starts it; a console fallback after it keeps it, which only
+          // widens what counts as new). No I/O here; nothing is awaited.
           onKeysTyping: (plan) => {
             if (plan.kind === "codex" && !submitCheck) {
               submitCheck = { check: beginSubmitCheck(prompt, this.submitCheckOptions), pid, identity };
