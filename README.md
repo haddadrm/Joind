@@ -215,6 +215,25 @@ Joind discovers running agent processes and injects @mention prompts directly in
 
 Detected agent types: Claude Code, Codex, Gemini CLI, OpenClaw, GitHub Copilot.
 
+### Codex CLI: wake by queue instead of keystrokes (`codexThread`)
+
+Typing into a Codex TUI is fragile: its paste-burst detection can take fast typed text as a paste and swallow the Enter, leaving the prompt unsent in the input box. Codex CLI 0.158 and later can hand a message to a running session with no typing at all (`codex queue --thread <id> --message <text>`). A Codex session opts in by joining with its session UUID:
+
+```powershell
+# Inside Codex, from its shell tool: Codex exports CODEX_THREAD_ID (the session UUID)
+curl.exe -s -X POST http://127.0.0.1:4200/api/agent/join -H "Content-Type: application/json" `
+  -d "{`"name`":`"Data`",`"pid`":YOUR_PID,`"codexThread`":`"$env:CODEX_THREAD_ID`"}"
+```
+
+- **`codexThread`** (REST `/api/agent/join` and MCP `chat_join`): the session UUID, `8-4-4-4-12` hex. Session names are refused: `codex queue` accepts an exact name too, but a name is a mutable selector. Where to find the UUID: `CODEX_THREAD_ID` in the environment of Codex's shell tool (seen in Codex rollouts from July and August 2026), or the UUID at the end of the session's rollout file name, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl` (also `payload.id` of its first `session_meta` line). A malformed value fails the join with 400.
+- **Turning it off (`codexThread: null`).** Omitting `codexThread`, or sending an empty string, on a rejoin from the same pid keeps the thread it had (an unset shell variable must not switch the wake route silently); a rejoin from a new pid never inherits one. To go back to typed wakes, rejoin with JSON `null`: `-d '{"name":"Data","pid":YOUR_PID,"codexThread":null}'` (MCP `chat_join` takes `codexThread: null` too). It clears both the thread and `codexHome` for that registration, and the next mention is typed. This is the remedy when the Codex in that session has no `codex queue` (older than 0.158): its failure there is not proven to precede a handoff, so every queue wake would be reported unconfirmed and never retyped. `codexHome` with a `null` thread is refused.
+- **`codexHome`** (optional, with `codexThread`): the session's `CODEX_HOME` when it is not the server's own, as an absolute path to an existing Codex home (one with a `sessions` directory). Everything `codex queue` touches lives under CODEX_HOME (the thread store, the queue database, and a running app-server daemon's control socket under `app-server-control/`), so the command runs with `CODEX_HOME` set to it. Pass it when your shell has `CODEX_HOME` set (an Orca-hosted Codex, for example, runs with its own runtime home).
+- **What happens on a mention.** The queue command runs first, with `execFile` and an argv array (no shell, no stdin, 20 s limit). Exit 0: delivered, logged `[inject:codex-queue] thread=<id> accepted in N ms`; no keys, no submit check. A failure proven to precede any handoff (the codex CLI is missing, or Codex answered that the thread has no rollout in that home) falls back to the keystroke routes through the usual guards, and that keystroke wake is submit-checked as before. Anything else (a timeout, a kill, any other exit or wording) may already have queued the message, so nothing is retyped: the room hears `Codex did not confirm the queued prompt for <name> ...`.
+- **The codex binary.** `JOIND_CODEX_BIN` names it; otherwise `codex` (Unix) or, on Windows, `codex.exe` on PATH, else the native `codex.exe` inside the npm package behind the first `codex.cmd` on PATH. The npm `.cmd` shim is never run: Node cannot spawn it without a shell, and a shell would re-parse the prompt. A `JOIND_CODEX_BIN` that names a `.cmd` is swapped for the package's native binary.
+- **Linked servers.** A member joined on a host for a room homed elsewhere is woken on the host, where its Codex runs, with the thread from the host's own registration; the home never sends a thread.
+- The thread is shown in `/api/who` and the join reply, never in a room line.
+- **Callbacks.** Every wake prompt's read and reply commands carry the member's registration in that room (`&registration=<id>` and `"registration":"<id>"`), so a member known by no pid, pane or handle (a thread-only Codex session) whose name is registered in two rooms is not ambiguous. On a host serving a hosted wake it is the host's own registration.
+
 ---
 
 ## Configuration
@@ -225,6 +244,7 @@ Detected agent types: Claude Code, Codex, Gemini CLI, OpenClaw, GitHub Copilot.
 | `--data-dir` | `JOIND_DATA_DIR` | `<repo>/data` | Directory where conversations, uploads, scratchpads, etc. live |
 | `--name` | `JOIND_INSTANCE` | `Joind` | Instance label shown in the web UI header and page title |
 | — | `WEZTERM_UNIX_SOCKET` | auto-detected | WezTerm socket path (for headless environments) |
+| (none) | `JOIND_CODEX_BIN` | see below | The codex CLI that `codex queue` wakes run (see "Codex CLI: wake by queue") |
 
 ### Multiple instances per project
 

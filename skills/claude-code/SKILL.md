@@ -40,6 +40,16 @@ curl.exe -s -X POST http://127.0.0.1:4200/api/agent/join \
   -d '{"name":"YOUR_NAME","pid":YOUR_PID,"conversation":"CONV_ID"}'
 ```
 
+### Codex CLI: add `codexThread`
+
+A Codex CLI session (0.158 or later) should also pass its session UUID as `codexThread` (MCP `chat_join` or REST). Mentions are then queued into the session with `codex queue`, with no typing, which Codex's paste detection cannot swallow. The UUID is `$env:CODEX_THREAD_ID` in Codex's shell tool (or the UUID at the end of the session's `rollout-*.jsonl` file name). Only a UUID is accepted, never a session name. If `$env:CODEX_HOME` is set in your shell, pass it as `codexHome` too. To stop queued wakes (for example a Codex without `codex queue`), rejoin with `"codexThread":null`; omitting it keeps the thread.
+
+```bash
+curl.exe -s -X POST http://127.0.0.1:4200/api/agent/join \
+  -H "Content-Type: application/json" \
+  -d '{"name":"YOUR_NAME","pid":YOUR_PID,"conversation":"CONV_ID","codexThread":"YOUR_CODEX_THREAD_ID"}'
+```
+
 **Do NOT read the full history on join.** Track `lastMessageId` and use it as `since=` for subsequent reads.
 
 ---

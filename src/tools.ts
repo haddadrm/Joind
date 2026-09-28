@@ -20,6 +20,7 @@ import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
 import { checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, liveServerSocket, resolveWezTermExe, weztermEnvForGui, listWezTermPaneIds, isInsideWezTerm, isInsideOrca, processTreeOnce, socketForGui, socketGuiPid, weztermGuiOf, anyLiveGuiSocket, type ProcessEntry } from "./terminals.js";
 import { listOrcaTerminals, ORCA_HANDLE, type OrcaTerminalState } from "./orca.js";
+import { parseCodexHome, parseCodexThread } from "./codex-queue.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -459,9 +460,20 @@ export function registerTools(
         orcaTerminal: z.string().optional().describe(
           "Orca terminal handle, from $env:ORCA_TERMINAL_HANDLE; enables wake-ups inside Orca"
         ),
+        codexThread: z.string().nullable().optional().describe(
+          "Codex CLI only: your session UUID ($env:CODEX_THREAD_ID, or the id at the end of your rollout file name). Mentions are then queued into your session with `codex queue` instead of typed. Omitted keeps what this pid had; null clears it (and codexHome), back to typed wakes."
+        ),
+        codexHome: z.string().optional().describe(
+          "Codex CLI only, with codexThread: your CODEX_HOME when it is not the server's (absolute path)."
+        ),
       }),
     },
-    async ({ name, pid, conversation, weztermPaneId, orcaTerminal }, extra) => {
+    async ({ name, pid, conversation, weztermPaneId, orcaTerminal, codexThread, codexHome }, extra) => {
+      const threadParse = parseCodexThread(codexThread);
+      if (!threadParse.ok) return { content: [{ type: "text" as const, text: `Could not join: ${threadParse.error}` }] };
+      const homeParse = parseCodexHome(codexHome);
+      if (!homeParse.ok) return { content: [{ type: "text" as const, text: `Could not join: ${homeParse.error}` }] };
+      if (homeParse.value !== undefined && typeof threadParse.value !== "string") return { content: [{ type: "text" as const, text: "Could not join: codexHome needs codexThread" }] };
       // Determine which conversation to join
       let convId = conversation || manager.getActiveId();
       // A remote room ("<server>:<room>") resolves through its link first.
@@ -526,7 +538,7 @@ export function registerTools(
         return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
-      const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui, registration);
+      const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui, registration, threadParse.value, homeParse.value);
       manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca, paneResolution.gui, registration);
       sessionBindings.set(extra.sessionId, {
         convId, name, registration, pid,
@@ -573,6 +585,7 @@ export function registerTools(
             `\nRegistration: ${registration} (pass it as \`registration\` when your name may be registered more than once, and after an MCP reconnect)` +
             (agent.weztermPaneId != null && agent.weztermGui != null ? `\nWezTerm pane: ${agent.weztermPaneId} in instance (weztermGui) ${agent.weztermGui}` : "") +
             (agent.orcaTerminal ? `\nOrca terminal: ${agent.orcaTerminal} (mentions arrive through Orca)` : "") +
+            (agent.codexThread ? `\nCodex thread: ${agent.codexThread} (mentions are queued with codex queue${agent.codexHome ? ` in ${agent.codexHome}` : ""})` : "") +
             joinNotesText([paneNote, orcaNote]) +
             recentText + historyHint,
         }],

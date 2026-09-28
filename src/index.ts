@@ -30,6 +30,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ConversationManager, newRegistrationId, isTerminalLess } from "./manager.js";
 import { visibleToViewer, type ChatMessage, type ChatRoom } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
+import { parseCodexHome, parseCodexThread } from "./codex-queue.js";
 import { TaskStore } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
@@ -1719,6 +1720,14 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     };
     const requestedOrca = (req.body as { orcaTerminal?: unknown }).orcaTerminal;
     if (!name) { res.status(400).json({ error: "name required" }); return; }
+    // A Codex session to wake through `codex queue` (no keys), and its home.
+    // Refused, not ignored, when malformed: a join that thinks it is reachable
+    // by queue must not silently fall back to keystrokes.
+    const threadParse = parseCodexThread((req.body as { codexThread?: unknown }).codexThread);
+    if (!threadParse.ok) { res.status(400).json({ error: threadParse.error }); return; }
+    const homeParse = parseCodexHome((req.body as { codexHome?: unknown }).codexHome);
+    if (!homeParse.ok) { res.status(400).json({ error: homeParse.error }); return; }
+    if (homeParse.value !== undefined && typeof threadParse.value !== "string") { res.status(400).json({ error: "codexHome needs codexThread" }); return; }
 
     // Auto-detect PID/paneId if not provided (an Orca handle names its terminal already)
     let discoveredGui: number | undefined;
@@ -1794,7 +1803,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.status(409).json(ownedNow ?? { error: "Join superseded by a newer join or a departure for this name" }); return;
     }
 
-    const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui, registration);
+    const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui, registration, threadParse.value, homeParse.value);
     manager.bindAgent(name, convId, pid, boundPane, boundOrca, paneResolution.gui, registration);
     room.touch(name);
     if (remoteReg) {
@@ -1832,6 +1841,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       weztermPaneId: agent.weztermPaneId,
       weztermGui: agent.weztermGui,
       orcaTerminal: agent.orcaTerminal,
+      ...(agent.codexThread ? { codexThread: agent.codexThread } : {}),
+      ...(agent.codexHome ? { codexHome: agent.codexHome } : {}),
       ...(paneResolution.note ? { paneNote: paneResolution.note } : {}),
       ...(orcaResolution.note ? { orcaNote: orcaResolution.note } : {}),
     });

@@ -11,6 +11,7 @@ import { inject, WakeFallbackAborted, type AfterTextRoute } from "./inject.js";
 import { cancelRoomListens } from "./listen.js";
 import { WakeCoordinator, type WakeFailureKind, type WakeOutcome } from "./wake.js";
 import { ORCA_SEND_TIMEOUT_MS } from "./orca.js";
+import { CODEX_QUEUE_TIMEOUT_MS } from "./codex-queue.js";
 import { beginSubmitCheck, rolloutName, SUBMIT_CHECK_LIVE_HORIZON_MS, type PendingSubmitCheck, type SubmitCheckOptions } from "./submit-check.js";
 import { HOSTED_VERDICT_TTL_MS, shortWakeId, type HostedVerdictRefusal } from "./peer-types.js";
 
@@ -29,8 +30,8 @@ const MENTION_ARRIVAL_WAIT_MS = 3000;
 const MENTION_ARRIVAL_POLL_MS = 50;
 let roomSeq = 0;
 /** What a terminal registration carries: the pid, and when known the
- *  WezTerm pane and the Orca terminal handle. */
-export interface TerminalRef { pid: number; weztermPaneId?: number; weztermGui?: number; orcaTerminal?: string }
+ *  WezTerm pane, the Orca terminal handle and the Codex session (thread). */
+export interface TerminalRef { pid: number; weztermPaneId?: number; weztermGui?: number; orcaTerminal?: string; codexThread?: string }
 /** Every identity known for a terminal. A wake holds all of them, so a room
  *  that registered the session pid-only and a room that registered it with
  *  its pane (or Orca handle) still serialize on the shared pid. */
@@ -46,9 +47,13 @@ export function terminalKeys(agent: TerminalRef): string[] {
     keys.push(`pane:${agent.weztermGui}:${agent.weztermPaneId}`);
   }
   if (agent.orcaTerminal) keys.push(`orca:${agent.orcaTerminal}`);
+  // A Codex session reached by `codex queue` is a delivery target of its
+  // own: two registrations naming it serialize, and a new thread is a new
+  // session identity.
+  if (agent.codexThread) keys.push(`codex:${agent.codexThread}`);
   return keys.length > 0 ? keys : ["pid:0"];
 }
-/** Session identity: any change of pid, pane or Orca handle is a different terminal. */
+/** Session identity: any change of pid, pane, Orca handle or Codex thread is a different terminal. */
 export function terminalIdentity(agent: TerminalRef): string {
   return terminalKeys(agent).join("|");
 }
@@ -77,7 +82,7 @@ export function lockKeysFor(
 }
 /** The terminal part of an agent, copied (the registry must not alias it). */
 function terminalRefOf(agent: TerminalRef): TerminalRef {
-  return { pid: agent.pid, weztermPaneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal };
+  return { pid: agent.pid, weztermPaneId: agent.weztermPaneId, weztermGui: agent.weztermGui, orcaTerminal: agent.orcaTerminal, codexThread: agent.codexThread };
 }
 /**
  * Is `live` still the terminal an attempt typed into? True when the closure
@@ -146,6 +151,12 @@ export interface Agent {
   weztermGui?: number;
   /** Orca terminal handle (term_<uuid>), bound only after the join checked it. */
   orcaTerminal?: string;
+  /** Codex session UUID given at join: wakes go through `codex queue`
+   *  first (src/codex-queue.ts). Not secret; shown in /api/who, never in a
+   *  room line. */
+  codexThread?: string;
+  /** The CODEX_HOME that session runs with, when not the server's own. */
+  codexHome?: string;
   /** Linked servers: the peer server this member's terminal lives on. A
    *  hosted member has no terminal on this server (pid 0, no pane, no handle):
    *  it is never injected here, holds no lock key and has no terminal
@@ -198,12 +209,21 @@ export function wakeFailureLine(name: string, kind: WakeFailureKind | "unreachab
     return `Could not wake ${name}: their host ${host ?? "server"} is unreachable (${reason ?? "no answer"}). They will see this when the link returns.`;
   }
   if (kind === "partial") return `Could not submit the prompt to ${name}; the text is in their input box.`;
+  if (kind === "unconfirmed" && /^codex queue\b/i.test(reason ?? "")) {
+    const on = host ? ` on their host ${host}` : "";
+    // As for Orca: only a real timeout names the limit.
+    const within = /\btimed out\b/.test(reason ?? "") ? ` within ${Math.round(CODEX_QUEUE_TIMEOUT_MS / 1000)} s` : "";
+    return `Codex did not confirm the queued prompt for ${name}${on}${within}; not retried by keystrokes to avoid a double prompt. The prompt may or may not have arrived; ${name} will see this on their next read.`;
+  }
   if (kind === "unconfirmed") {
     const on = host ? ` on their host ${host}` : "";
     // Only a real timeout names the limit; a send that ended early for any
     // other reason did not "take 15 s".
     const within = /\btimed out\b/.test(reason ?? "") ? ` within ${Math.round(ORCA_SEND_TIMEOUT_MS / 1000)} s` : "";
     return `Orca did not confirm delivery to ${name}${on}${within}; not retried through the console to avoid a double prompt. The prompt may or may not have arrived; ${name} will see this on their next read.`;
+  }
+  if (kind === "no-console" && /^codex queue /i.test(reason ?? "")) {
+    return `Could not wake ${name}: their Codex session could not be reached from ${where} (${reason}) and no terminal is known for them. They will see mentions only when they read on their own schedule, or after rejoining with a live codexThread.`;
   }
   if (kind === "no-console" && /^orca /i.test(reason ?? "")) {
     return `Could not wake ${name}: their Orca terminal is not reachable from ${where} (${reason}). They will see mentions only when they read on their own schedule, or after rejoining with a live orcaTerminal.`;
@@ -457,8 +477,10 @@ export class ChatRoom extends EventEmitter {
   /** `weztermPaneId`: a number binds that pane, null clears any pane held
    *  before (the join proved it stale), undefined leaves it as it was.
    *  `orcaTerminal` follows the same rule: a handle binds, null clears,
-   *  undefined keeps. */
-  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null, weztermGui?: number, registration?: string): Agent {
+   *  undefined keeps. `codexThread` (with its `codexHome`) binds when given
+   *  and clears on null, and undefined keeps it only for the same pid: a
+   *  new process that did not name a thread must not inherit the old one. */
+  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null, weztermGui?: number, registration?: string, codexThread?: string | null, codexHome?: string): Agent {
     const existing = this.agents.get(name);
     if (existing && registration != null) memberRegistrations.set(existing, registration);
     if (existing?.host) {
@@ -488,7 +510,10 @@ export class ChatRoom extends EventEmitter {
         (existing.weztermPaneId !== weztermPaneId || existing.weztermGui !== weztermGui);
       const orcaReplaced =
         existing.orcaTerminal != null && orcaTerminal != null && existing.orcaTerminal !== orcaTerminal;
-      if (existing.pid !== pid || paneReplaced || orcaReplaced) {
+      const threadReplaced =
+        existing.codexThread != null && codexThread != null && existing.codexThread !== codexThread;
+      const samePid = existing.pid === pid;
+      if (existing.pid !== pid || paneReplaced || orcaReplaced || threadReplaced) {
         this.addSystem(`${name} rejoined (new session)`);
         existing.joinedAt = now;
         existing.lastPostAt = undefined;
@@ -499,6 +524,8 @@ export class ChatRoom extends EventEmitter {
       else if (!keepsOldPane) { existing.weztermPaneId = undefined; existing.weztermGui = undefined; }
       if (orcaTerminal === null) existing.orcaTerminal = undefined;
       else if (orcaTerminal != null) existing.orcaTerminal = orcaTerminal;
+      if (codexThread != null) { existing.codexThread = codexThread; existing.codexHome = codexHome; }
+      else if (codexThread === null || !samePid) { existing.codexThread = undefined; existing.codexHome = undefined; }
       if (!existing.role && persistedRole) existing.role = persistedRole;
       existing.lastSeen = now;
       liveTerminals.set(this.warnKey(name), terminalRefOf(existing));
@@ -520,6 +547,7 @@ export class ChatRoom extends EventEmitter {
       weztermPaneId: weztermPaneId != null && weztermGui != null ? weztermPaneId : undefined,
       weztermGui: weztermPaneId != null && weztermGui != null ? weztermGui : undefined,
       orcaTerminal: orcaTerminal ?? undefined,
+      ...(codexThread ? { codexThread, ...(codexHome ? { codexHome } : {}) } : {}),
     };
     if (registration != null) memberRegistrations.set(agent, registration);
     this.agents.set(name, agent);
@@ -554,6 +582,8 @@ export class ChatRoom extends EventEmitter {
       existing.weztermPaneId = undefined;
       existing.weztermGui = undefined;
       existing.orcaTerminal = undefined;
+      existing.codexThread = undefined;
+      existing.codexHome = undefined;
       existing.active = true;
       existing.lastSeen = now;
       if (!existing.role && persistedRole) existing.role = persistedRole;
@@ -819,9 +849,19 @@ export class ChatRoom extends EventEmitter {
     // A handle-only registration is found by its handle (the read and send
     // routes match it before pid and pane); handles are term_<id>, URL-safe.
     const orcaParam = agent.orcaTerminal ? `&orcaTerminal=${encodeURIComponent(agent.orcaTerminal)}` : "";
+    // This room's registration of the member: the one identifier every
+    // registration has. A member known by no pid, pane or handle (a Codex
+    // session woken by its thread) whose name is registered in two rooms is
+    // otherwise ambiguous (403) on both callbacks. On a host serving a hosted
+    // wake this is the host's own registration, the one its mirror resolves.
+    // Only a well-formed id is written: the reply sits in single quotes.
+    const reg = memberRegistrations.get(agent);
+    const registration = reg && /^[A-Za-z0-9_-]{1,128}$/.test(reg) ? reg : undefined;
+    const regParam = registration ? `&registration=${registration}` : "";
     const pidBody = (agent.pid ? `,"pid":${agent.pid}` : "") +
       (agent.weztermPaneId != null && agent.weztermGui != null ? `,"paneId":${agent.weztermPaneId},"weztermGui":${agent.weztermGui}` : "") +
-      (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "");
+      (agent.orcaTerminal ? `,"orcaTerminal":${JSON.stringify(agent.orcaTerminal)}` : "") +
+      (registration ? `,"registration":"${registration}"` : "");
     // Never past the mention: the read the prompt asks for starts before the
     // mention, whatever the stored cursor says. (A read returns at most its
     // limit of the latest messages, 50 by default, so a mention with more
@@ -837,7 +877,7 @@ export class ChatRoom extends EventEmitter {
       : (cursor ?? 0);
     return (
       `[joind] @${agent.name} mentioned by ${sender}${where}.${roleHint} ` +
-      `Read: curl -s "${base}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}" then ` +
+      `Read: curl -s "${base}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}${regParam}" then ` +
       `Reply: curl -s -X POST ${base}/api/agent/send -H "Content-Type: application/json" ` +
       `-d '{"sender":"${agent.name}","text":"YOUR_REPLY"${pidBody}}'`
     );
@@ -921,6 +961,10 @@ export class ChatRoom extends EventEmitter {
       session = wakes.sessionOf(this.warnKey(name));
       console.log(`  → Injecting into ${name} (${identity})...`);
       const pid = agent.pid;
+      // What the queue route is bound to: this registration, thread and home.
+      const registration = memberRegistrations.get(agent);
+      const codexThread = agent.codexThread;
+      const codexHome = agent.codexHome;
       try {
         await inject(agent.pid, prompt, agent.weztermPaneId, getWeztermPath(), agent.weztermGui != null ? undefined : getWeztermEnv(), undefined, {
           // A pane of a known GUI goes through that GUI's socket only; a GUI
@@ -937,6 +981,22 @@ export class ChatRoom extends EventEmitter {
             if (plan.kind === "codex" && !submitCheck) {
               submitCheck = { check: beginSubmitCheck(prompt, this.submitCheckOptions), pid, identity };
             }
+          },
+          // `codex queue` first when the join gave a Codex thread: no keys.
+          codexThread,
+          codexHome,
+          // Asked right before the queue command runs: the same registration,
+          // still bound to this thread and home, in the same terminal
+          // identity. A rejoin that changed or dropped the thread stops it
+          // (no send, no fallback); "moved" wakes the new registration.
+          queueGuard: () => {
+            const live = this.agents.get(name);
+            if (this.destroyed || !live?.active) return "skip";
+            if (memberRegistrations.get(live) !== registration) return "moved";
+            if (live.codexThread !== codexThread || live.codexHome !== codexHome) return "moved";
+            if (terminalIdentity(live) !== identity) return "moved";
+            if (lockKeysFor(live).some((k) => !held.has(k))) return "moved";
+            return "proceed";
           },
           // Orca's own input path first when the join bound a handle.
           orcaTerminal: agent.orcaTerminal,
