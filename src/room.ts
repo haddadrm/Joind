@@ -100,6 +100,7 @@ function sameTerminal(held: ReadonlySet<string>, live: TerminalRef): boolean {
 }
 import { getWeztermPath, getWeztermEnv } from "./terminals.js";
 import { loadMessages, appendMessage, maxId, ensureDir } from "./persist.js";
+import { searchMessages, windowAround, type MessageWindow, type SearchPage, type SearchQuery } from "./search.js";
 
 /**
  * DM visibility: a targeted message is visible only to its sender and its
@@ -1558,6 +1559,19 @@ export class ChatRoom extends EventEmitter {
       }
     }
     return results;
+  }
+
+  /** A page of the query grammar (src/search.ts), newest first, DM
+   *  visibility for `viewer` applied fail closed. */
+  searchPage(query: SearchQuery, opts: { limit: number; before?: number; viewer: string | undefined }): SearchPage {
+    const viewer = opts.viewer;
+    return searchMessages(this.messages, query, { limit: opts.limit, before: opts.before, visible: (m) => visibleToViewer(m, viewer) });
+  }
+
+  /** The visible messages around `id`; null when it is absent or hidden
+   *  from `viewer` (fail closed, as getMessageById plus visibleToViewer). */
+  readAround(id: number, limit: number, viewer: string | undefined): MessageWindow | null {
+    return windowAround(this.messages, id, limit, (m) => visibleToViewer(m, viewer));
   }
 
   updateMessageText(messageId: number, newText: string): ChatMessage | null {

@@ -244,6 +244,7 @@ function connect() {
         agents = event.data.agents;
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         allMessages = (event.data.messages || []).slice();
+        historyView = null;
         activeConversation = event.data.activeConversation || null;
         conversationList = event.data.conversations || [];
         // A (re)connect is a new generation: HTTP responses to requests made
@@ -347,6 +348,17 @@ function connect() {
         }
         // A dispatched undelivered message is replaced by its real copy here
         settlePendingFor(event.conversationId || activeConversation.id, event.data);
+        if (historyView && historyView.conv === activeConversation.id) {
+          // The pane shows older messages: count the new one; "Jump to
+          // latest" reloads the latest page, this message included.
+          if (messageInCurrentView(event.data)) {
+            historyView.newCount += 1;
+            renderHistoryChrome();
+            if (event.data.sender !== 'system') playSound(event.data.sender);
+          }
+          if (activeConversation) activeConversation.messageCount = (activeConversation.messageCount || 0) + 1;
+          break;
+        }
         allMessages.push(event.data);
         // Filter: only render messages that belong to the current view
         // (channel view skips DMs; DM view skips channel traffic)
@@ -907,14 +919,25 @@ function appendMessage(msg, scroll) {
     // Reply quote (before header): only when the quoted message is visible
     // in the current view, so a quote never leaks across DM threads
     if (msg.replyTo) {
-      var orig = allMessages.find(function(m) { return m.id === msg.replyTo; });
+      var quoteConv = el.dataset.conv;
+      var orig = allMessages.find(function(m) { return m.id === msg.replyTo && (!m.conversationId || !quoteConv || m.conversationId === quoteConv); });
       if (orig && messageInCurrentView(orig)) {
         var quote = document.createElement('div');
         quote.className = 'reply-quote';
         quote.textContent = orig.sender + ': ' + (orig.text || '').slice(0, 80);
         quote.style.borderLeftColor = getSenderColor(orig.sender);
-        quote.addEventListener('click', function() { scrollToMessage(orig.id); });
+        quote.addEventListener('click', function() { jumpToMessage(quoteConv, orig.id); });
         body.appendChild(quote);
+      } else if (!orig && Number(msg.replyTo) > 0) {
+        // The original is outside the loaded page: show only its id (which
+        // this message already carries) and load it on click.
+        var farQuote = document.createElement('div');
+        farQuote.className = 'reply-quote reply-quote-far';
+        farQuote.textContent = 'Reply to #' + Number(msg.replyTo);
+        farQuote.title = 'Load the quoted message';
+        var farId = Number(msg.replyTo);
+        farQuote.addEventListener('click', function() { jumpToMessage(quoteConv, farId); });
+        body.appendChild(farQuote);
       }
     }
 
@@ -946,7 +969,7 @@ function appendMessage(msg, scroll) {
 
     var tw = document.createElement('div');
     tw.className = 'msg-text-wrap';
-    renderContent(tw, msg.text);
+    renderContent(tw, msg.text, el.dataset.conv);
 
     // Image display
     if (msg.image) {
@@ -1123,7 +1146,7 @@ function renderChoices(container, msg) {
   }
 }
 
-function renderContent(parent, text) {
+function renderContent(parent, text, conv) {
   if (!text) { parent.textContent = ''; return; }
   if (typeof marked !== 'undefined') {
     // Ensure real newlines (WebSocket/JSON may deliver literal \n)
@@ -1140,6 +1163,7 @@ function renderContent(parent, text) {
   } else {
     renderTextWithMentions(parent, text);
   }
+  linkifyMessageRefs(parent, conv || currentConvId());
 }
 
 function renderTextWithMentions(parent, text) {
@@ -1214,6 +1238,7 @@ function updateNewMsgsPill() {
 }
 
 function jumpToBottom() {
+  if (historyView) { exitHistoryView(); return; }
   scrollToBottom();
   autoScroll = true;
   unreadCount = 0;
@@ -1282,12 +1307,259 @@ function scrollToMessage(id) {
   }
 }
 
+
+// --- Message links (#N) and the history window ---
+// A message body citing #1234 links to that message in the same room. A
+// target outside the loaded page is fetched with the messages around it
+// (GET /api/messages?around=), shown as a history window with a way back to
+// the latest messages. Reply quotes and search hits use the same loader.
+
+// `#` starts a token (start of text, whitespace, or an opening bracket) and
+// the digits end at a word boundary. Code, links and mentions are skipped.
+var MSG_REF_RE = /(^|[\s(\[{])#(\d{1,12})(?!\w)/g;
+var MSG_REF_SKIP = { A: true, CODE: true, PRE: true, KBD: true, SAMP: true, SCRIPT: true, STYLE: true, TEXTAREA: true };
+
+// Set while the channel pane shows a window around an older message:
+// { conv, anchor, hasNewer, newCount }. Null in the normal (latest) view.
+var historyView = null;
+var jumpSeq = 0;
+var historyExitSeq = 0;
+
+function linkifyMessageRefs(root, conv) {
+  if (!root || !root.ownerDocument) return;
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: function(node) {
+      for (var p = node.parentNode; p && p !== root; p = p.parentNode) {
+        if (p.nodeType === 1 && (MSG_REF_SKIP[p.nodeName] || (p.classList && (p.classList.contains('mention') || p.classList.contains('msg-ref'))))) {
+          return NodeFilter.FILTER_REJECT;
+        }
+      }
+      return node.nodeValue && node.nodeValue.indexOf('#') >= 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    }
+  });
+  var nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(function(node) { linkifyTextNode(node, conv); });
+}
+
+function linkifyTextNode(node, conv) {
+  var text = node.nodeValue;
+  MSG_REF_RE.lastIndex = 0;
+  var m, last = 0, frag = null;
+  while ((m = MSG_REF_RE.exec(text)) !== null) {
+    var hashAt = m.index + m[1].length;
+    if (!frag) frag = document.createDocumentFragment();
+    if (hashAt > last) frag.appendChild(document.createTextNode(text.slice(last, hashAt)));
+    frag.appendChild(makeMessageRef(Number(m[2]), conv));
+    last = hashAt + 1 + m[2].length;
+  }
+  if (!frag) return;
+  if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+  node.parentNode.replaceChild(frag, node);
+}
+
+function makeMessageRef(id, conv) {
+  var a = document.createElement('a');
+  a.className = 'msg-ref';
+  a.href = '#';
+  a.textContent = '#' + id;
+  a.title = 'Jump to message #' + id;
+  a.dataset.refId = String(id);
+  if (conv) a.dataset.refConv = conv;
+  a.addEventListener('click', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    jumpToMessage(a.dataset.refConv || currentConvId(), id);
+  });
+  return a;
+}
+
+function currentConvId() {
+  return (activeConversation && activeConversation.id) || '';
+}
+
+// The rendered element for (conv, id) in the message pane, if any.
+function messageElementFor(conv, id) {
+  var els = document.querySelectorAll('#messages .message[data-id="' + Number(id) + '"]');
+  for (var i = 0; i < els.length; i++) {
+    if (!conv || els[i].dataset.conv === conv) return els[i];
+  }
+  return null;
+}
+
+function highlightMessageEl(el) {
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.remove('msg-flash');
+  void el.offsetWidth;
+  el.classList.add('msg-flash');
+  setTimeout(function() { el.classList.remove('msg-flash'); }, 1600);
+}
+
+var refNoticeTimer = null;
+function showRefNotice(text) {
+  var n = document.getElementById('ref-notice');
+  if (!n) return;
+  n.textContent = text;
+  n.hidden = false;
+  clearTimeout(refNoticeTimer);
+  refNoticeTimer = setTimeout(function() { n.hidden = true; }, 3500);
+}
+
+function refNotFoundText(id, body) {
+  if (body && body.reason === 'older-than-cache') {
+    return 'Message #' + id + ' is older than this server\'s copy of the remote room';
+  }
+  return 'Message #' + id + ' not found in this room';
+}
+
+// The DM partner whose mailbox shows `msg`, or null when it is not the
+// viewer's conversation (then there is no view to open here).
+function dmPartnerOf(msg) {
+  if (!msg || !msg.to) return null;
+  var me = myName();
+  if (msg.sender === me) {
+    for (var i = 0; i < msg.to.length; i++) {
+      if (msg.to[i] !== me) return msg.to[i];
+    }
+    return null;
+  }
+  return msg.to.indexOf(me) >= 0 ? msg.sender : null;
+}
+
+// Jump to message `id` of conversation `conv`: scroll to it when it is on
+// screen, else ask the server (which applies DM visibility, fail closed),
+// then open its DM thread or load the window around it. `known` is the
+// message when the caller already holds it (a search hit).
+function jumpToMessage(conv, id, known) {
+  id = Number(id);
+  if (!conv || !(id > 0)) return;
+  var seq = ++jumpSeq;
+  var el = messageElementFor(conv, id);
+  if (el) { highlightMessageEl(el); return; }
+  if (known) { openLoadedMessage(conv, known, seq); return; }
+  fetch('/api/message/' + id + '?conversation=' + encodeURIComponent(conv) + '&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
+    .then(function(res) {
+      if (seq !== jumpSeq) return;
+      if (!res.ok) { showRefNotice(refNotFoundText(id, res.body)); return; }
+      openLoadedMessage(conv, res.body, seq);
+    })
+    .catch(function() { if (seq === jumpSeq) showRefNotice('Could not load message #' + id); });
+}
+
+function openLoadedMessage(conv, msg, seq) {
+  if (msg.to) {
+    var partner = dmPartnerOf(msg);
+    if (!partner) { showRefNotice(refNotFoundText(msg.id)); return; }
+    if (activeDm !== partner) selectDm(partner);
+    scrollToMessageWhenReady(msg.id, 10, conv);
+    return;
+  }
+  if (!activeConversation || activeConversation.id !== conv) {
+    selectConversation(conv, function() {
+      if (seq !== jumpSeq) return;
+      var el = messageElementFor(conv, msg.id);
+      if (el) { highlightMessageEl(el); return; }
+      loadAroundMessage(conv, msg.id, seq);
+    });
+    return;
+  }
+  if (activeDm) {
+    // Back to the channel pane first; the target may already be loaded there.
+    renderChannelView();
+    var el = messageElementFor(conv, msg.id);
+    if (el) { highlightMessageEl(el); return; }
+  }
+  loadAroundMessage(conv, msg.id, seq);
+}
+
+function loadAroundMessage(conv, id, seq) {
+  fetch('/api/messages?conversation=' + encodeURIComponent(conv) + '&around=' + id + '&limit=60&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
+    .then(function(res) {
+      if (seq !== jumpSeq) return;
+      if (!activeConversation || activeConversation.id !== conv) return;
+      if (!res.ok || !res.body || !Array.isArray(res.body.messages)) { showRefNotice(refNotFoundText(id, res.body)); return; }
+      historyView = { conv: conv, anchor: id, hasNewer: !!res.body.hasNewer, newCount: 0 };
+      allMessages = res.body.messages.slice();
+      renderChannelView();
+      var el = messageElementFor(conv, id);
+      if (el) highlightMessageEl(el);
+    })
+    .catch(function() { if (seq === jumpSeq) showRefNotice('Could not load message #' + id); });
+}
+
+// The history window's banner (top of the pane) and its "latest" pill.
+function renderHistoryChrome() {
+  var pill = document.getElementById('history-pill');
+  var c = document.getElementById('messages');
+  var old = document.getElementById('history-banner');
+  if (old) old.remove();
+  var inWindow = historyView && !activeDm && activeConversation && activeConversation.id === historyView.conv;
+  if (!inWindow) {
+    if (pill) pill.classList.add('hidden');
+    return;
+  }
+  var banner = document.createElement('div');
+  banner.id = 'history-banner';
+  banner.className = 'history-banner';
+  var label = document.createElement('span');
+  label.textContent = 'Showing older messages around #' + historyView.anchor + '.';
+  var back = document.createElement('button');
+  back.type = 'button';
+  back.className = 'btn-link';
+  back.textContent = 'Jump to latest';
+  back.addEventListener('click', jumpToBottom);
+  banner.appendChild(label);
+  banner.appendChild(back);
+  c.insertBefore(banner, c.firstChild);
+  if (pill) {
+    var countEl = document.getElementById('history-pill-label');
+    if (countEl) {
+      countEl.textContent = historyView.newCount > 0
+        ? 'Jump to latest (' + historyView.newCount + ' new)'
+        : 'Jump to latest';
+    }
+    pill.classList.remove('hidden');
+  }
+}
+
+// Leave the history window: reload the latest page of the room. Messages
+// that arrive meanwhile are kept (merged by id), so none is lost.
+function exitHistoryView() {
+  if (!historyView) return;
+  var conv = historyView.conv;
+  historyView = null;
+  allMessages = [];
+  renderHistoryChrome();
+  var mySeq = ++historyExitSeq;
+  fetch('/api/messages?conversation=' + encodeURIComponent(conv) + '&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { return r.json(); })
+    .then(function(list) {
+      if (mySeq !== historyExitSeq || historyView) return;
+      if (!activeConversation || activeConversation.id !== conv) return;
+      var fetched = Array.isArray(list) ? list.slice() : [];
+      var seen = {};
+      fetched.forEach(function(m) { seen[String(m.id)] = true; });
+      allMessages.forEach(function(m) { if (!seen[String(m.id)]) fetched.push(m); });
+      fetched.sort(function(a, b) {
+        // Local link lines (negative ids) keep their time order.
+        if (a.id > 0 && b.id > 0) return a.id - b.id;
+        return a.timestamp - b.timestamp;
+      });
+      allMessages = fetched;
+      if (!activeDm) renderChannelView();
+    })
+    .catch(function() { showRefNotice('Could not load the latest messages'); });
+}
+
 // --- Send ---
 function sendMessage() {
   var input = document.getElementById('message-input');
   var sender = document.getElementById('sender-name');
   var text = input.value.trim();
   if (!text && !pendingImage) return;
+  if (historyView) exitHistoryView();
 
   // /decide slash command: "/decide Question? | optA | optB | optC"
   var decide = parseDecideCommand(text);
@@ -2073,6 +2345,112 @@ function kickAgent(name) {
 // --- Sidebar toggle (desktop: show/hide, mobile: drawer overlay) ---
 function isMobileView() { return window.innerWidth <= 560; }
 
+// --- Resizable sidebar (desktop only) ---
+// A seam on the sidebar's right edge. Width = pointer x minus the app
+// container's left edge, applied on every pointermove and clamped; saved
+// once on pointerup. Arrow keys on the focused seam step 16 px. Below the
+// mobile breakpoint the sidebar is a drawer and the saved width is not applied.
+var SIDEBAR_MIN = 180;
+var SIDEBAR_MAX = 480;
+var SIDEBAR_STEP = 16;
+var SIDEBAR_WIDTH_KEY = 'joind-sidebar-width';
+// This page's width when storage is unavailable (private window, blocked site data).
+var sidebarWidthMem = null;
+
+function readSidebarWidth() {
+  if (sidebarWidthMem !== null) return sidebarWidthMem;
+  try {
+    var raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    var v = raw === null ? NaN : Number(raw);
+    if (Number.isFinite(v) && v > 0) return clampSidebarWidth(v);
+  } catch (e) { /* storage unavailable */ }
+  return sidebarWidthMem;
+}
+
+function saveSidebarWidth(w) {
+  sidebarWidthMem = clampSidebarWidth(w);
+  try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(w))); } catch (e) { /* storage unavailable: the width holds for this page only */ }
+}
+
+function clampSidebarWidth(w) {
+  return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(w)));
+}
+
+function setSidebarWidth(w) {
+  var sb = document.getElementById('sidebar');
+  if (!sb) return;
+  var seam = document.getElementById('sidebar-seam');
+  if (w === null || isMobileView()) {
+    sb.style.width = '';
+    sb.style.minWidth = '';
+    if (seam) seam.removeAttribute('aria-valuenow');
+    return;
+  }
+  var cw = clampSidebarWidth(w);
+  sb.style.width = cw + 'px';
+  sb.style.minWidth = cw + 'px';
+  if (seam) seam.setAttribute('aria-valuenow', String(cw));
+}
+
+function currentSidebarWidth() {
+  var sb = document.getElementById('sidebar');
+  return sb ? sb.getBoundingClientRect().width : SIDEBAR_MIN;
+}
+
+function initSidebarResize() {
+  var sb = document.getElementById('sidebar');
+  var seam = document.getElementById('sidebar-seam');
+  var app = document.querySelector('.app');
+  if (!sb || !seam || !app) return;
+  setSidebarWidth(readSidebarWidth());
+  var dragging = false;
+  var lastWidth = null;
+  seam.addEventListener('pointerdown', function(e) {
+    if (isMobileView() || sb.classList.contains('hidden') || e.button !== 0) return;
+    e.preventDefault();
+    dragging = true;
+    lastWidth = null;
+    try { seam.setPointerCapture(e.pointerId); } catch (err) { /* capture unsupported: moves still arrive while over the seam */ }
+    seam.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+  });
+  seam.addEventListener('pointermove', function(e) {
+    if (!dragging) return;
+    var w = clampSidebarWidth(e.clientX - app.getBoundingClientRect().left);
+    lastWidth = w;
+    setSidebarWidth(w);
+  });
+  function endDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    try { seam.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+    seam.classList.remove('dragging');
+    document.body.classList.remove('sidebar-resizing');
+    if (lastWidth !== null) saveSidebarWidth(lastWidth);
+  }
+  seam.addEventListener('pointerup', endDrag);
+  seam.addEventListener('pointercancel', endDrag);
+  seam.addEventListener('lostpointercapture', endDrag);
+  seam.addEventListener('keydown', function(e) {
+    if (isMobileView() || sb.classList.contains('hidden')) return;
+    var delta = e.key === 'ArrowLeft' ? -SIDEBAR_STEP : e.key === 'ArrowRight' ? SIDEBAR_STEP : 0;
+    if (!delta) return;
+    e.preventDefault();
+    var w = clampSidebarWidth(currentSidebarWidth() + delta);
+    setSidebarWidth(w);
+    saveSidebarWidth(w);
+  });
+  // Crossing the mobile breakpoint: the drawer takes its own width; back on
+  // desktop the saved width returns.
+  var wasMobile = isMobileView();
+  window.addEventListener('resize', function() {
+    var nowMobile = isMobileView();
+    if (nowMobile === wasMobile) return;
+    wasMobile = nowMobile;
+    setSidebarWidth(nowMobile ? null : readSidebarWidth());
+  });
+}
+
 function toggleSidebar() {
   var sb = document.getElementById('sidebar');
   if (isMobileView()) {
@@ -2086,7 +2464,7 @@ function toggleSidebar() {
   } else {
     // Desktop: toggle hidden
     sb.classList.toggle('hidden');
-    localStorage.setItem('joind-sidebar', sb.classList.contains('hidden') ? 'hidden' : 'visible');
+    try { localStorage.setItem('joind-sidebar', sb.classList.contains('hidden') ? 'hidden' : 'visible'); } catch (e) { /* storage unavailable */ }
   }
 }
 
@@ -2421,8 +2799,9 @@ var convSelectSeq = 0;
 // already painted the active room from newer data than the response.
 var socketInitCount = 0;
 
-function selectConversation(id) {
+function selectConversation(id, after) {
   var mySelect = ++convSelectSeq;
+  historyView = null;
   // Close mobile drawer if open
   if (isMobileView()) closeMobileDrawer();
   activeDm = null;
@@ -2478,6 +2857,7 @@ function selectConversation(id) {
         renderChannelView();
         // Refresh tasks for the new conversation
         resetRoomTasks(activeConversation.id);
+        if (typeof after === 'function' && activeConversation.id === id) after();
       }
     });
 }
@@ -2726,6 +3106,7 @@ function mergeDmThread(existing, incoming) {
 
 function selectDm(name) {
   activeDm = name;
+  renderHistoryChrome();
   delete dmUnread[name];
   showComposerError('');
   dmThread = [];
@@ -2819,8 +3200,12 @@ function renderChannelView() {
   var c = document.getElementById('messages');
   c.textContent = '';
   currentViewMessages(allMessages).forEach(function(m) { appendMessage(m, false); });
-  renderPendingForActive();
-  if (allMessages.length > 0) scrollToBottom();
+  var inHistory = historyView && activeConversation && historyView.conv === activeConversation.id;
+  if (!inHistory) {
+    renderPendingForActive();
+    if (allMessages.length > 0) scrollToBottom();
+  }
+  renderHistoryChrome();
   renderConversationList();
   renderDmList();
   syncInputPlaceholder();
@@ -4243,9 +4628,12 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
   // Restore sidebar state (desktop only — mobile uses drawer)
-  if (!isMobileView() && localStorage.getItem('joind-sidebar') === 'hidden') {
+  var sidebarHidden = false;
+  try { sidebarHidden = localStorage.getItem('joind-sidebar') === 'hidden'; } catch (e) { /* storage unavailable */ }
+  if (!isMobileView() && sidebarHidden) {
     document.getElementById('sidebar').classList.add('hidden');
   }
+  initSidebarResize();
 });
 
 // renderRolesPanel is now integrated into the settings dialog
@@ -6168,7 +6556,7 @@ function handleMessageEdited(data) {
   if (tw) {
     // Re-render text
     tw.textContent = '';
-    renderContent(tw, data.newText);
+    renderContent(tw, data.newText, el.dataset.conv);
     // Add edited badge if not present
     if (!tw.querySelector('.msg-edited-badge')) {
       var badge = document.createElement('span');
@@ -6198,63 +6586,179 @@ function closeSearch() {
   document.getElementById('search-bar').classList.add('hidden');
   document.getElementById('search-results').textContent = '';
   document.getElementById('search-input').value = '';
+  renderSearchChips('');
+  searchSeq++;
+  searchState = null;
 }
 // Switch to the view that owns a message, then reveal it. Targeted
 // messages open their DM thread; channel messages return to channel view.
 function openMessageInView(msg) {
-  if (msg.to) {
-    var me = myName();
-    var partner = null;
-    if (msg.sender === me) {
-      for (var i = 0; i < msg.to.length; i++) {
-        if (msg.to[i] !== me) { partner = msg.to[i]; break; }
-      }
-    } else if (msg.to.indexOf(me) >= 0) {
-      partner = msg.sender;
-    }
-    // A targeted message not involving the user has no view to open here
-    if (!partner) return;
-    if (activeDm !== partner) selectDm(partner);
-  } else if (activeDm) {
-    renderChannelView();
-  }
-  scrollToMessage(msg.id);
+  // The loader opens the DM thread for a targeted message, the channel
+  // (and the window around it) for a public one.
+  jumpToMessage(msg.conversationId || currentConvId(), msg.id, msg);
 }
 
-function doSearch() {
+// Search the room being viewed with the query grammar the server parses
+// (src/search.ts): from:<name>, @<name> or mentions:<name>, #<a>-<b> for an
+// id range, and free words (all must match). The active terms show as chips
+// under the box; results page newest first with a "More" button.
+var SEARCH_PAGE = 20;
+var searchSeq = 0;
+var searchState = null; // { conv, q, nextBefore }
+
+// The same tokens as the server grammar, for the chips only (the server
+// parses the query again and is the authority on what matches).
+function parseSearchChips(q) {
+  var chips = [];
+  var re = /"([^"]*)"|(\S+)/g;
+  var m;
+  while ((m = re.exec(q.slice(0, 500))) !== null) {
+    var raw = m[0];
+    if (m[1] !== undefined) {
+      if (m[1].trim()) chips.push({ kind: 'word', label: '"' + m[1].trim() + '"', raw: raw });
+      continue;
+    }
+    var tok = m[2];
+    var lower = tok.toLowerCase();
+    var name;
+    if (lower.indexOf('from:') === 0 && /^\w[\w-]*$/.test(name = tok.slice(5))) {
+      chips.push({ kind: 'from', label: 'from: ' + name, raw: raw });
+    } else if (lower.indexOf('mentions:') === 0 && /^\w[\w-]*$/.test(name = tok.slice(9).replace(/^@/, ''))) {
+      chips.push({ kind: 'mention', label: 'mentions: @' + name, raw: raw });
+    } else if (tok.charAt(0) === '@' && /^\w[\w-]*$/.test(name = tok.slice(1))) {
+      chips.push({ kind: 'mention', label: 'mentions: @' + name, raw: raw });
+    } else if (/^#\d{1,15}-#?\d{1,15}$/.test(tok)) {
+      var parts = tok.replace(/#/g, '').split('-');
+      var a = Number(parts[0]), b = Number(parts[1]);
+      chips.push({ kind: 'range', label: 'ids #' + Math.min(a, b) + ' to #' + Math.max(a, b), raw: raw });
+    } else {
+      chips.push({ kind: 'word', label: tok, raw: raw });
+    }
+  }
+  return chips;
+}
+
+function renderSearchChips(q) {
+  var row = document.getElementById('search-chips');
+  if (!row) return;
+  row.textContent = '';
+  var chips = parseSearchChips(q);
+  if (chips.length === 0) { row.hidden = true; return; }
+  row.hidden = false;
+  chips.forEach(function(chip, idx) {
+    var el = document.createElement('span');
+    el.className = 'search-chip search-chip-' + chip.kind;
+    var label = document.createElement('span');
+    label.textContent = chip.label;
+    var x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'search-chip-x';
+    x.setAttribute('aria-label', 'Remove filter ' + chip.label);
+    x.textContent = '×';
+    x.addEventListener('click', function() {
+      var rest = chips.filter(function(_, i) { return i !== idx; }).map(function(c) { return c.raw; });
+      var inp = document.getElementById('search-input');
+      inp.value = rest.join(' ');
+      inp.focus();
+      doSearch();
+    });
+    el.appendChild(label);
+    el.appendChild(x);
+    row.appendChild(el);
+  });
+  var clear = document.createElement('button');
+  clear.type = 'button';
+  clear.className = 'btn-link search-chips-clear';
+  clear.textContent = 'Clear';
+  clear.addEventListener('click', function() {
+    var inp = document.getElementById('search-input');
+    inp.value = '';
+    inp.focus();
+    doSearch();
+  });
+  row.appendChild(clear);
+}
+
+function searchResultItem(msg, conv) {
+  var item = document.createElement('div');
+  item.className = 'search-result-item';
+  item.setAttribute('role', 'option');
+  item.tabIndex = 0;
+  var sender = document.createElement('span');
+  sender.className = 'search-result-sender';
+  sender.style.color = getSenderColor(msg.sender);
+  sender.textContent = msg.sender;
+  var text = document.createElement('span');
+  text.className = 'search-result-text';
+  text.textContent = (msg.text || '').slice(0, 120);
+  var id = document.createElement('span');
+  id.className = 'search-result-id';
+  id.textContent = '#' + msg.id;
+  item.appendChild(sender);
+  item.appendChild(text);
+  item.appendChild(id);
+  var open = function() {
+    closeSearch();
+    jumpToMessage(conv, msg.id, msg);
+  };
+  item.addEventListener('click', open);
+  item.addEventListener('keydown', function(e) { if (e.key === 'Enter') open(); });
+  return item;
+}
+
+// `more`: fetch the next (older) page of the current query and append it.
+function doSearch(more) {
   var q = document.getElementById('search-input').value.trim();
   var results = document.getElementById('search-results');
-  if (!q) { results.textContent = ''; return; }
-  fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=20&viewer=' + encodeURIComponent(myName()) + '&token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      results.textContent = '';
-      if (!data || data.length === 0) {
-        results.textContent = 'No results';
-        return;
+  renderSearchChips(q);
+  var conv = currentConvId();
+  if (!q || !conv) { searchSeq++; searchState = null; results.textContent = ''; return; }
+  var before = null;
+  if (more === true && searchState && searchState.q === q && searchState.conv === conv) before = searchState.nextBefore;
+  var mySeq = ++searchSeq;
+  var url = '/api/search?page=1&conversation=' + encodeURIComponent(conv) + '&q=' + encodeURIComponent(q) +
+    '&limit=' + SEARCH_PAGE + (before ? '&before=' + before : '') + '&token=' + encodeURIComponent(webToken());
+  fetch(url)
+    .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
+    .then(function(res) {
+      if (mySeq !== searchSeq) return;
+      if (!before) results.textContent = '';
+      var oldMore = document.getElementById('search-more');
+      if (oldMore) oldMore.remove();
+      var oldNote = document.getElementById('search-coverage');
+      if (oldNote) oldNote.remove();
+      var body = res.body || {};
+      var list = res.ok && Array.isArray(body.results) ? body.results : [];
+      if (!before && list.length === 0) {
+        var none = document.createElement('div');
+        none.className = 'search-empty';
+        none.textContent = res.ok ? 'No results' : 'Search failed';
+        results.appendChild(none);
       }
-      data.forEach(function(r) {
-        var item = document.createElement('div');
-        item.className = 'search-result-item';
-        var sender = document.createElement('span');
-        sender.className = 'search-result-sender';
-        sender.style.color = getSenderColor(r.message.sender);
-        sender.textContent = r.message.sender;
-        var text = document.createElement('span');
-        text.className = 'search-result-text';
-        text.textContent = r.message.text.slice(0, 120);
-        var id = document.createElement('span');
-        id.className = 'search-result-id';
-        id.textContent = '#' + r.message.id;
-        item.appendChild(sender);
-        item.appendChild(text);
-        item.appendChild(id);
-        item.addEventListener('click', function() {
-          openMessageInView(r.message);
-          closeSearch();
-        });
-        results.appendChild(item);
-      });
+      list.forEach(function(r) { results.appendChild(searchResultItem(r.message, conv)); });
+      searchState = { conv: conv, q: q, nextBefore: body.nextBefore || null };
+      if (body.nextBefore) {
+        var moreBtn = document.createElement('button');
+        moreBtn.type = 'button';
+        moreBtn.id = 'search-more';
+        moreBtn.className = 'btn btn-sm search-more';
+        moreBtn.textContent = 'More results';
+        moreBtn.addEventListener('click', function() { doSearch(true); });
+        results.appendChild(moreBtn);
+      }
+      if (body.coverage && !body.coverage.complete) {
+        var note = document.createElement('div');
+        note.id = 'search-coverage';
+        note.className = 'search-coverage';
+        note.textContent = body.coverage.oldestId
+          ? 'Remote room: only messages from #' + body.coverage.oldestId + ' on are held here; older history on its home server is not searched.'
+          : 'Remote room: older history on its home server is not searched.';
+        results.appendChild(note);
+      }
+    })
+    .catch(function() {
+      if (mySeq !== searchSeq) return;
+      results.textContent = 'Search failed';
     });
 }
 
@@ -6664,10 +7168,10 @@ function renderDecisionsPanel() {
 
 // Retry until the message element exists (conversation loads are async),
 // then scroll; gives up quietly after `tries` beats of 200ms.
-function scrollToMessageWhenReady(id, tries) {
-  var el = document.querySelector('.message[data-id="' + id + '"]');
-  if (el) { scrollToMessage(id); return; }
-  if (tries > 0) setTimeout(function() { scrollToMessageWhenReady(id, tries - 1); }, 200);
+function scrollToMessageWhenReady(id, tries, conv) {
+  var el = conv ? messageElementFor(conv, id) : document.querySelector('.message[data-id="' + id + '"]');
+  if (el) { highlightMessageEl(el); return; }
+  if (tries > 0) setTimeout(function() { scrollToMessageWhenReady(id, tries - 1, conv); }, 200);
 }
 
 refreshDecisionsBadge();

@@ -41,6 +41,7 @@ import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webN
 import { LinkRegistry, type LinkClientOptions } from "./link.js";
 import { PeerHub } from "./peer.js";
 import { MirrorRoom, type MirrorNotice } from "./mirror.js";
+import { parseSearchQuery, hasTerms, searchLimit, searchBefore, windowLimit } from "./search.js";
 import { PeerRefusedError, type RemoteRegistered } from "./peer-types.js";
 import type { CrewFolder } from "./crew.js";
 import { scaffoldCrewMember } from "./scaffold.js";
@@ -756,9 +757,50 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices, ask: msg.ask });
   });
 
+  /**
+   * The room a web read is about: the one its `conversation` parameter names
+   * (a local room or a remote room's mirror, `<server>:<room>`), else the
+   * active room. A named room that is not here is undefined, never the active
+   * room in its place, so a read never answers from a room it did not name.
+   */
+  function viewedRoom(conv: unknown): ChatRoom | undefined {
+    if (conv === undefined) return manager.getActiveRoom();
+    return typeof conv === "string" && conv ? manager.getRoom(conv) : undefined;
+  }
+
+  /** The id of the room viewedRoom resolved, for answers that name it. */
+  function viewedRoomId(conv: unknown): string | null {
+    return typeof conv === "string" && conv ? conv : manager.getActiveMeta()?.id ?? null;
+  }
+
+  /** A 404 for a message the viewer cannot read here. A remote room whose
+   *  cache holds only a recent window says when the id lies below it. */
+  function messageNotFound(res: express.Response, room: ChatRoom, id: number): void {
+    if (room instanceof MirrorRoom) {
+      const cov = room.historyCoverage(webViewer());
+      if (!cov.complete && cov.oldestId !== null && id < cov.oldestId) {
+        res.status(404).json({ error: "Message not found", reason: "older-than-cache", oldestId: cov.oldestId });
+        return;
+      }
+    }
+    res.status(404).json({ error: "Message not found" });
+  }
+
   app.get("/api/messages", (req, res) => {
     if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
     const conv = req.query.conversation;
+    // A window around one message (a link, a reply quote, a search hit):
+    // the same viewer filtering as every other read, fail closed.
+    if (req.query.around !== undefined) {
+      const room = viewedRoom(conv);
+      if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
+      const id = Number(req.query.around);
+      if (!Number.isSafeInteger(id) || id < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+      const win = room.readAround(id, windowLimit(req.query.limit), webViewer());
+      if (!win) { messageNotFound(res, room, id); return; }
+      res.json({ conversation: viewedRoomId(conv), anchor: id, ...win });
+      return;
+    }
     const room = typeof conv === "string" && conv ? manager.getRoom(conv) : manager.getActiveRoom();
     const from = req.query.from as string | undefined;
     // Viewer is the registered web name, never the request (fails closed).
@@ -1389,26 +1431,44 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   // --- Search ---
+  // The room being viewed (`conversation`, else the active room), with the
+  // query grammar of src/search.ts. `page=1` answers one page as an object
+  // ({results, nextBefore, coverage}) and takes a `before` id cursor; without
+  // it the answer is the plain array older clients read.
   app.get("/api/search", (req, res) => {
     if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
-    const room = manager.getActiveRoom();
-    if (!room) { res.json([]); return; }
-    const q = (req.query.q as string) || "";
-    const limit = Number(req.query.limit ?? 20);
-    if (!q) { res.json([]); return; }
+    const paged = req.query.page === "1";
+    const conv = req.query.conversation;
+    const room = viewedRoom(conv);
+    if (!room) {
+      if (paged && conv !== undefined) { res.status(404).json({ error: "Conversation not found" }); return; }
+      res.json(paged ? { results: [], nextBefore: null } : []);
+      return;
+    }
+    const raw = typeof req.query.q === "string" ? req.query.q : "";
+    const query = parseSearchQuery(raw);
+    const limit = searchLimit(req.query.limit);
+    const before = searchBefore(req.query.before);
     // Viewer is the registered web name, never the request (fails closed).
-    res.json(room.search(q, limit, webViewer()));
+    const page = hasTerms(query) ? room.searchPage(query, { limit, before, viewer: webViewer() }) : { results: [], nextBefore: null };
+    if (!paged) { res.json(page.results); return; }
+    res.json({ ...page, ...(room instanceof MirrorRoom ? { coverage: room.historyCoverage(webViewer()) } : {}) });
   });
 
   app.get("/api/message/:id", (req, res) => {
     if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
-    const room = manager.getActiveRoom();
-    if (!room) { res.status(400).json({ error: "No active conversation" }); return; }
+    const conv = req.query.conversation;
+    const room = viewedRoom(conv);
+    if (!room) {
+      if (conv !== undefined) { res.status(404).json({ error: "Conversation not found" }); return; }
+      res.status(400).json({ error: "No active conversation" });
+      return;
+    }
     const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
+    if (!Number.isSafeInteger(id) || id < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
     const msg = room.getMessageById(id);
     // Viewer is the registered web name, never the request (fails closed).
-    if (!msg || !visibleToViewer(msg, webViewer())) { res.status(404).json({ error: "Message not found" }); return; }
+    if (!msg || !visibleToViewer(msg, webViewer())) { messageNotFound(res, room, id); return; }
     res.json(msg);
   });
 

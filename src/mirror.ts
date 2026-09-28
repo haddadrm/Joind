@@ -242,6 +242,10 @@ export class MirrorRoom extends ChatRoom {
   private pendingVerdicts: PendingVerdict[] = [];
   private flushingVerdicts: Promise<number> | null = null;
   private verdictSeq = 0;
+  /** The last home snapshot held every visible message (`complete`). While
+   *  false, this cache holds only a recent window of the remote room, so a
+   *  search or a message link here cannot reach older history. */
+  private historyComplete = false;
 
   constructor(opts: MirrorOptions) {
     super({});
@@ -484,6 +488,7 @@ export class MirrorRoom extends ChatRoom {
    */
   fill(snap: PeerMessagesResult, announce = false, mark = Infinity): void {
     const incoming = snap.messages.filter((m) => typeof m.id === "number").sort((a, b) => a.id - b.id);
+    this.historyComplete = snap.complete === true;
     const snapIds = new Set(incoming.map((m) => m.id));
     const floor = snap.complete === true ? -Infinity : incoming.length > 0 ? incoming[0].id : Infinity;
     // Only what was here before the snapshot was requested (`mark`) can be
@@ -612,6 +617,15 @@ export class MirrorRoom extends ChatRoom {
     const merged = [...this.read(undefined, limit, undefined, viewer), ...this.localLines];
     merged.sort((a, b) => a.timestamp - b.timestamp);
     return merged.slice(-limit);
+  }
+
+  /** How much of the remote room this server holds, for search and links:
+   *  `complete` when the cache has every message visible here, else the
+   *  oldest cached id the viewer may see (older ones live only on the home
+   *  server). Hidden messages never set it, so it reveals no DM's id. */
+  historyCoverage(viewer: string | undefined): { complete: boolean; oldestId: number | null } {
+    const first = this.messages.find((m) => m.id > 0 && visibleToViewer(m, viewer));
+    return { complete: this.historyComplete, oldestId: first ? first.id : null };
   }
 
   meta(): { id: string; name: string; createdAt: number; messageCount: number; starred: boolean } {

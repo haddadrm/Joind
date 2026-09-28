@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=20">
+  <link rel="stylesheet" href="style.css?v=21">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -119,6 +119,7 @@
           <span class="you-name" id="you-name-display">human</span>
         </div>
       </div>
+      <div class="sidebar-seam" id="sidebar-seam" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuemin="180" aria-valuemax="480" tabindex="0" title="Drag to resize; arrow keys when focused"></div>
     </aside>
 
     <div class="main">
@@ -133,8 +134,9 @@
 
       <div class="content">
         <div class="search-bar hidden" id="search-bar" role="search">
-          <input type="text" id="search-input" placeholder="Search messages..." spellcheck="false" aria-label="Search messages" />
+          <input type="text" id="search-input" placeholder="Search this room: words, from:name, @name, #10-40" spellcheck="false" aria-label="Search messages in this room" />
           <button class="search-close" onclick="closeSearch()" type="button" aria-label="Close search"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
+          <div id="search-chips" class="search-chips" aria-label="Active search filters" hidden></div>
           <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
         </div>
 
@@ -168,6 +170,11 @@
           </div>
 
           <div class="typing-bar" id="typing-bar" aria-live="polite"></div>
+          <button class="new-msgs-pill history-pill hidden" id="history-pill" onclick="jumpToBottom()" type="button" aria-label="Jump to the latest messages">
+            <span class="new-msgs-arrow" aria-hidden="true">&#8595;</span>
+            <span id="history-pill-label">Jump to latest</span>
+          </button>
+          <div class="ref-notice" id="ref-notice" role="status" aria-live="polite" hidden></div>
           <button class="new-msgs-pill hidden" id="new-msgs-pill" onclick="jumpToBottom()" type="button" aria-label="Jump to new messages">
             <span class="new-msgs-arrow" aria-hidden="true">&#8595;</span>
             <span id="new-msgs-count">0</span> new messages
@@ -227,7 +234,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=20"></script>
+  <script src="app.js?v=21"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();
