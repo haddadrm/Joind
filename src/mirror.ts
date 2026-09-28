@@ -192,8 +192,12 @@ export const HOSTED_VERDICT_QUEUE_CAP = 20;
 /** A verdict the home could not be told yet (the link was down). */
 interface PendingVerdict {
   body: PeerWakeVerdictBody;
-  /** This server's clock: the queue's TTL runs on it. */
+  /** This server's clock when the verdict was first held: the queue's TTL
+   *  runs on it, and a retry never resets it. */
   queuedAt: number;
+  /** Order of first holding, which breaks ties between equal queuedAt values:
+   *  a verdict put back after a failed send keeps its place by age. */
+  seq: number;
 }
 
 export class MirrorRoom extends ChatRoom {
@@ -237,6 +241,7 @@ export class MirrorRoom extends ChatRoom {
    *  most HOSTED_VERDICT_QUEUE_CAP, each for HOSTED_VERDICT_QUEUE_TTL_MS. */
   private pendingVerdicts: PendingVerdict[] = [];
   private flushingVerdicts: Promise<number> | null = null;
+  private verdictSeq = 0;
 
   constructor(opts: MirrorOptions) {
     super({});
@@ -1222,6 +1227,10 @@ export class MirrorRoom extends ChatRoom {
     try {
       this.logVerdictAnswer(body, await this.transport.wakeVerdict(body));
     } catch (err) {
+      // Destroyed while the request was out: a late outcome is logged and
+      // dropped. It never holds the verdict, and never marks the SHARED link
+      // down on behalf of a room that is gone.
+      if (this.destroyed) { this.logVerdictAfterDestroy(body, err); return; }
       if (err instanceof LinkDownError) {
         this.transport.failed(err.message);
         this.holdVerdict(body, err.message);
@@ -1229,6 +1238,11 @@ export class MirrorRoom extends ChatRoom {
       }
       this.logVerdictDropped(body, err);
     }
+  }
+
+  private logVerdictAfterDestroy(body: PeerWakeVerdictBody, err: unknown): void {
+    const why = err instanceof Error ? err.message : String(err);
+    console.log(`  [link ${this.server}] hosted wake ${shortWakeId(body.wakeId)} for ${body.name}: verdict dropped (${why}, after ${this.id} was removed); the link state is left alone`);
   }
 
   private logVerdictAnswer(body: PeerWakeVerdictBody, r: PeerWakeVerdictResult | undefined): void {
@@ -1241,17 +1255,31 @@ export class MirrorRoom extends ChatRoom {
     console.log(`  [link ${this.server}] hosted wake ${shortWakeId(body.wakeId)} for ${body.name}: verdict dropped (${why})`);
   }
 
-  /** Hold a verdict for the next restore: expired ones go first, then at
-   *  the cap the oldest is evicted, each with a log line. */
+  /** Hold a verdict for the next restore (a new one: now is its queuedAt). */
   private holdVerdict(body: PeerWakeVerdictBody, why: string): void {
-    const now = Date.now();
-    this.dropExpiredVerdicts(now);
-    while (this.pendingVerdicts.length >= HOSTED_VERDICT_QUEUE_CAP) {
+    this.insertVerdict({ body, queuedAt: Date.now(), seq: ++this.verdictSeq }, `verdict held (${why})`);
+  }
+
+  /**
+   * Put a verdict in the queue in age order (queuedAt, then first holding),
+   * then re-establish the bounds: expired entries go, then while over the
+   * cap the oldest goes, each with a log line. Used for a new verdict and
+   * for one put back after a failed send, which keeps its original age: its
+   * TTL is never reset, and when it is the oldest it is the one evicted.
+   * Nothing is inserted into a destroyed mirror.
+   */
+  private insertVerdict(entry: PendingVerdict, what: string): void {
+    if (this.destroyed) return;
+    const at = this.pendingVerdicts.findIndex((p) => p.queuedAt > entry.queuedAt || (p.queuedAt === entry.queuedAt && p.seq > entry.seq));
+    if (at < 0) this.pendingVerdicts.push(entry); else this.pendingVerdicts.splice(at, 0, entry);
+    this.dropExpiredVerdicts(Date.now());
+    while (this.pendingVerdicts.length > HOSTED_VERDICT_QUEUE_CAP) {
       const old = this.pendingVerdicts.shift()!;
       console.log(`  [link ${this.server}] verdict queue cap ${HOSTED_VERDICT_QUEUE_CAP} reached: evicted hosted wake ${shortWakeId(old.body.wakeId)} for ${old.body.name}`);
     }
-    this.pendingVerdicts.push({ body, queuedAt: now });
-    console.log(`  [link ${this.server}] hosted wake ${shortWakeId(body.wakeId)} for ${body.name}: verdict held (${why})`);
+    if (this.pendingVerdicts.includes(entry)) {
+      console.log(`  [link ${this.server}] hosted wake ${shortWakeId(entry.body.wakeId)} for ${entry.body.name}: ${what}`);
+    }
   }
 
   /** The queue's TTL runs on this server's clock and is applied whenever the
@@ -1273,23 +1301,30 @@ export class MirrorRoom extends ChatRoom {
   /**
    * Send the held verdicts home, oldest first; the link's restore calls this
    * after the message queue drained. Each leaves the queue before it is
-   * sent, so a second flush never sends it again; a link failure puts it
-   * back at the head and stops. Resolves with the number the home answered.
+   * sent, so a second flush never sends it again. Every send awaits the
+   * network, so the TTL is checked again before EACH dispatch: an entry that
+   * expired while an earlier one was out is dropped, never sent. A link
+   * failure puts the entry back by its original age, under the same TTL and
+   * cap (the queue may have filled meanwhile), and stops. A mirror destroyed
+   * while a send was out drops the outcome: no reinsertion, no link change.
+   * Resolves with the number the home answered.
    */
   flushVerdicts(): Promise<number> {
     if (this.flushingVerdicts) return this.flushingVerdicts;
     const run = async (): Promise<number> => {
       let sent = 0;
-      this.dropExpiredVerdicts(Date.now());
-      while (this.pendingVerdicts.length > 0 && this.transport.isUp() && !this.destroyed) {
+      for (;;) {
+        this.dropExpiredVerdicts(Date.now());
+        if (this.pendingVerdicts.length === 0 || !this.transport.isUp() || this.destroyed) break;
         const next = this.pendingVerdicts.shift()!;
         try {
           this.logVerdictAnswer(next.body, await this.transport.wakeVerdict(next.body));
           sent++;
         } catch (err) {
+          if (this.destroyed) { this.logVerdictAfterDestroy(next.body, err); break; }
           if (err instanceof LinkDownError) {
-            this.pendingVerdicts.unshift(next);
             this.transport.failed(err.message);
+            this.insertVerdict(next, `verdict held again (${err.message})`);
             break;
           }
           this.logVerdictDropped(next.body, err);

@@ -478,6 +478,30 @@ describe("the host holds a verdict while its link is down, and sends it once", (
     } finally { m.destroy(); }
   });
 
+  it("a verdict put back after a failed send keeps its original age: its TTL is never reset by the retry", async () => {
+    vi.useFakeTimers();
+    const t = fakeTransport();
+    const m = mirror(t);
+    try {
+      t.up = false;
+      const b = body();
+      await m.reportVerdict(b);
+      vi.setSystemTime(Date.now() + HOSTED_VERDICT_QUEUE_TTL_MS - 10_000);
+      t.up = true;
+      t.answer = async () => { throw new LinkDownError("alpha unreachable: connect ECONNRESET"); };
+      expect(await m.flushVerdicts()).toBe(0);
+      expect(m.pendingVerdictCount()).toBe(1);
+      expect(logs.some((l) => l.includes(`hosted wake ${b.wakeId.slice(0, 8)} for Curzon: verdict held again`))).toBe(true);
+      // Ten seconds on, the entry is five minutes old by its FIRST hold: gone, not sent.
+      vi.setSystemTime(Date.now() + 10_000);
+      t.up = true;
+      t.answer = async () => ({ ok: true, accepted: true });
+      expect(await m.flushVerdicts()).toBe(0);
+      expect(t.verdicts).toHaveLength(0);
+      expect(logs).toContain(`  [link alpha] hosted wake ${b.wakeId.slice(0, 8)} for Curzon: held verdict expired after 5 min; dropped`);
+    } finally { m.destroy(); }
+  });
+
   it("a held verdict past its TTL (the host's clock) is dropped with a log line, never sent", async () => {
     vi.useFakeTimers();
     const t = fakeTransport();
