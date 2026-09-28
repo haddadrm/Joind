@@ -12,6 +12,19 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { createServer } from "net";
 
+// Launches are recorded, never started: the launch service's launch,
+// inject and status are replaced by spies on its singleton (beforeAll).
+const fakeLaunch = {
+  launched: [] as LaunchRequest[],
+  injected: [] as string[],
+  status: new Map<string, LaunchResult>(),
+};
+// One known harness, no detection on this machine.
+vi.mock("../src/harnesses.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/harnesses.js")>("../src/harnesses.js");
+  return { ...actual, getHarnesses: async () => [{ id: "test-harness", name: "Test", defaultDelay: 0 } as unknown as import("../src/harnesses.js").HarnessDefinition] };
+});
+
 // No wake may reach a terminal: keystroke injection is a no-op here.
 vi.mock("../src/inject.js", async () => {
   const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
@@ -32,9 +45,11 @@ vi.mock("../src/inject.js", async () => {
 
 vi.mock("../src/terminals.js", async () => {
   const actual = await vi.importActual<typeof import("../src/terminals.js")>("../src/terminals.js");
-  return { ...actual, processTreeOnce: () => () => Promise.resolve(new Map()) };
+  return { ...actual, processTreeOnce: () => () => Promise.resolve(new Map()), getWeztermPath: () => "wezterm-test", getWeztermEnv: () => ({}) };
 });
 
+import { MirrorRoom, type MirrorTransport } from "../src/mirror.js";
+import LaunchService, { type LaunchRequest, type LaunchResult } from "../src/launcher.js";
 import { startJoind, type JoindHandle } from "../src/index.js";
 import type { JoindConfig } from "../src/config.js";
 
@@ -115,6 +130,18 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
       humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
       webToken: WEB, webTokenUserSet: true, links: [],
     };
+    vi.spyOn(LaunchService, "launch").mockImplementation(async (req: LaunchRequest) => {
+      fakeLaunch.launched.push(req);
+      const r: LaunchResult = { launchId: `launch-${fakeLaunch.launched.length}`, status: "spawned", command: "recorded, not run" };
+      fakeLaunch.status.set(r.launchId, r);
+      return r;
+    });
+    vi.spyOn(LaunchService, "inject").mockImplementation(async (launchId: string) => {
+      fakeLaunch.injected.push(launchId);
+      const r = fakeLaunch.status.get(launchId);
+      if (r) r.status = "done";
+    });
+    vi.spyOn(LaunchService, "getLaunchStatus").mockImplementation((launchId: string) => fakeLaunch.status.get(launchId) ?? null);
     S = await startJoind(cfg);
     room = S.manager.createConversation("ops").id;
     other = S.manager.createConversation("other").id;
@@ -249,9 +276,9 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     expect((await call(S.baseUrl, "POST", "/api/state", { conversation: room, key: "k", value: "v" })).status).toBe(200);
   });
   // Last: with the token each guarded write is made for real and checked,
-  // on conversations of its own. Two cannot succeed safely in a test (a real
-  // launch starts an agent process; an undelivered-message delete needs a
-  // remote room), so they must reach their own validation instead.
+  // on conversations of its own. The launch service is an isolated fake (a
+  // real launch starts an agent process), and the undelivered message lives
+  // in a remote room's mirror whose link is down (a stub transport).
   it("lets each guarded write succeed with the token, and the write lands", async () => {
     const h = { "X-Joind-Token": WEB };
     // Routes guarded before this lane read the token from the body; the page sends both.
@@ -334,14 +361,31 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     await ok("POST", "/api/crew/scaffold", { name: "scaf", parentDir: parent }); done("POST", "/api/crew/scaffold");
     expect(existsSync(join(parent, "scaf"))).toBe(true);
 
-    // Past the guard, stopped by their own validation (see above).
-    const launch = await send("POST", "/api/launch", {});
-    expect(launch).toEqual({ status: 400, json: { error: "crewName, crewPath, harness, and joinAs are required" } }); done("POST", "/api/launch");
-    const inject = await call(S.baseUrl, "POST", "/api/launch/nope/inject", undefined, h);
-    expect(inject.status).toBe(404);
-    expect(JSON.stringify(inject.json)).toContain("nope"); done("POST", "/api/launch/abc/inject");
-    const pending = await send("POST", "/api/pending/delete", { conversation: flow, clientId: "c1" });
-    expect(pending).toEqual({ status: 404, json: { error: "No undelivered messages here: not a remote room" } }); done("POST", "/api/pending/delete");
+    // Launch and inject, through the isolated launch service.
+    const launched = await ok("POST", "/api/launch", { crewName: "crewb", crewPath: crewDir, harness: "test-harness", joinAs: "Crewb", terminal: "manual", conversation: flow }); done("POST", "/api/launch");
+    expect(launched).toEqual({ launchId: "launch-1", status: "spawned", command: "recorded, not run" });
+    expect(fakeLaunch.launched).toEqual([expect.objectContaining({ crewName: "crewb", crewPath: crewDir, harness: "test-harness", joinAs: "Crewb", conversation: flow, terminal: "manual" })]);
+    const injected = await ok("POST", "/api/launch/launch-1/inject"); done("POST", "/api/launch/abc/inject");
+    expect(injected).toEqual({ launchId: "launch-1", status: "done", command: "recorded, not run" });
+    expect(fakeLaunch.injected).toEqual(["launch-1"]);
+
+    // An undelivered message of a remote room (its link is down), deleted by its author.
+    const transport: MirrorTransport = {
+      isUp: () => false,
+      send: async () => { throw new Error("the link is down in this test"); },
+      leave: async () => {}, act: async () => {},
+      register: async () => { throw new Error("the link is down in this test"); },
+      wakeVerdict: async () => ({ ok: true, accepted: false }),
+      failed: () => {},
+    };
+    const mirror = new MirrorRoom({ server: "alpha", homeId: "c-remote", name: "remote", queueFile: null, transport, selfName: "webauth" });
+    S.manager.registerRemoteRoom({ id: mirror.id, server: "alpha", homeId: "c-remote", room: mirror, meta: () => ({ ...mirror.meta(), remote: true } as unknown as ReturnType<typeof S.manager.listConversations>[number]) });
+    const queued = await mirror.writeThrough("Rami", "waiting line", {}, { asHuman: true });
+    expect(queued.status).toBe("queued");
+    const clientId = (queued as { clientId: string }).clientId;
+    expect(mirror.pendingFor("Rami").map((q) => q.clientId)).toEqual([clientId]);
+    expect(await ok("POST", "/api/pending/delete", { conversation: mirror.id, clientId })).toEqual({ ok: true }); done("POST", "/api/pending/delete");
+    expect(mirror.pendingFor("Rami")).toEqual([]);
 
     // Every route in the guarded table was exercised with the token.
     expect([...seen].sort()).toEqual(GUARDED.map((r) => `${r.method} ${r.path}`).sort());
