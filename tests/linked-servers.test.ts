@@ -379,7 +379,7 @@ describe("linked servers: two servers in one process", { timeout: 20_000 }, () =
       await waitFor("conversation-created for the new remote room", () => events.find((e) => e.type === "conversation-created" && e.data?.id === `alpha:${later}`));
 
       for (const route of ["rename", "star", "delete"]) {
-        expect((await post(B.baseUrl, `/api/conversations/${route}`, { id: remote, name: "x", starred: true })).status).toBe(400);
+        expect((await post(B.baseUrl, `/api/conversations/${route}`, { id: remote, name: "x", starred: true, token: WEB })).status).toBe(400);
       }
     } finally {
       ws.close();

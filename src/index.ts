@@ -325,6 +325,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/notifications/read", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { upToId } = (req.body ?? {}) as { upToId?: number };
     const changed = notificationStore.markRead(
       typeof upToId === "number" && Number.isSafeInteger(upToId) ? upToId : undefined
@@ -665,6 +666,35 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   }
 
   /**
+   * The web token a browser write carries: the `X-Joind-Token` header (the
+   * page adds it to every /api/ request), else a `token` field in a JSON
+   * body, else a `token` query parameter.
+   */
+  function webTokenOf(req: express.Request): string | undefined {
+    const header = req.get("x-joind-token");
+    if (typeof header === "string" && header) return header;
+    const body: unknown = req.body;
+    if (body && typeof body === "object" && !Buffer.isBuffer(body)) {
+      const t = (body as Record<string, unknown>).token;
+      if (typeof t === "string" && t) return t;
+    }
+    const q = req.query.token;
+    return typeof q === "string" && q ? q : undefined;
+  }
+
+  /**
+   * Web writes (the browser UI's own actions and web-only administration)
+   * require the web token: 403 otherwise, before any state is read or
+   * changed. Agent routes (/api/agent/*, /mcp) and the documented agent REST
+   * fallbacks that mirror an open MCP tool are not web writes.
+   */
+  function requireWebToken(req: express.Request, res: express.Response): boolean {
+    if (webAuthorized(webTokenOf(req))) return true;
+    res.status(403).json({ error: "unauthorized" });
+    return false;
+  }
+
+  /**
    * The viewer for DM filtering on web routes. ALWAYS the server-side
    * registered name; a caller-supplied viewer is ignored so a token holder
    * cannot read another viewer's DMs. Null (nothing registered yet) fails
@@ -809,11 +839,21 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/messages/delete", express.json(), (req, res) => {
-    const room = activeRoom(res);
-    if (!room) return;
-    const { id } = req.body as { id?: number };
-    if (id == null) { res.status(400).json({ error: "id required" }); return; }
-    const ok = room.deleteMessage(id);
+    if (!requireWebToken(req, res)) return;
+    const { id, conversation } = (req.body ?? {}) as { id?: unknown; conversation?: unknown };
+    // The named room (a DM pane mixes rooms, so an id alone is ambiguous);
+    // the active room only when none is named. Never the active room in
+    // place of a named room that is not here.
+    const room = viewedRoom(conversation);
+    if (!room) {
+      if (conversation !== undefined) { res.status(404).json({ error: "Conversation not found" }); return; }
+      res.status(400).json({ error: "No active conversation. Create or select one." });
+      return;
+    }
+    if (room instanceof MirrorRoom) { res.status(400).json({ error: "Messages in a remote room are deleted on its home server" }); return; }
+    const n = Number(id);
+    if (id == null || !Number.isSafeInteger(n) || n < 1) { res.status(400).json({ error: "id required" }); return; }
+    const ok = room.deleteMessage(n);
     res.json({ ok });
   });
 
@@ -887,6 +927,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/import", express.json({ limit: "50mb" }), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const bundle = req.body as {
       version?: number;
       conversation?: { name?: string };
@@ -909,6 +950,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/join", express.json(), async (req, res) => {
+    if (!requireWebToken(req, res)) return;
     // Capture the conversation with the room BEFORE any await: the active
     // conversation can change while pane resolution runs, and membership and
     // routing must land in the same room.
@@ -963,6 +1005,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/leave", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { name, conversation } = req.body as { name?: string; conversation?: string };
     if (!name) { res.status(400).json({ error: "name required" }); return; }
     // The UI removes a member from the conversation it has selected, and only
@@ -983,6 +1026,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/rename", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { oldName, newName, conversation } = req.body as { oldName?: string; newName?: string; conversation?: string };
     const convId = conversation ?? manager.getActiveId() ?? undefined;
     const room = convId ? manager.getRoom(convId) : undefined;
@@ -1023,6 +1067,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/role", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const room = activeRoom(res);
     if (!room) return;
     const { name, role } = req.body as { name?: string; role?: string };
@@ -1045,6 +1090,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/roles", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { emoji, label } = req.body as { emoji?: string; label?: string };
     if (!emoji || !label) { res.status(400).json({ error: "emoji and label required" }); return; }
     const cleanLabel = label.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 30);
@@ -1065,6 +1111,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.delete("/api/roles/:label", (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const label = req.params.label;
     const idx = customRoles.findIndex(r => r.label === label);
     if (idx === -1) { res.status(404).json({ error: "Custom role not found" }); return; }
@@ -1574,6 +1621,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/rename", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     if (typeof req.body?.id === "string" && (manager.isRemote(req.body.id) || linkRegistry.isRemoteId(req.body.id))) {
       res.status(400).json({ error: "A remote room is administered on its home server" }); return;
     }
@@ -1584,6 +1632,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/star", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     if (typeof req.body?.id === "string" && (manager.isRemote(req.body.id) || linkRegistry.isRemoteId(req.body.id))) {
       res.status(400).json({ error: "A remote room is administered on its home server" }); return;
     }
@@ -1594,6 +1643,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/conversations/delete", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     if (typeof req.body?.id === "string" && (manager.isRemote(req.body.id) || linkRegistry.isRemoteId(req.body.id))) {
       res.status(400).json({ error: "A remote room is administered on its home server" }); return;
     }
@@ -1688,6 +1738,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/turn-guard", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { enabled, limit } = req.body as { enabled?: boolean; limit?: number };
     if (enabled !== undefined) turnGuard.enabled = enabled;
     if (limit !== undefined) turnGuard.limit = Math.max(1, Math.min(100, Math.round(limit)));
@@ -2120,6 +2171,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/session/start", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const room = activeRoom(res);
     if (!room) return;
     const { templateId, cast, goal, startedBy } = req.body as {
@@ -2138,6 +2190,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/session/cancel", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const room = activeRoom(res);
     if (!room) return;
     const { id } = req.body as { id?: number };
@@ -2190,6 +2243,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/crew", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { name, path: folderPath, defaultHarness, defaultConversation, joinAs } =
       req.body as {
         name?: string;
@@ -2233,6 +2287,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   }
 
   app.post("/api/crew/scaffold", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const body = req.body as {
       name?: string; parentDir?: string; joinAs?: string; role?: string;
       emoji?: string; defaultHarness?: string; defaultConversation?: string;
@@ -2285,6 +2340,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.delete("/api/crew/:name", (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const removed = CrewStore.remove(req.params.name);
     if (!removed) {
       res.status(404).json({ error: "Crew entry not found" });
@@ -2294,6 +2350,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.patch("/api/crew/:name", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const body = req.body as Partial<CrewFolder>;
     const allowed: Partial<Omit<CrewFolder, "name">> = {};
     if (typeof body.path === "string") allowed.path = body.path;
@@ -2395,6 +2452,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/launch", express.json(), async (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { crewName, crewPath, harness: harnessId, flags, conversation, joinAs, injectDelay, terminal, initialPrompt, resumeSessionId } =
       req.body as {
         crewName?: string;
@@ -2460,6 +2518,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.post("/api/launch/:launchId/inject", async (req, res) => {
+    if (!requireWebToken(req, res)) return;
     const { launchId } = req.params;
     const current = LaunchService.getLaunchStatus(launchId);
     if (!current) {

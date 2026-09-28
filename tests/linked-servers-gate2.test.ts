@@ -99,7 +99,7 @@ describe("linked servers, gate round 2 (routes)", { timeout: 20_000 }, () => {
   it("finding 1: renaming a local member onto a peer human's name is refused with 409 and the candidates", async () => {
     expect((await post(A.baseUrl, "/api/peer/register", { room, name: "Worf", host: "bravo", registration: "human:bravo", human: true }, auth)).status).toBe(200);
     expect((await post(A.baseUrl, "/api/agent/join", { name: "Tom", pid: 999_921, conversation: room })).status).toBe(200);
-    const r = await post(A.baseUrl, "/api/rename", { oldName: "Tom", newName: "Worf", conversation: room });
+    const r = await post(A.baseUrl, "/api/rename", { oldName: "Tom", newName: "Worf", conversation: room, token: WEB });
     expect(r.status).toBe(409);
     expect(r.json.candidates).toEqual([{ conversation: room, host: "bravo", human: true }]);
     const home = A.manager.getRoom(room)!;

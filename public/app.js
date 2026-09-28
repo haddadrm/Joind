@@ -134,8 +134,30 @@ var wsAuthFailures = 0;
 // Server-issued token: injected into index.html when generated, otherwise the
 // browser supplies it once per tab session (sessionStorage) via a prompt.
 function webToken() {
-  return window.__JOIND_TOKEN || sessionStorage.getItem('joind-web-token') || '';
+  var stored = '';
+  try { stored = sessionStorage.getItem('joind-web-token') || ''; } catch (e) { /* storage unavailable */ }
+  return window.__JOIND_TOKEN || stored;
 }
+
+// Every request this page makes to its own /api/ carries the web token in
+// the X-Joind-Token header: the server refuses web writes without it. Only
+// same-origin relative URLs get it, never another host.
+(function() {
+  var nativeFetch = window.fetch;
+  if (typeof nativeFetch !== 'function') return;
+  window.fetch = function(input, init) {
+    if (typeof input === 'string' && input.indexOf('/api/') === 0) {
+      var token = webToken();
+      if (token) {
+        init = init || {};
+        var headers = new Headers(init.headers || {});
+        if (!headers.has('X-Joind-Token')) headers.set('X-Joind-Token', token);
+        init = Object.assign({}, init, { headers: headers });
+      }
+    }
+    return nativeFetch.call(window, input, init);
+  };
+})();
 
 // Ask for the web token (user-set mode). Reuses the existing modal classes.
 // `after` runs once a token is stored.
@@ -1082,7 +1104,8 @@ function appendMessage(msg, scroll) {
       fetch('/api/messages/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: msg.id })
+        // The message's own room: a DM pane mixes rooms.
+        body: JSON.stringify({ id: msg.id, conversation: el.dataset.conv || undefined })
       });
     });
     actions.appendChild(delBtn);

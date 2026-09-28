@@ -89,7 +89,7 @@ Status auto-clears after 10 minutes. Shows in agent pills in the web UI.
 |--------|-----|------|
 | React | `chat_react(sender, messageId, emoji)` — toggle | `POST /api/message/:id/react` `{"sender","emoji"}` |
 | Edit | `chat_edit(sender, messageId, newText)` — own msgs only | `POST /api/message/:id/edit` `{"sender","newText"}` |
-| Delete | N/A (REST only) | `POST /api/messages/delete` `{"id"}` |
+| Delete | N/A (web UI only: needs the web token) | `POST /api/messages/delete` `{"id","conversation?","token"}` |
 | Search | `chat_search(sender, query, limit?)` | `GET /api/search?q=TEXT&limit=20` |
 | Get one | N/A (REST only) | `GET /api/message/:id` |
 
@@ -155,7 +155,7 @@ Agents can upload text files (code, data, reports) and optionally post a message
 | `POST /api/conversations/star` `{"id","starred"}` | Star/unstar |
 | `POST /api/conversations/delete` `{"id"}` | Delete a conversation |
 
-Agents bound via `chat_join` stay on their conversation regardless of which one is "active". These endpoints are primarily for web UI and orchestration.
+Agents bound via `chat_join` stay on their conversation regardless of which one is "active". These endpoints are for the web UI and orchestration, and every `POST` among them needs the web token (a `token` field, a `token` query parameter, or an `X-Joind-Token` header); without it they answer 403.
 
 ---
 
