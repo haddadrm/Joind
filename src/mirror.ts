@@ -24,14 +24,15 @@
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { dirname } from "path";
-import { ChatRoom, visibleToViewer, type Agent, type ChatMessage, type HostedWakeResult } from "./room.js";
+import { ChatRoom, visibleToViewer, type Agent, type ChatMessage, type HostedVerdict, type HostedWakeResult } from "./room.js";
 import { ensureDir } from "./persist.js";
 import { HumanState, HumanStateError, type HumanStateData } from "./human-state.js";
 import { MemberState, type MemberRecord } from "./member-state.js";
 import {
-  LinkDownError, PeerRefusedError,
+  HOSTED_VERDICT_QUEUE_TTL_MS, LinkDownError, PeerRefusedError, shortWakeId,
   type PeerActBody, type PeerAction, type PeerEvent, type PeerLeaveBody, type PeerMessagesResult,
-  type PeerRegisterBody, type PeerRegisterResult, type PeerSendBody, type PeerWriteOptions,
+  type PeerRegisterBody, type PeerRegisterResult, type PeerSendBody, type PeerWakeVerdictBody,
+  type PeerWakeVerdictResult, type PeerWriteOptions,
 } from "./peer-types.js";
 
 /** How a mirror reaches its home server (implemented by the link). */
@@ -41,6 +42,8 @@ export interface MirrorTransport {
   leave(body: PeerLeaveBody): Promise<void>;
   act(body: PeerActBody): Promise<void>;
   register(body: PeerRegisterBody): Promise<PeerRegisterResult>;
+  /** A hosted wake's submit-check verdict, to the home (POST /api/peer/wake-verdict). */
+  wakeVerdict(body: PeerWakeVerdictBody): Promise<PeerWakeVerdictResult>;
   /** The link failed under a mirror's own request (it marks the link down). */
   failed(reason: string): void;
 }
@@ -183,6 +186,15 @@ const LOCAL_LINES_KEPT = 50;
 /** The lock key of this server's human (a name cannot contain NUL). */
 export const HUMAN_LOCK = "\u0000human";
 const TOUCH_FORWARD_MS = 30_000;
+/** The most verdicts a mirror holds while its link is down; the oldest goes first. */
+export const HOSTED_VERDICT_QUEUE_CAP = 20;
+
+/** A verdict the home could not be told yet (the link was down). */
+interface PendingVerdict {
+  body: PeerWakeVerdictBody;
+  /** This server's clock: the queue's TTL runs on it. */
+  queuedAt: number;
+}
 
 export class MirrorRoom extends ChatRoom {
   readonly id: string;
@@ -221,6 +233,10 @@ export class MirrorRoom extends ChatRoom {
    *  mark never removes what was inserted after it (finding 4). */
   private insertSeq = 0;
   private insertedAt = new Map<number, number>();
+  /** Hosted wake verdicts held while the link is down: in memory only, at
+   *  most HOSTED_VERDICT_QUEUE_CAP, each for HOSTED_VERDICT_QUEUE_TTL_MS. */
+  private pendingVerdicts: PendingVerdict[] = [];
+  private flushingVerdicts: Promise<number> | null = null;
 
   constructor(opts: MirrorOptions) {
     super({});
@@ -1169,8 +1185,125 @@ export class MirrorRoom extends ChatRoom {
   /** Wake a local member for a mention decided on the home server. The
    *  prompt names the home room and this server's base URL (the member reads
    *  and replies through this mirror). */
-  wakeFromHome(sender: string, name: string, hostedRegistration: string, mentionId?: number): Promise<HostedWakeResult> {
+  wakeFromHome(sender: string, name: string, hostedRegistration: string, mentionId?: number, wakeId?: string): Promise<HostedWakeResult> {
     const label = `"${this.name}" on ${this.server} (conversation ${this.id})`;
-    return this.wakeForPeer(sender, name, hostedRegistration, label, mentionId);
+    // The sink that carries a "not submitted" verdict home. It replaces any
+    // line here: this mirror never says one of its own; the home posts it,
+    // and it comes back through the subscription like any home message.
+    const report = wakeId
+      ? (v: HostedVerdict): void => {
+          void this.reportVerdict({
+            room: this.homeRoomId, name, wakeId, hostedRegistration,
+            verdict: "not-submitted", pid: v.pid, waitedMs: v.waitedMs, excludedStale: v.excludedStale, horizonMs: v.horizonMs,
+            checkedAt: Date.now(),
+          });
+        }
+      : undefined;
+    return this.wakeForPeer(sender, name, hostedRegistration, label, mentionId, wakeId, report);
+  }
+
+  // ---------------------------------------------------------------------
+  // Hosted wake verdicts (host side)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Send a verdict home now, or hold it while the link is down. Only a link
+   * failure holds it (LinkDownError); a refusal (4xx: an older home without
+   * the route answers 404) drops it with a log line and never marks the link
+   * down. A home that answers `accepted: false` dropped it on purpose: never
+   * retried. The hosted registration in the body is never logged.
+   */
+  async reportVerdict(body: PeerWakeVerdictBody): Promise<void> {
+    if (this.destroyed) return;
+    if (!this.transport.isUp()) {
+      this.holdVerdict(body, `the link to ${this.server} is down`);
+      return;
+    }
+    try {
+      this.logVerdictAnswer(body, await this.transport.wakeVerdict(body));
+    } catch (err) {
+      if (err instanceof LinkDownError) {
+        this.transport.failed(err.message);
+        this.holdVerdict(body, err.message);
+        return;
+      }
+      this.logVerdictDropped(body, err);
+    }
+  }
+
+  private logVerdictAnswer(body: PeerWakeVerdictBody, r: PeerWakeVerdictResult | undefined): void {
+    const how = r?.accepted === true ? "taken by the home" : `not taken by the home (${typeof r?.reason === "string" ? r.reason.slice(0, 40) : "no reason given"})`;
+    console.log(`  [link ${this.server}] hosted wake ${shortWakeId(body.wakeId)} for ${body.name}: verdict ${how}`);
+  }
+
+  private logVerdictDropped(body: PeerWakeVerdictBody, err: unknown): void {
+    const why = err instanceof PeerRefusedError ? `refused, HTTP ${err.status}` : err instanceof Error ? err.message : String(err);
+    console.log(`  [link ${this.server}] hosted wake ${shortWakeId(body.wakeId)} for ${body.name}: verdict dropped (${why})`);
+  }
+
+  /** Hold a verdict for the next restore: expired ones go first, then at
+   *  the cap the oldest is evicted, each with a log line. */
+  private holdVerdict(body: PeerWakeVerdictBody, why: string): void {
+    const now = Date.now();
+    this.dropExpiredVerdicts(now);
+    while (this.pendingVerdicts.length >= HOSTED_VERDICT_QUEUE_CAP) {
+      const old = this.pendingVerdicts.shift()!;
+      console.log(`  [link ${this.server}] verdict queue cap ${HOSTED_VERDICT_QUEUE_CAP} reached: evicted hosted wake ${shortWakeId(old.body.wakeId)} for ${old.body.name}`);
+    }
+    this.pendingVerdicts.push({ body, queuedAt: now });
+    console.log(`  [link ${this.server}] hosted wake ${shortWakeId(body.wakeId)} for ${body.name}: verdict held (${why})`);
+  }
+
+  /** The queue's TTL runs on this server's clock and is applied whenever the
+   *  queue is touched (a hold or a flush): it is small and in memory, and a
+   *  held verdict matters only when it could be sent, so no timer is kept. */
+  private dropExpiredVerdicts(now: number): void {
+    this.pendingVerdicts = this.pendingVerdicts.filter((p) => {
+      if (now - p.queuedAt < HOSTED_VERDICT_QUEUE_TTL_MS) return true;
+      console.log(`  [link ${this.server}] hosted wake ${shortWakeId(p.body.wakeId)} for ${p.body.name}: held verdict expired after ${Math.round(HOSTED_VERDICT_QUEUE_TTL_MS / 60_000)} min; dropped`);
+      return false;
+    });
+  }
+
+  /** Verdicts held here now (tests, diagnostics). */
+  pendingVerdictCount(): number {
+    return this.pendingVerdicts.length;
+  }
+
+  /**
+   * Send the held verdicts home, oldest first; the link's restore calls this
+   * after the message queue drained. Each leaves the queue before it is
+   * sent, so a second flush never sends it again; a link failure puts it
+   * back at the head and stops. Resolves with the number the home answered.
+   */
+  flushVerdicts(): Promise<number> {
+    if (this.flushingVerdicts) return this.flushingVerdicts;
+    const run = async (): Promise<number> => {
+      let sent = 0;
+      this.dropExpiredVerdicts(Date.now());
+      while (this.pendingVerdicts.length > 0 && this.transport.isUp() && !this.destroyed) {
+        const next = this.pendingVerdicts.shift()!;
+        try {
+          this.logVerdictAnswer(next.body, await this.transport.wakeVerdict(next.body));
+          sent++;
+        } catch (err) {
+          if (err instanceof LinkDownError) {
+            this.pendingVerdicts.unshift(next);
+            this.transport.failed(err.message);
+            break;
+          }
+          this.logVerdictDropped(next.body, err);
+        }
+      }
+      return sent;
+    };
+    const p = run().finally(() => { this.flushingVerdicts = null; });
+    this.flushingVerdicts = p;
+    return p;
+  }
+
+  override destroy(): void {
+    this.pendingVerdicts = [];
+    super.destroy();
   }
 }

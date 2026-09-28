@@ -18,6 +18,10 @@
  * Peer side (this server hosts a member of a room elsewhere):
  * - /api/peer/wake runs the normal wake path for the local member and
  *   returns the outcome to the home server, which says the line.
+ *
+ * Home side again: /api/peer/wake-verdict takes the host's later report that
+ * its submit check saw no submitted prompt for a hosted wake, and the room
+ * rebuilds the line from bounded fields (ChatRoom.acceptHostedVerdict).
  */
 
 import express from "express";
@@ -29,7 +33,7 @@ import { tokensEqual } from "./config.js";
 import { newRegistrationId, type ConversationManager } from "./manager.js";
 import { visibleToViewer, type ChatMessage, type ChatRoom, type RoomEvent } from "./room.js";
 import type { LinkRegistry } from "./link.js";
-import type { PeerAction, PeerEvent, PeerSubscribeResult } from "./peer-types.js";
+import { WAKE_ID_PATTERN, type PeerAction, type PeerEvent, type PeerSubscribeResult, type PeerWakeVerdictResult } from "./peer-types.js";
 
 export interface PeerHubOptions {
   manager: ConversationManager;
@@ -510,8 +514,39 @@ export class PeerHub {
       if (!mirror) { res.status(404).json({ error: "Conversation not found" }); return; }
       // The home's earliest uncovered mention: a positive integer, else none.
       const mentionId = typeof body.mentionId === "number" && Number.isInteger(body.mentionId) && body.mentionId > 0 ? body.mentionId : undefined;
-      const result = await mirror.wakeFromHome(sender, name, hostedRegistration, mentionId);
+      // The home's id for this wake, when it will take a verdict for it. An
+      // older home sends none; one of another shape is ignored the same way
+      // (the wake itself goes ahead; only the verdict is not reported).
+      const wakeId = typeof body.wakeId === "string" && WAKE_ID_PATTERN.test(body.wakeId) ? body.wakeId : undefined;
+      if (body.wakeId !== undefined && !wakeId) console.log(`  [wake] ${peer} sent a wake id this build does not accept; its verdict will not be reported`);
+      const result = await mirror.wakeFromHome(sender, name, hostedRegistration, mentionId, wakeId);
       res.json(result);
+    });
+
+    // Served by the HOME of a room: a host reports that its submit check
+    // saw no submitted prompt for a hosted wake. 200 for every well-formed
+    // body, whether taken or not (a host never retries a verdict dropped on
+    // purpose); 400 when the fields that route it are missing or malformed.
+    r.post("/wake-verdict", express.json(), (req: Req, res) => {
+      const peer = req.peer!.name;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const roomId = str(body.room);
+      const name = str(body.name);
+      const wakeId = typeof body.wakeId === "string" && WAKE_ID_PATTERN.test(body.wakeId) ? body.wakeId : undefined;
+      const hostedRegistration = str(body.hostedRegistration);
+      if (!roomId || !name || name.length > 64 || !wakeId || !hostedRegistration) {
+        res.status(400).json({ error: "room, name, wakeId and hostedRegistration required" });
+        return;
+      }
+      const room = localRoom(roomId);
+      if (!room) {
+        console.log(`  [verdict] ${peer} reported a wake verdict for a room this server does not have; nothing posted`);
+        const out: PeerWakeVerdictResult = { ok: true, accepted: false, reason: "unknown" };
+        res.json(out);
+        return;
+      }
+      const out: PeerWakeVerdictResult = { ok: true, ...room.acceptHostedVerdict(peer, body) };
+      res.json(out);
     });
 
     return r;

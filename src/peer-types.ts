@@ -8,6 +8,39 @@
  */
 
 import type { Agent, ChatMessage } from "./room.js";
+import { SUBMIT_CHECK_CAP_MS, SUBMIT_CHECK_GRACE_MS } from "./submit-check.js";
+
+/** How long a home waits for its host to answer a hosted wake. It bounds the
+ *  home's wait only: work still running on the host after it (the typing,
+ *  the submit check) goes on. */
+export const LINK_WAKE_TIMEOUT_MS = 90_000;
+/** Slack for a submit check whose last poll's file I/O finishes after its
+ *  nominal cap (its waitedMs can pass cap plus grace). */
+export const HOSTED_VERDICT_IO_SLACK_MS = 60_000;
+/** How long a host holds a verdict it could not deliver (the link was down),
+ *  on the host's clock. In memory only. */
+export const HOSTED_VERDICT_QUEUE_TTL_MS = 5 * 60_000;
+/** Margin on top of everything else (the request itself, clock drift). */
+export const HOSTED_VERDICT_MARGIN_MS = 60_000;
+/**
+ * How long a home keeps the record of a hosted wake for its verdict, on the
+ * home's clock from the moment it minted the wake id: the wake's dispatch and
+ * the check's start (the link wake timeout), the check's cap and grace, the
+ * I/O overrun, the host's retry queue, and a margin. 1,125 s (18 min 45 s).
+ * This constant is the single source of truth for the budget. A verdict that
+ * arrives later than this is refused as expired: a documented delivery
+ * limit, not a claim that a delayed verdict can never be refused.
+ */
+export const HOSTED_VERDICT_TTL_MS =
+  LINK_WAKE_TIMEOUT_MS + SUBMIT_CHECK_CAP_MS + SUBMIT_CHECK_GRACE_MS +
+  HOSTED_VERDICT_IO_SLACK_MS + HOSTED_VERDICT_QUEUE_TTL_MS + HOSTED_VERDICT_MARGIN_MS;
+/** A wake id as a home mints it (randomUUID). */
+export const WAKE_ID_PATTERN = /^[0-9a-f-]{36}$/;
+
+/** The first eight characters of a wake id, for log lines. */
+export function shortWakeId(wakeId: string): string {
+  return wakeId.slice(0, 8);
+}
 
 /** One room event forwarded by a home server, numbered per room. `data` is
  *  the payload WebSocket clients of the home server get for that event. */
@@ -118,6 +151,52 @@ export interface PeerWakeBody {
   prompt: string;
   /** The earliest uncovered mention id in the home room (absent from older homes). */
   mentionId?: number;
+  /** The home's id for this wake, recorded before dispatch; the host names
+   *  it in a later verdict (absent from older homes: nothing is reported). */
+  wakeId?: string;
+}
+
+/**
+ * Host to home, after a hosted wake's submit check: the keys were typed on
+ * the host, and its check saw no matching submitted prompt within its
+ * window, with `excludedStale` rollouts not read. An unconfirmed observation,
+ * not proof that the text sits in the input box. Only this kind is sent:
+ * submitted and unverifiable stay in the host's log.
+ */
+export interface PeerWakeVerdictBody {
+  room: string;
+  name: string;
+  wakeId: string;
+  /** The host's registration of the member, echoed back. A credential: never logged. */
+  hostedRegistration: string;
+  verdict: "not-submitted";
+  pid: number;
+  waitedMs: number;
+  excludedStale: number;
+  horizonMs: number;
+  /** The host's clock when the check ended. Informational only: expiry
+   *  runs on the home's clock. */
+  checkedAt: number;
+}
+
+/** Why a home did not take a verdict (it posts nothing for any of them). */
+export type HostedVerdictRefusal =
+  | "unknown"             // no such wake here (never minted, already taken, or the home restarted)
+  | "expired"             // older than HOSTED_VERDICT_TTL_MS on the home's clock
+  | "wrong-peer"          // the wake went to another host
+  | "wrong-name"
+  | "wrong-registration"
+  | "member-left"
+  | "member-inactive"
+  | "member-changed"      // rejoined (a new registration) since the wake
+  | "incomplete"          // excludedStale or horizonMs absent: never defaulted
+  | "invalid";            // a field outside its bounds, or another kind of verdict
+
+/** The home's answer to every well-formed verdict (a malformed one is 400). */
+export interface PeerWakeVerdictResult {
+  ok: true;
+  accepted: boolean;
+  reason?: HostedVerdictRefusal;
 }
 
 /** The link could not carry the request (connection refused, timeout, 5xx). */

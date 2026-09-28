@@ -64,7 +64,7 @@ export interface StartOptions {
    *  (default: the presence grace). */
   peerGraceMs?: number;
   /** Link client tuning (tests shorten the intervals). */
-  link?: Partial<Pick<LinkClientOptions, "discoverEveryMs" | "backoffMinMs" | "backoffMaxMs" | "pollTimeoutMs" | "requestTimeoutMs" | "wakeTimeoutMs" | "fetchImpl">>;
+  link?: Partial<Pick<LinkClientOptions, "discoverEveryMs" | "backoffMinMs" | "backoffMaxMs" | "pollTimeoutMs" | "requestTimeoutMs" | "wakeTimeoutMs" | "fetchImpl" | "submitCheckOptions">>;
   peerMonitorEveryMs?: number;
 }
 

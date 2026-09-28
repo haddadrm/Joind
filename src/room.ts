@@ -4,6 +4,7 @@
  */
 
 import { EventEmitter } from "events";
+import { randomUUID } from "crypto";
 import { writeFileSync } from "fs";
 import { dirname } from "path";
 import { inject, WakeFallbackAborted, type AfterTextRoute } from "./inject.js";
@@ -11,6 +12,7 @@ import { cancelRoomListens } from "./listen.js";
 import { WakeCoordinator, type WakeFailureKind, type WakeOutcome } from "./wake.js";
 import { ORCA_SEND_TIMEOUT_MS } from "./orca.js";
 import { beginSubmitCheck, rolloutName, SUBMIT_CHECK_LIVE_HORIZON_MS, type PendingSubmitCheck, type SubmitCheckOptions } from "./submit-check.js";
+import { HOSTED_VERDICT_TTL_MS, shortWakeId, type HostedVerdictRefusal } from "./peer-types.js";
 
 // The base URL an injected prompt tells the woken agent to call back on.
 // Must be the address the server actually binds (single-interface): a
@@ -167,6 +169,9 @@ export interface HostedWakeRequest {
   /** The earliest mention of this member not yet covered by a wake: the
    *  host keeps the prompt's read cursor at or below it. */
   mentionId?: number;
+  /** This server's id for the wake, recorded before dispatch: the host names
+   *  it when it reports the submit check's verdict (acceptHostedVerdict). */
+  wakeId?: string;
 }
 
 /** What the host answered, or "unreachable" when the link could not carry
@@ -236,12 +241,73 @@ export function unidentifiedLine(name: string, reason: string, host?: string): s
  *  read, so submission is unconfirmed, and the line says how many. It names
  *  the pid, so whoever reads it knows which terminal may need the Enter, and
  *  the time the check actually waited (30 s, or longer when a busy session
- *  held the verdict back). */
-export function notSubmittedLine(name: string, pid: number, waitedMs: number, excludedStale: number, horizonMs: number = SUBMIT_CHECK_LIVE_HORIZON_MS): string {
+ *  held the verdict back). `host` names the peer a hosted member lives on
+ *  (the check ran there); without it the text is the local wording. */
+export function notSubmittedLine(name: string, pid: number, waitedMs: number, excludedStale: number, horizonMs: number = SUBMIT_CHECK_LIVE_HORIZON_MS, host?: string): string {
   const who = pid > 0 ? `${name} (pid ${pid})` : name;
+  const on = host ? ` on their host ${host}` : "";
   const rollouts = `${excludedStale} rollout${excludedStale === 1 ? "" : "s"}`;
-  return `Typed into ${who} but no submitted prompt seen within ${Math.round(waitedMs / 1000)} s (unconfirmed: ${rollouts} idle over ${Math.round(horizonMs / 3_600_000)} h not checked). The text may be sitting in their input box; it may need Enter by hand.`;
+  return `Typed into ${who}${on} but no submitted prompt seen within ${Math.round(waitedMs / 1000)} s (unconfirmed: ${rollouts} idle over ${Math.round(horizonMs / 3_600_000)} h not checked). The text may be sitting in their input box; it may need Enter by hand.`;
 }
+
+/** What a hosted member's host reports after its submit check: the bounded
+ *  fields of a "not-submitted" result, and nothing else. */
+export interface HostedVerdict {
+  pid: number;
+  waitedMs: number;
+  excludedStale: number;
+  horizonMs: number;
+}
+
+/** Where a submit check's verdict goes: "room" posts the line here (a local
+ *  wake); a function reports it to the home (a hosted wake whose home asked);
+ *  null logs it only (a hosted wake whose home did not ask). */
+export type VerdictSink = "room" | ((verdict: HostedVerdict) => void) | null;
+
+const MAX_PID = 2 ** 31 - 1;
+const MAX_EXCLUDED_STALE = 100_000;
+const MIN_HORIZON_MS = 3_600_000;
+const MAX_HORIZON_MS = 30 * 24 * 3_600_000;
+
+function intIn(v: unknown, lo: number, hi: number): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= lo && v <= hi;
+}
+
+/**
+ * A host's verdict, as this build words it, or null. Sits beside
+ * unidentifiedReasonFrom: only bounded numbers cross the link, and the line
+ * is rebuilt from them here; no text the host sends is ever posted. `waitedMs`
+ * is bounded by the TTL, not by cap plus grace: a check's last poll can
+ * finish its file I/O after the nominal cap. A missing `excludedStale` or
+ * `horizonMs` is refused (null), never taken as zero: the count is what makes
+ * the line honest.
+ */
+export function hostedVerdictFrom(raw: unknown): HostedVerdict | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (r.verdict !== "not-submitted") return null;
+  if (!intIn(r.pid, 1, MAX_PID)) return null;
+  if (!intIn(r.waitedMs, 1, HOSTED_VERDICT_TTL_MS)) return null;
+  if (!intIn(r.excludedStale, 0, MAX_EXCLUDED_STALE)) return null;
+  if (!intIn(r.horizonMs, MIN_HORIZON_MS, MAX_HORIZON_MS)) return null;
+  return { pid: r.pid, waitedMs: r.waitedMs, excludedStale: r.excludedStale, horizonMs: r.horizonMs };
+}
+
+/** The most hosted wakes a room keeps waiting for a verdict; the oldest goes first. */
+export const HOSTED_VERDICT_PENDING_CAP = 200;
+
+/** A hosted wake this server dispatched and may still hear a verdict for.
+ *  `mintedAt` is this server's clock when the id was minted. */
+interface PendingHostedWake {
+  agent: Agent;
+  host: string;
+  /** A credential on the host: compared, never logged. */
+  hostedRegistration: string;
+  name: string;
+  mintedAt: number;
+}
+
+export type HostedVerdictAnswer = { accepted: true } | { accepted: false; reason: HostedVerdictRefusal };
 
 /** What one run of the local wake machinery did. */
 interface WakeCoreResult {
@@ -340,6 +406,11 @@ export class ChatRoom extends EventEmitter {
   /** Hosted members whose host was unreachable at their last wake: the line
    *  is said once per streak, and a success or a rejoin clears it. */
   private hostedUnreachable = new Set<string>();
+  /** Hosted wakes dispatched from this room, by wake id, oldest first, each
+   *  waiting for its host's submit-check verdict (acceptHostedVerdict). */
+  private pendingHostedWakes = new Map<string, PendingHostedWake>();
+  /** The one timer that says "no verdict" for the next entry to expire. */
+  private verdictTimer: ReturnType<typeof setTimeout> | null = null;
   private staleInterval: ReturnType<typeof setInterval> | null = null;
   private agentTurnCount = 0; // consecutive agent turns since last human message
   getCursor: (agentName: string) => number | undefined;
@@ -790,7 +861,7 @@ export class ChatRoom extends EventEmitter {
     try {
       const { outcome, partialLine, partialKind, unidentified, submitCheck, session } = await this.wakeCore(sender, name, queued, (agent) => this.buildWakePrompt(sender, agent, undefined, mention.earliest));
       // Detached: the wake is over and its outcome stands whatever this finds.
-      if (submitCheck) void this.followSubmitCheck(name, submitCheck, true);
+      if (submitCheck) void this.followSubmitCheck(name, submitCheck, "room");
       if (outcome.ok) {
         moved = outcome.result === "moved";
         // Landed (or the agent left): these mentions are covered. A wake that
@@ -935,10 +1006,13 @@ export class ChatRoom extends EventEmitter {
    * After a wake typed into a Codex session: look for the prompt in the Codex
    * session store and say so only when it is missing. Runs detached from the
    * wake (which has finished and released its locks); it never types, retries
-   * or delays anything. `post` is false on a host serving a hosted wake: the
-   * home's room owns that line, so the host only logs.
+   * or delays anything. `sink` says where a "not submitted" verdict goes:
+   * "room" posts the line here; on a host serving a hosted wake the home's
+   * room owns the line, so the verdict is reported to the home through the
+   * function (it REPLACES posting: a mirror never says a line of its own),
+   * or only logged when the home did not ask (null).
    */
-  private async followSubmitCheck(name: string, typed: NonNullable<WakeCoreResult["submitCheck"]>, post: boolean): Promise<void> {
+  private async followSubmitCheck(name: string, typed: NonNullable<WakeCoreResult["submitCheck"]>, sink: VerdictSink): Promise<void> {
     let r: Awaited<ReturnType<PendingSubmitCheck["verify"]>>;
     try {
       r = await typed.check.verify();
@@ -955,13 +1029,32 @@ export class ChatRoom extends EventEmitter {
       return;
     }
     // The horizon's exclusions sit beside the verdict, so its one assumption is auditable.
-    console.log(`  [verify] ${name}: no submitted prompt seen, unconfirmed (pid ${typed.pid}, none in ${typed.check.sessionsDirs.join(", ")} after ${Math.round(r.waitedMs / 1000)} s; ${r.excludedStale} rollout(s) idle over ${Math.round(r.horizonMs / 3_600_000)} h not checked)${post ? "" : "; hosted wake, not reported to the home room"}`);
-    if (!post) return;
+    console.log(`  [verify] ${name}: no submitted prompt seen, unconfirmed (pid ${typed.pid}, none in ${typed.check.sessionsDirs.join(", ")} after ${Math.round(r.waitedMs / 1000)} s; ${r.excludedStale} rollout(s) idle over ${Math.round(r.horizonMs / 3_600_000)} h not checked)`);
+    if (sink === null) {
+      // An older home sent no wake id: it has nowhere to put the line.
+      console.log(`  [verify] ${name}: hosted wake: not reported (home did not ask)`);
+      return;
+    }
     // Only for the terminal that was typed into: a member that left or moved
-    // meanwhile is not told about a terminal it no longer has.
+    // meanwhile is not told about a terminal it no longer has. The same rule
+    // holds on a host before it reports.
     const live = this.agents.get(name);
-    if (this.destroyed || !live?.active || terminalIdentity(live) !== typed.identity) return;
-    this.addSystem(notSubmittedLine(name, typed.pid, r.waitedMs, r.excludedStale, r.horizonMs));
+    if (this.destroyed || !live?.active || terminalIdentity(live) !== typed.identity) {
+      if (sink !== "room") console.log(`  [verify] ${name}: hosted wake: not reported (the member left or moved since the keys were typed)`);
+      return;
+    }
+    if (sink === "room") {
+      this.addSystem(notSubmittedLine(name, typed.pid, r.waitedMs, r.excludedStale, r.horizonMs));
+      return;
+    }
+    // Contract drift (a check result without its metadata) is never sent as
+    // a default: the home would refuse it anyway.
+    const verdict = { pid: typed.pid, waitedMs: Math.round(r.waitedMs), excludedStale: r.excludedStale, horizonMs: r.horizonMs };
+    if (!Number.isSafeInteger(verdict.excludedStale) || !Number.isSafeInteger(verdict.horizonMs) || !Number.isSafeInteger(verdict.waitedMs)) {
+      console.log(`  [verify] ${name}: hosted wake: not reported (verdict metadata incomplete)`);
+      return;
+    }
+    sink(verdict);
   }
 
   /**
@@ -978,17 +1071,27 @@ export class ChatRoom extends EventEmitter {
     const mention = this.mentionWindow(name);
     this.wakesInFlight.add(name);
     let result: HostedWakeResult;
+    let wakeId: string | undefined;
     try {
       if (!this.hostedWaker || !hostedRegistration || !this.homeId) {
         result = { ok: false, kind: "unreachable", attempts: 0, reason: `no link to ${host} is configured on this server` };
       } else {
-        console.log(`  -> Routing wake for ${name} to host ${host}...`);
-        result = await this.hostedWaker({ host, room: this.homeId, name, hostedRegistration, sender, prompt: `@${name} mentioned by ${sender}`, mentionId: mention.earliest })
+        // Minted and recorded BEFORE dispatch: the host's verdict may arrive
+        // before this call returns, or after it timed out.
+        wakeId = randomUUID();
+        this.recordHostedWake(wakeId, { agent, host, hostedRegistration, name, mintedAt: Date.now() });
+        console.log(`  -> Routing wake for ${name} to host ${host} (wake ${shortWakeId(wakeId)})...`);
+        result = await this.hostedWaker({ host, room: this.homeId, name, hostedRegistration, sender, prompt: `@${name} mentioned by ${sender}`, mentionId: mention.earliest, wakeId })
           .catch((err: unknown): HostedWakeResult => ({ ok: false, kind: "unreachable", attempts: 1, reason: err instanceof Error ? err.message : String(err) }));
       }
     } finally {
       this.wakesInFlight.delete(name);
     }
+    // The host answered that the wake did not land: nothing was typed and
+    // checked there, so no verdict follows. An unreachable answer (a timeout
+    // included) keeps the record: the host may still have typed, and its
+    // evidence holds whatever this call returned.
+    if (wakeId && !result.ok && result.kind !== "unreachable") this.forgetHostedWake(wakeId);
     if (this.destroyed) return;
     // Only for the session the request was made for: a member that left or
     // rejoined meanwhile is not told about an old session's failure.
@@ -1016,15 +1119,154 @@ export class ChatRoom extends EventEmitter {
     if (this.rewakeAfter.delete(name)) this.queueWake(sender, name);
   }
 
+  // ---------------------------------------------------------------------
+  // Hosted wake verdicts (home side)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Record a hosted wake before it is dispatched. Expired entries are swept
+   * first (a memory bound only: correctness comes from the check in
+   * acceptHostedVerdict), then at the cap the oldest entry is evicted, with
+   * a log line.
+   */
+  private recordHostedWake(wakeId: string, entry: PendingHostedWake): void {
+    this.sweepHostedVerdicts(entry.mintedAt);
+    while (this.pendingHostedWakes.size >= HOSTED_VERDICT_PENDING_CAP) {
+      const [oldId, old] = this.pendingHostedWakes.entries().next().value as [string, PendingHostedWake];
+      this.pendingHostedWakes.delete(oldId);
+      console.log(`  [verdict] pending cap ${HOSTED_VERDICT_PENDING_CAP} reached: evicted wake ${shortWakeId(oldId)} for ${old.name}`);
+    }
+    this.pendingHostedWakes.set(wakeId, entry);
+    this.armVerdictTimer();
+  }
+
+  private forgetHostedWake(wakeId: string): void {
+    this.pendingHostedWakes.delete(wakeId);
+    if (this.pendingHostedWakes.size === 0) this.clearVerdictTimer();
+  }
+
+  /** How many hosted wakes are waiting for a verdict (tests, diagnostics). */
+  pendingHostedWakeCount(): number {
+    return this.pendingHostedWakes.size;
+  }
+
+  /**
+   * Drop every entry at or past the TTL on this server's clock, each with
+   * the diagnostic line: its host never reported (a host whose check found
+   * the prompt, or could not tell, sends nothing; so does an older build).
+   * Then arm the timer for the next one.
+   */
+  sweepHostedVerdicts(now: number = Date.now()): void {
+    for (const [id, p] of this.pendingHostedWakes) {
+      if (now - p.mintedAt < HOSTED_VERDICT_TTL_MS) continue;
+      this.pendingHostedWakes.delete(id);
+      console.log(`  [verdict] hosted wake ${shortWakeId(id)}: no verdict (host silent or older build); ${p.name} on ${p.host}`);
+    }
+    this.armVerdictTimer();
+  }
+
+  /**
+   * The "no verdict" diagnostic runs on a bounded timer, not lazily: one
+   * timer per room at most, armed for the entry that expires first, unref'd
+   * (it never holds the process open) and cancelled when the map empties or
+   * the room is destroyed. A room with no hosted wake in flight holds none.
+   * A lazy sweep (on insert only) would say "no verdict" only when a later
+   * wake came, possibly hours on, which reads as a fresh event in the log.
+   * The timer is for that line only: a late verdict is refused by the
+   * accept-time check whether or not the timer ran.
+   */
+  private armVerdictTimer(): void {
+    this.clearVerdictTimer();
+    if (this.destroyed || this.pendingHostedWakes.size === 0) return;
+    let first = Number.POSITIVE_INFINITY;
+    for (const p of this.pendingHostedWakes.values()) first = Math.min(first, p.mintedAt);
+    const delay = Math.max(0, first + HOSTED_VERDICT_TTL_MS - Date.now());
+    this.verdictTimer = setTimeout(() => {
+      this.verdictTimer = null;
+      this.sweepHostedVerdicts();
+    }, delay);
+    this.verdictTimer.unref?.();
+  }
+
+  private clearVerdictTimer(): void {
+    if (this.verdictTimer) clearTimeout(this.verdictTimer);
+    this.verdictTimer = null;
+  }
+
+  /**
+   * A host reports that its submit check saw no submitted prompt for a
+   * hosted wake of this room. Posted, as the local line naming the host, only
+   * when every one of these holds: the wake id is known here and younger than
+   * HOSTED_VERDICT_TTL_MS on this server's clock (`now - mintedAt`; the
+   * host's `checkedAt` never enters it); the calling peer is the host it was
+   * sent to; the name and hosted registration match the record; the member
+   * is still that session (the same Agent object, host and hosted
+   * registration, and active; the wake coordinator's session generation is
+   * not used, because joinHosted releases it on every re-registration,
+   * including after a link blip); and the fields are within bounds, with
+   * none missing. The entry is consumed when the verdict is taken, so a
+   * retry after a lost reply finds nothing ("unknown") and the room hears
+   * exactly one line. Refusals are logged; the hosted registration never is.
+   */
+  acceptHostedVerdict(peer: string, body: Record<string, unknown>, now: number = Date.now()): HostedVerdictAnswer {
+    const wakeId = typeof body.wakeId === "string" ? body.wakeId : "";
+    const name = typeof body.name === "string" ? body.name : "";
+    const p = this.pendingHostedWakes.get(wakeId);
+    // Logs name the member from this server's record, never from the body.
+    const refuse = (reason: HostedVerdictRefusal): HostedVerdictAnswer => {
+      console.log(`  [verdict] hosted wake ${shortWakeId(wakeId)}${p ? ` for ${p.name}` : ""} from ${peer}: refused (${reason}); nothing posted`);
+      return { accepted: false, reason };
+    };
+    if (this.destroyed || !p) return refuse("unknown");
+    // A peer that is not the wake's host neither learns nor changes anything.
+    if (p.host !== peer) return refuse("wrong-peer");
+    if (p.name !== name) return refuse("wrong-name");
+    if (p.hostedRegistration !== body.hostedRegistration) return refuse("wrong-registration");
+    if (now - p.mintedAt >= HOSTED_VERDICT_TTL_MS) {
+      this.forgetHostedWake(wakeId);
+      return refuse("expired");
+    }
+    // Never defaulted: an absent count would make the line claim a check it
+    // did not make. The entry stays; a well-formed report may still come.
+    if (body.excludedStale === undefined || body.horizonMs === undefined) return refuse("incomplete");
+    const verdict = hostedVerdictFrom(body);
+    if (!verdict) return refuse("invalid");
+    const live = this.agents.get(name);
+    if (!live) { this.forgetHostedWake(wakeId); return refuse("member-left"); }
+    if (live !== p.agent || live.host !== p.host || hostedRegistrations.get(live) !== p.hostedRegistration) {
+      this.forgetHostedWake(wakeId);
+      return refuse("member-changed");
+    }
+    if (!live.active) { this.forgetHostedWake(wakeId); return refuse("member-inactive"); }
+    this.forgetHostedWake(wakeId);
+    console.log(`  [verdict] hosted wake ${shortWakeId(wakeId)} for ${p.name} from ${peer}: accepted`);
+    this.addSystem(notSubmittedLine(name, verdict.pid, verdict.waitedMs, verdict.excludedStale, verdict.horizonMs, p.host));
+    return { accepted: true };
+  }
+
   /**
    * The host side of a hosted wake: a linked home server asked this server
    * to wake its local member `name`, registered here as `registration` (the
    * id the home server holds as the hosted registration). The member's own
    * terminal, locks, guards and retries apply exactly as for a local
    * mention; nothing is said in this room (the home server posts the line).
-   * `roomLabel` names the home room in the prompt.
+   * `roomLabel` names the home room in the prompt. `wakeId` is the home's id
+   * for this wake (absent from an older home) and `report` carries a "not
+   * submitted" verdict back to it; without both the verdict is only logged.
    */
-  async wakeForPeer(sender: string, name: string, registration: string, roomLabel: string, mentionId?: number): Promise<HostedWakeResult> {
+  async wakeForPeer(sender: string, name: string, registration: string, roomLabel: string, mentionId?: number, wakeId?: string, report?: (verdict: HostedVerdict) => void): Promise<HostedWakeResult> {
+    // Reported only while the member is still the registration the home
+    // asked for (followSubmitCheck checks the terminal itself).
+    const sink: VerdictSink = wakeId && report
+      ? (verdict) => {
+          const live = this.agents.get(name);
+          if (!live || memberRegistrations.get(live) !== registration) {
+            console.log(`  [verify] ${name}: hosted wake ${shortWakeId(wakeId)}: not reported (the member rejoined with a new registration)`);
+            return;
+          }
+          report(verdict);
+        }
+      : null;
     // The home decided on the mention before this mirror may have received
     // it: give replication a moment, so the read the prompt asks for finds
     // it. Bounded; a mention that has not arrived by then is waked anyway.
@@ -1043,9 +1285,10 @@ export class ChatRoom extends EventEmitter {
       }
       const { outcome, partialLine, partialKind, unidentified, submitCheck } = core;
       // The keys were typed here, so the Codex store to look in is this
-      // host's. The result is only logged: the wake's answer to the home is
-      // not held back for it, and the link has no later channel for the line.
-      if (submitCheck) void this.followSubmitCheck(name, submitCheck, false);
+      // host's. The wake's answer to the home is not held back for it: a
+      // "not submitted" verdict follows later, as its own message
+      // (PeerWakeVerdictBody), and never becomes a line in this room.
+      if (submitCheck) void this.followSubmitCheck(name, submitCheck, sink);
       if (!outcome.ok) {
         return { ok: false, kind: outcome.kind, attempts: outcome.attempts, reason: outcome.reason, warn: outcome.warn };
       }
@@ -1395,6 +1638,9 @@ export class ChatRoom extends EventEmitter {
     this.rewakeAfter.clear();
     this.pendingMentionIds.clear();
     this.wakesInFlight.clear();
+    // No verdict is taken, and no "no verdict" line said, after this.
+    this.pendingHostedWakes.clear();
+    this.clearVerdictTimer();
     // No queued or in-flight wake may inject, warn or re-queue after this.
     for (const agent of this.agents.values()) {
       agent.active = false;

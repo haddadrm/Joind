@@ -329,7 +329,7 @@ describe("hosted members in a room", () => {
     room.send("Rami", "@Curzon hi");
     await vi.advanceTimersByTimeAsync(2000);
     await settle();
-    expect(calls).toEqual([{ host: "laptop", room: "c-home", name: "Curzon", hostedRegistration: "reg-host", sender: "Rami", prompt: "@Curzon mentioned by Rami", mentionId: 2 }]);
+    expect(calls).toEqual([{ host: "laptop", room: "c-home", name: "Curzon", hostedRegistration: "reg-host", sender: "Rami", prompt: "@Curzon mentioned by Rami", mentionId: 2, wakeId: expect.stringMatching(/^[0-9a-f-]{36}$/) }]);
     expect(injected).toEqual([]);
     expect(room.read().some((m) => /Could not/.test(m.text))).toBe(false);
   });

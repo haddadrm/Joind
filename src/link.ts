@@ -14,7 +14,10 @@
  *   While down, a probe retries with backoff from 1 s to 30 s.
  * - Carries this server's requests to the peer: register, send, leave, act,
  *   and, when this server is the home of a room, wakes of members hosted on
- *   the peer.
+ *   the peer. When this server HOSTS a member of the peer's room, it carries
+ *   the submit-check verdict of that member's wake back to the peer (the
+ *   home): this link with the shared token is therefore required on both
+ *   sides for the "no submitted prompt seen" line of a hosted wake.
  *
  * Every request goes to the configured URL only, with the link's token as
  * `Authorization: Bearer`.
@@ -28,10 +31,12 @@ import type { ConversationManager } from "./manager.js";
 import type { ChatMessage, HostedWakeRequest, HostedWakeResult } from "./room.js";
 import { MirrorRoom, type MirrorNotice, type MirrorTransport, type PendingPayload } from "./mirror.js";
 import { ensureDir } from "./persist.js";
+import type { SubmitCheckOptions } from "./submit-check.js";
 import {
-  LinkDownError, PeerRefusedError, parseRemoteRoomId,
+  LINK_WAKE_TIMEOUT_MS, LinkDownError, PeerRefusedError, parseRemoteRoomId,
   type PeerActBody, type PeerLeaveBody, type PeerMessagesResult, type PeerRegisterBody, type PeerRegisterResult,
   type PeerRoomsResult, type PeerSendBody, type PeerSendResult, type PeerSubscribeResult, type PeerWakeBody,
+  type PeerWakeVerdictBody, type PeerWakeVerdictResult,
   type RemoteRegisterOutcome, type RemoteRegistered, type RemoteRooms,
 } from "./peer-types.js";
 
@@ -69,6 +74,9 @@ export interface LinkClientOptions {
   pollTimeoutMs?: number;
   requestTimeoutMs?: number;
   wakeTimeoutMs?: number;
+  /** Test only: the submit check's stores and timings for the mirrors'
+   *  wakes (a mirror is built by this client, so tests cannot reach it first). */
+  submitCheckOptions?: SubmitCheckOptions;
 }
 
 /** A room id is one path-safe segment on disk. */
@@ -94,7 +102,7 @@ export class LinkClient extends EventEmitter {
   private state: LinkState | "unknown" = "unknown";
   private since = Date.now();
   private readonly link: LinkConfig;
-  private readonly opts: Required<Omit<LinkClientOptions, "fetchImpl">> & { fetchImpl: FetchLike };
+  private readonly opts: Required<Omit<LinkClientOptions, "fetchImpl" | "submitCheckOptions">> & { fetchImpl: FetchLike; submitCheckOptions?: SubmitCheckOptions };
   private mirrors = new Map<string, MirrorRoom>();
   private loops = new Map<string, AbortController>();
   private stopped = false;
@@ -125,7 +133,8 @@ export class LinkClient extends EventEmitter {
       backoffMaxMs: opts.backoffMaxMs ?? 30_000,
       pollTimeoutMs: opts.pollTimeoutMs ?? 25_000,
       requestTimeoutMs: opts.requestTimeoutMs ?? 10_000,
-      wakeTimeoutMs: opts.wakeTimeoutMs ?? 90_000,
+      wakeTimeoutMs: opts.wakeTimeoutMs ?? LINK_WAKE_TIMEOUT_MS,
+      submitCheckOptions: opts.submitCheckOptions,
     };
   }
 
@@ -237,7 +246,8 @@ export class LinkClient extends EventEmitter {
   }
 
   /** Back up: members re-registered (the peer may have restarted), then
-   *  every queue drained in order, then the restore line where "down" was said. */
+   *  every queue drained in order, then the held wake verdicts sent, then
+   *  the restore line where "down" was said. */
   private async restore(announce: boolean): Promise<void> {
     for (const m of this.mirrors.values()) {
       // A room with nothing here but release debt (its last member left
@@ -246,6 +256,7 @@ export class LinkClient extends EventEmitter {
       // (live, unconfirmed or owed ids), or the viewer (gate round 10, finding 1).
       if (m.hasLocalMembers() || m.hasMemberRecords() || m.humanToRegister() || m.humanOwes()) await m.reregisterAll();
       const sent = m.queuedCount() > 0 ? await m.drain() : 0;
+      if (m.pendingVerdictCount() > 0) await m.flushVerdicts();
       if (announce && m.downNoted && this.state === "up") {
         m.addLocalLine(`link to ${this.name} restored; ${sent} queued message${sent === 1 ? "" : "s"} sent`);
         m.downNoted = false;
@@ -322,6 +333,7 @@ export class LinkClient extends EventEmitter {
       leave: (body) => this.leave(body),
       act: (body) => this.act(body),
       register: (body) => this.register(body),
+      wakeVerdict: (body) => this.wakeVerdict(body),
       failed: (reason) => this.markDown(reason),
     };
     m = new MirrorRoom({
@@ -330,6 +342,7 @@ export class LinkClient extends EventEmitter {
       transport, selfName: this.opts.selfName,
     });
     if (this.opts.manager.injectBaseUrl) m.injectBaseUrl = this.opts.manager.injectBaseUrl;
+    if (this.opts.submitCheckOptions) m.submitCheckOptions = this.opts.submitCheckOptions;
     m.on("mirror-notice", (n: MirrorNotice) => this.emit("notice", n));
     this.mirrors.set(homeId, m);
     const mirror = m;
@@ -487,9 +500,18 @@ export class LinkClient extends EventEmitter {
     await this.request<{ ok: boolean }>("POST", "/api/peer/act", { body });
   }
 
+  /** A hosted wake's verdict, to the home. As for send: no markDown here on
+   *  failure (the mirror decides: it holds the verdict first). */
+  async wakeVerdict(body: PeerWakeVerdictBody): Promise<PeerWakeVerdictResult> {
+    const epoch = this.downEpoch;
+    const r = await this.request<PeerWakeVerdictResult>("POST", "/api/peer/wake-verdict", { body });
+    this.markUp(epoch);
+    return r;
+  }
+
   /** This server is the home of `req.room`; the member is hosted on the peer. */
   async wake(req: HostedWakeRequest): Promise<HostedWakeResult> {
-    const body: PeerWakeBody = { room: req.room, name: req.name, hostedRegistration: req.hostedRegistration, sender: req.sender, prompt: req.prompt, mentionId: req.mentionId };
+    const body: PeerWakeBody = { room: req.room, name: req.name, hostedRegistration: req.hostedRegistration, sender: req.sender, prompt: req.prompt, mentionId: req.mentionId, ...(req.wakeId ? { wakeId: req.wakeId } : {}) };
     try {
       const r = await this.request<HostedWakeResult>("POST", "/api/peer/wake", { body, timeoutMs: this.opts.wakeTimeoutMs });
       return { ok: r.ok === true, kind: r.kind, attempts: Number(r.attempts ?? 1), reason: r.reason, warn: r.warn, unidentified: typeof r.unidentified === "string" ? r.unidentified.slice(0, 200) : undefined };

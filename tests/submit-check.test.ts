@@ -37,8 +37,8 @@ vi.mock("../src/inject.js", async () => {
   };
 });
 
-import { ChatRoom, notSubmittedLine } from "../src/room.js";
-import { beginSubmitCheck, codexSessionsDirs, lineSubmitsPrompt } from "../src/submit-check.js";
+import { ChatRoom, notSubmittedLine, terminalIdentity, type HostedVerdict, type VerdictSink } from "../src/room.js";
+import { beginSubmitCheck, codexSessionsDirs, lineSubmitsPrompt, type PendingSubmitCheck, type SubmitCheckResult } from "../src/submit-check.js";
 
 const PROMPT = `[joind] @Scotty mentioned by Rami. Read: curl -s "http://127.0.0.1:4200/api/agent/read?sender=Scotty&since=2173&pid=27092" then Reply: curl -s -X POST http://127.0.0.1:4200/api/agent/send -H "Content-Type: application/json" -d '{"sender":"Scotty","text":"YOUR_REPLY","pid":27092}'`;
 
@@ -456,6 +456,11 @@ describe("the room says a typed Codex wake was not submitted, and only then", ()
     const said = `[verify] ${name}:`;
     for (let i = 0; i < 100_000 && !logs.some((l) => l.includes(said)); i++) await tick();
   }
+  /** A hosted wake's second line: what became of the verdict. */
+  async function reported(name: string): Promise<void> {
+    const said = `[verify] ${name}: hosted wake`;
+    for (let i = 0; i < 100_000 && !logs.some((l) => l.includes(said)); i++) await tick();
+  }
 
   it("submitted: the prompt reached the store, the log says so, the room hears nothing", async () => {
     const f = rollout("2026/09/26", "scotty");
@@ -568,7 +573,7 @@ describe("the room says a typed Codex wake was not submitted, and only then", ()
     }
   });
 
-  it("a hosted wake is checked on the host, where the keys were typed, and only logged there", async () => {
+  it("a hosted wake is checked on the host, where the keys were typed; an older home that sent no wake id is only logged: home did not ask", async () => {
     vi.useRealTimers();
     const room = roomWithStore(sessions);
     room.join("Curzon", 999_991, undefined, undefined, undefined, undefined, "reg-local");
@@ -576,8 +581,130 @@ describe("the room says a typed Codex wake was not submitted, and only then", ()
       const r = await room.wakeForPeer("Rami", "Curzon", "reg-local", `"ops" on y530`);
       expect(r).toMatchObject({ ok: true });
       await verified("Curzon");
-      expect(logs.some((l) => /\[verify\] Curzon: no submitted prompt seen, unconfirmed \(pid 999991, .*\); hosted wake, not reported to the home room$/.test(l))).toBe(true);
+      expect(logs.some((l) => /\[verify\] Curzon: no submitted prompt seen, unconfirmed \(pid 999991, .*\)$/.test(l))).toBe(true);
+      await reported("Curzon");
+      expect(logs).toContain("  [verify] Curzon: hosted wake: not reported (home did not ask)");
       expect(lines(room)).toEqual([]);
+    } finally {
+      room.destroy();
+    }
+  });
+});
+
+describe("a hosted wake's verdict goes to the home through the sink, and only the negative", () => {
+  const tick = () => new Promise<void>((r) => setImmediate(r));
+  const WAKE_ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+  let logs: string[];
+  beforeEach(() => {
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    state.mode = "codex"; state.console = []; state.orca = []; state.onType = null;
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  /** A host room whose check runs on a fake clock; `onPoll` runs at each poll. */
+  function hostRoom(dir: string, onPoll?: (room: ChatRoom) => void): ChatRoom {
+    const room = new ChatRoom();
+    let t = Date.now();
+    room.submitCheckOptions = { sessionsDirs: [dir], now: () => t, sleep: async (ms) => { t += ms; onPoll?.(room); await tick(); } };
+    return room;
+  }
+  async function settled(name: string, room: ChatRoom, got: unknown[]): Promise<void> {
+    for (let i = 0; i < 100_000 && got.length === 0 && !logs.some((l) => l.startsWith(`  [verify] ${name}:`) && /submitted \(seen|not verifiable|not reported/.test(l)); i++) await tick();
+    void room;
+  }
+  const staleRollout = (): void => {
+    const f = rollout("2026/09/01", "stale");
+    const old = new Date(Date.now() - 25 * 3_600_000);
+    utimesSync(f, old, old);
+  };
+
+  it("the sink receives {pid, waitedMs, excludedStale, horizonMs}; nothing is posted or logged as posted on the host", async () => {
+    staleRollout();
+    const room = hostRoom(sessions);
+    room.join("Curzon", 999_991, undefined, undefined, undefined, undefined, "reg-local");
+    const got: unknown[] = [];
+    try {
+      const r = await room.wakeForPeer("Rami", "Curzon", "reg-local", `"ops" on y530`, undefined, WAKE_ID, (v) => got.push(v));
+      expect(r).toMatchObject({ ok: true });
+      await settled("Curzon", room, got);
+      expect(got).toEqual([{ pid: 999_991, waitedMs: 30_000, excludedStale: 1, horizonMs: 86_400_000 }]);
+      expect(room.read(undefined, 100).filter((m) => /no submitted prompt seen/.test(m.text))).toEqual([]);
+      expect(logs.some((l) => l.includes("not reported"))).toBe(false);
+    } finally {
+      room.destroy();
+    }
+  });
+
+  it("no report when the member moved to another terminal during the check", async () => {
+    let moved = false;
+    const room = hostRoom(sessions, (r) => { if (!moved) { moved = true; r.join("Curzon", 999_995, undefined, undefined, undefined, undefined, "reg-local"); } });
+    room.join("Curzon", 999_991, undefined, undefined, undefined, undefined, "reg-local");
+    const got: unknown[] = [];
+    try {
+      await room.wakeForPeer("Rami", "Curzon", "reg-local", `"ops" on y530`, undefined, WAKE_ID, (v) => got.push(v));
+      await settled("Curzon", room, got);
+      expect(got).toEqual([]);
+      expect(logs).toContain("  [verify] Curzon: hosted wake: not reported (the member left or moved since the keys were typed)");
+    } finally {
+      room.destroy();
+    }
+  });
+
+  it("no report when the member rejoined on the same terminal under a new registration", async () => {
+    let rejoined = false;
+    const room = hostRoom(sessions, (r) => { if (!rejoined) { rejoined = true; r.join("Curzon", 999_991, undefined, undefined, undefined, undefined, "reg-local-2"); } });
+    room.join("Curzon", 999_991, undefined, undefined, undefined, undefined, "reg-local");
+    const got: unknown[] = [];
+    try {
+      await room.wakeForPeer("Rami", "Curzon", "reg-local", `"ops" on y530`, undefined, WAKE_ID, (v) => got.push(v));
+      await settled("Curzon", room, got);
+      expect(got).toEqual([]);
+      expect(logs).toContain("  [verify] Curzon: hosted wake 7c9e6679: not reported (the member rejoined with a new registration)");
+    } finally {
+      room.destroy();
+    }
+  });
+
+  it("no report for submitted, and none for unverifiable", async () => {
+    const f = rollout("2026/09/26", "curzon");
+    state.onType = (text) => appendFileSync(f, userMessage(text));
+    const got: unknown[] = [];
+    const submitted = hostRoom(sessions);
+    submitted.join("Curzon", 999_991, undefined, undefined, undefined, undefined, "reg-local");
+    try {
+      await submitted.wakeForPeer("Rami", "Curzon", "reg-local", `"ops" on y530`, undefined, WAKE_ID, (v) => got.push(v));
+      await settled("Curzon", submitted, got);
+      expect(logs.some((l) => /\[verify\] Curzon: submitted \(seen in rollout-curzon\.jsonl/.test(l))).toBe(true);
+    } finally {
+      submitted.destroy();
+    }
+    state.onType = null;
+    logs.length = 0;
+    const unverifiable = hostRoom(join(root, "missing"));
+    unverifiable.join("Kira", 999_997, undefined, undefined, undefined, undefined, "reg-kira");
+    try {
+      await unverifiable.wakeForPeer("Rami", "Kira", "reg-kira", `"ops" on y530`, undefined, WAKE_ID, (v) => got.push(v));
+      await settled("Kira", unverifiable, got);
+      expect(logs.some((l) => /\[verify\] Kira: not verifiable \(no Codex session store at .*\); nothing said/.test(l))).toBe(true);
+    } finally {
+      unverifiable.destroy();
+    }
+    expect(got).toEqual([]);
+  });
+
+  it("host-side contract drift: a result without its metadata is not reported (verdict metadata incomplete)", async () => {
+    const room = new ChatRoom();
+    const agent = room.join("Curzon", 999_991, undefined, undefined, undefined, undefined, "reg-local");
+    const got: unknown[] = [];
+    try {
+      const drifted = { result: "not-submitted", waitedMs: 30_000, horizonMs: 86_400_000 } as unknown as SubmitCheckResult;
+      const check: PendingSubmitCheck = { startedAt: 0, sessionsDirs: ["(test)"], verify: async () => drifted };
+      const follow = (room as unknown as { followSubmitCheck(n: string, t: { check: PendingSubmitCheck; pid: number; identity: string }, s: VerdictSink): Promise<void> }).followSubmitCheck;
+      await follow.call(room, "Curzon", { check, pid: 999_991, identity: terminalIdentity(agent) }, (v: HostedVerdict) => got.push(v));
+      expect(got).toEqual([]);
+      expect(logs).toContain("  [verify] Curzon: hosted wake: not reported (verdict metadata incomplete)");
     } finally {
       room.destroy();
     }
