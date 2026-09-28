@@ -218,4 +218,27 @@ describe("web writes require the web token", { timeout: 30_000 }, () => {
     expect((await call(S.baseUrl, "POST", "/api/message/1/tag", { tag: "status" })).status).toBe(200);
     expect((await call(S.baseUrl, "POST", "/api/state", { conversation: room, key: "k", value: "v" })).status).toBe(200);
   });
+  // Last: with the token these calls act (a room is deleted, a crew entry
+  // written), so they run on a scratch conversation after everything else.
+  it("lets every guarded route past the guard with the token", async () => {
+    const scratch = S.manager.createConversation("scratch").id;
+    for (let n = 1; n <= 3; n++) S.manager.getRoom(scratch)!.send("Kira", `scratch ${n}`);
+    S.manager.setActive(scratch);
+    const results: string[] = [];
+    const answers = new Map<string, Answer>();
+    for (const r of GUARDED) {
+      const body = r.body === undefined ? undefined : JSON.parse(JSON.stringify(r.body).replace(/"ROOM"/g, JSON.stringify(scratch))) as Record<string, unknown>;
+      const a = await call(S.baseUrl, r.method, r.path, body, { "X-Joind-Token": WEB });
+      results.push(`${r.method} ${r.path} ${a.status}`);
+      answers.set(`${r.method} ${r.path}`, a);
+      expect(a.status, `${r.method} ${r.path} with the token`).not.toBe(403);
+      expect(a.status, `${r.method} ${r.path} with the token`).toBeLessThan(500);
+    }
+    // The token made the writes land: the delete (first, in the active
+    // scratch room) removed its message, and the conversation delete went through.
+    expect(answers.get("POST /api/messages/delete")).toEqual({ status: 200, json: { ok: true } });
+    expect(answers.get("POST /api/conversations/delete")?.status).toBe(200);
+    expect(S.manager.listConversations().some((c) => c.id === scratch)).toBe(false);
+    expect(results.length).toBe(GUARDED.length);
+  });
 });
