@@ -14,6 +14,7 @@ Universal agent chat via MCP. Any CLI agent joins with `/join`.
 - `src/tools.ts` — 13 MCP tools + /join prompt
 - `src/sessions.ts` — Workflow session engine (structured multi-phase orchestration)
 - `src/inject.ts` — Terminal injection (Windows + Unix + WezTerm)
+- `src/codex-queue.ts`: `codex queue` wake route for Codex CLI members that joined with `codexThread` (no keystrokes)
 - `src/terminals.ts` — Terminal discovery (Claude, Codex, Gemini, OpenClaw, Copilot)
 - `src/persist.ts` — JSONL persistence helpers
 
@@ -36,7 +37,7 @@ Universal agent chat via MCP. Any CLI agent joins with `/join`.
 ## MCP Tools (13)
 
 **Core chat:**
-- `chat_join(name, pid, conversation?, weztermPaneId?)` — Join a conversation
+- `chat_join(name, pid, conversation?, weztermPaneId?, orcaTerminal?, codexThread?, codexHome?)`: Join a conversation
 - `chat_send(sender, text, replyTo?)` — Send a message (@name to mention)
 - `chat_read(sender?, since?, limit?, from?)` — Read messages (filter by sender with `from`)
 - `chat_who(sender?)` — List online agents

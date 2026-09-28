@@ -7,6 +7,7 @@
 
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
+import { CodexQueueNotHandedOff, injectCodexQueue } from "./codex-queue.js";
 import { injectOrca, UnconfirmedDeliveryError } from "./orca.js";
 import { classifyTarget, forgetTarget, unknownPlan, DEFAULT_PLAN, type SubmitPlan } from "./target.js";
 import { socketForGui } from "./terminals.js";
@@ -198,6 +199,19 @@ export class WakeFallbackAborted extends Error {
 export type AfterTextRoute = "keys" | "orca";
 
 export interface InjectOptions {
+  /** Codex session UUID: when set, `codex queue` is tried
+   *  before every other route. Accepted means delivered, with no keys and no
+   *  onKeysTyping. A failure before any handoff falls back to the routes
+   *  below through fallbackGuard; any other failure is unconfirmed and never
+   *  falls back (see src/codex-queue.ts). */
+  codexThread?: string;
+  /** The target's CODEX_HOME for the queue route; the server's own when unset. */
+  codexHome?: string;
+  /** Asked immediately before `codex queue` runs (the wake waited for its
+   *  locks, and the thread is part of the registration): anything but
+   *  "proceed" aborts the wake with WakeFallbackAborted, with nothing sent
+   *  and no keystroke fallback. Absent, fallbackGuard is asked. */
+  queueGuard?: () => "proceed" | "skip" | "moved";
   /** Orca terminal handle: when set, Orca's own input path is tried first
    *  (before WezTerm and the console). */
   orcaTerminal?: string;
@@ -235,6 +249,8 @@ export interface InjectOptions {
 
 /** Backends, injectable for tests. */
 export interface InjectBackends {
+  /** Defaults to injectCodexQueue; tests stub it (never the real codex). */
+  codexQueue?: (thread: string, text: string, codexHome?: string) => Promise<void>;
   /** Optional so callers that predate Orca keep compiling; defaults to injectOrca. */
   orca?: (handle: string, text: string, opts?: { beforeRetry?: () => void }) => Promise<void>;
   wezterm: typeof injectWezTerm;
@@ -253,10 +269,13 @@ export interface InjectBackends {
 
 /**
  * Inject a text prompt + Enter into the terminal of a running process.
- * Backend order: Orca (options.orcaTerminal), else WezTerm (paneId), else
- * the console. When the Orca or WezTerm path fails and a real pid is known,
- * fall back to console injection rather than giving up (a handle or pane can
- * be stale while the process is alive), through the caller's guard.
+ * Backend order: `codex queue` (options.codexThread, no keys at all), then
+ * Orca (options.orcaTerminal), else WezTerm (paneId), else the console.
+ * The queue route falls through to the others only when it provably handed
+ * nothing over, and only through the caller's fallback guard. When the Orca
+ * or WezTerm path fails and a real pid is known, fall back to console
+ * injection rather than giving up (a handle or pane can be stale while the
+ * process is alive), through the caller's guard.
  */
 export async function inject(
   pid: number, text: string, weztermPaneId?: number, weztermExe?: string, weztermEnv?: Record<string, string>,
@@ -294,6 +313,35 @@ export async function inject(
     });
     return planPromise;
   };
+  if (options.codexThread) {
+    const thread = options.codexThread;
+    // The last word before the queue: still the same registration, with this
+    // thread and home? If not, nothing is sent and nothing falls back.
+    const before = (options.queueGuard ?? options.fallbackGuard)?.() ?? "proceed";
+    if (before !== "proceed") {
+      console.log(`  [inject] codex queue not run: target ${before === "skip" ? "left" : "changed"} before the send`);
+      if (pid > 0) forgetTarget(pid);
+      throw new WakeFallbackAborted(before);
+    }
+    try {
+      return await (backends.codexQueue ?? injectCodexQueue)(thread, text, options.codexHome);
+    } catch (err) {
+      // Timeout, kill or an unexplained exit: the message may be queued
+      // already. Typing it as well could deliver it twice. Report it.
+      if (!(err instanceof CodexQueueNotHandedOff)) throw err;
+      const msg = err.message.split("\n")[0];
+      const keysPossible = pid > 0 || weztermPaneId != null || options.orcaTerminal != null;
+      if (!keysPossible) throw err;
+      // The queue attempt took time: never type into a terminal the caller no longer vouches for.
+      const verdict = options.fallbackGuard?.() ?? "proceed";
+      if (verdict !== "proceed") {
+        console.log(`  [inject] codex queue failed (${msg.slice(0, 120)}); no keystroke fallback: target ${verdict === "skip" ? "left" : "moved"}`);
+        if (pid > 0) forgetTarget(pid);
+        throw new WakeFallbackAborted(verdict);
+      }
+      console.log(`  [inject] codex queue failed before handoff (${msg.slice(0, 120)}); falling back to keystrokes`);
+    }
+  }
   let primary: unknown;
   let via: string | null = null;
   let attempt: (() => Promise<void>) | null = null;

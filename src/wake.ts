@@ -23,9 +23,10 @@
 /** "partial": the text reached the terminal but the Enter that submits it
  *  could not be sent (PartialDeliveryError). Never retried: a retry would
  *  type the whole prompt again behind the one already in the input box. */
-/** "unconfirmed": the text was handed to a delivery process (Orca's send)
- *  that never reported the outcome (UnconfirmedDeliveryError). It may have
- *  landed. Never retried and never a console fallback, for the same reason. */
+/** "unconfirmed": the text was handed to a delivery process (Orca's send,
+ *  or `codex queue`) that never reported the outcome
+ *  (UnconfirmedDeliveryError). It may have landed. Never retried and never
+ *  a console fallback, for the same reason. */
 export type WakeFailureKind = "no-console" | "transient" | "partial" | "unconfirmed";
 
 /** What an attempt did. "skip": the target was gone by the time its turn
@@ -60,6 +61,10 @@ const NO_CONSOLE_PATTERNS = [
   /orca terminal \S+ unavailable \(/i,
   /\bterminal_handle_stale\b/i,
   /orca cli unavailable/i,
+  // Codex queue (src/codex-queue.ts wording): nothing was handed over and
+  // no keystroke route exists (no codex CLI, or the thread is not in that
+  // Codex home, or the home given at join is gone).
+  /^codex queue unavailable:/im,
 ];
 
 export function classifyWakeFailure(err: unknown): WakeFailureKind {
