@@ -1455,7 +1455,8 @@ function openLoadedMessage(conv, msg, seq) {
     var partner = dmPartnerOf(msg);
     if (!partner) { showRefNotice(refNotFoundText(msg.id)); return; }
     if (activeDm !== partner) selectDm(partner);
-    scrollToMessageWhenReady(msg.id, 10, conv);
+    // Bound to this jump: a later navigation (or jump) stops the retries.
+    scrollToMessageWhenReady(msg.id, 10, conv, jumpSeq);
     return;
   }
   if (!activeConversation || activeConversation.id !== conv) {
@@ -1482,13 +1483,18 @@ function openLoadedMessage(conv, msg, seq) {
 }
 
 function loadAroundMessage(conv, id, seq) {
+  // Messages this pane holds now; any other that arrives before the window
+  // lands is counted on the "Jump to latest" pill (the reload shows it).
+  var heldBefore = {};
+  allMessages.forEach(function(m) { heldBefore[String(m.id)] = true; });
   fetch('/api/messages?conversation=' + encodeURIComponent(conv) + '&around=' + id + '&limit=60&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
     .then(function(res) {
       if (seq !== jumpSeq) return;
       if (!activeConversation || activeConversation.id !== conv || activeDm) return;
       if (!res.ok || !res.body || !Array.isArray(res.body.messages)) { showRefNotice(refNotFoundText(id, res.body)); return; }
-      historyView = { conv: conv, anchor: id, hasNewer: !!res.body.hasNewer, newCount: 0 };
+      var arrived = allMessages.filter(function(m) { return !heldBefore[String(m.id)] && messageInCurrentView(m); }).length;
+      historyView = { conv: conv, anchor: id, hasNewer: !!res.body.hasNewer, newCount: arrived };
       allMessages = res.body.messages.slice();
       renderChannelView();
       var el = messageElementFor(conv, id);
@@ -7178,10 +7184,13 @@ function renderDecisionsPanel() {
 
 // Retry until the message element exists (conversation loads are async),
 // then scroll; gives up quietly after `tries` beats of 200ms.
-function scrollToMessageWhenReady(id, tries, conv) {
+// `navSeq`, when given, binds the retries to one jump: they stop once a
+// navigation or another jump moves jumpSeq on.
+function scrollToMessageWhenReady(id, tries, conv, navSeq) {
+  if (navSeq !== undefined && navSeq !== jumpSeq) return;
   var el = conv ? messageElementFor(conv, id) : document.querySelector('.message[data-id="' + id + '"]');
   if (el) { highlightMessageEl(el); return; }
-  if (tries > 0) setTimeout(function() { scrollToMessageWhenReady(id, tries - 1, conv); }, 200);
+  if (tries > 0) setTimeout(function() { scrollToMessageWhenReady(id, tries - 1, conv, navSeq); }, 200);
 }
 
 refreshDecisionsBadge();
