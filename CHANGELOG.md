@@ -27,6 +27,10 @@ Rami chose variant A of the redesign exploration ("A feels most comfortable and 
 #### Lane 5 gate round 4 (Codex, CHANGES REQUESTED, one Medium)
 - **A task added to a later column that could not be moved looked fine** (Medium). The board creates a task as Open and then moves it; a refused move was ignored and the board reloaded as if it had worked. The move's answer is now checked: on a refusal the task stays in Open and the board says "Task N was created in Open; it could not be moved to In review" (or the column chosen).
 
+#### Lane 5 gate round 5 (Codex, PASS, one Low fixed)
+- **Low, fixed:** the card menu now handles Escape itself (close, focus back to the card), rather than relying on the page's general Escape handler.
+- Gate observed: 767 tests in 67 files, tsc clean, no dashes, no `any`.
+
 ### Lane 4: sidebar sections and the Decisions page
 - **Decisions is a page**, as in A: the rail item is a view whose sidebar lists Waiting on you, Open (everyone's open asks) and Closed, each with its count. A card shows the question, the id, who asked, the room and the state (Waiting on you or on someone, or Closed with the answer and who gave it). Its choices are answered on the page, for any room; the chosen one carries the chooser's avatar. Open in room jumps to the message (a DM opens its thread); Resolve closes an ask without a choice. On a phone the views are chips on the page and no drawer opens. The old decisions overlay is no longer reachable from the rail.
 - **Server:** `GET /api/decisions` takes `state=resolved` and `state=all` besides `open` (anything else is `open`, as before) and returns each ask's `choices` and `choiceResponse`. `POST /api/message/:id/choose` takes an optional `conversation`: the named room answers, an unknown or empty name is a 404 and never the active room in its place, the viewer answers as themselves (the body's `by` is ignored there), and only on a message they can see. Without it, the active room as before. `ChatRoom.resolvedAsks` joins `openAsks`. Covered by `tests/decisions-route.test.ts`.

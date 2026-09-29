@@ -4464,8 +4464,10 @@ function openCardMenu(t, card) {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       items[e.key === 'ArrowDown' ? (at + 1) % items.length : (at - 1 + items.length) % items.length].focus();
-    } else if (e.key === 'Tab') {
+    } else if (e.key === 'Tab' || e.key === 'Escape') {
+      // Leaving the menu, either way: close it, back to the card.
       e.preventDefault();
+      e.stopPropagation();
       closePopover();
       if (card.isConnected) card.focus();
     }
