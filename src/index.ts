@@ -29,7 +29,7 @@ import { setDefaultPresenceGrace, setInjectBaseUrl } from "./room.js";
 import { injectBaseUrlFor } from "./wake.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { ConversationManager, newRegistrationId, isTerminalLess, type AgentBindingEntry } from "./manager.js";
+import { ConversationManager, newRegistrationId, isTerminalLess, bindingMatchesTerminal, type AgentBindingEntry } from "./manager.js";
 import { visibleToViewer, type ChatMessage, type ChatRoom } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
 import { parseCodexHome, parseCodexThread } from "./codex-queue.js";
@@ -1918,6 +1918,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
         return;
       }
       const caller = callerRegistration(req, respondedBy, target.named ? target.id : undefined);
+      if (caller === "ambiguous") {
+        res.status(400).json({ error: `${respondedBy} is registered from this terminal in more than one conversation: pass conversation or registration` });
+        return;
+      }
       if (!caller) {
         res.status(403).json({ error: "respondedBy must be the caller: pass your registration (from your join reply), pid, paneId with weztermGui, or orcaTerminal" });
         return;
@@ -2007,12 +2011,17 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   /** The caller's own registration of `name`, proved by what the request
    *  names: its registration id (matched alone, hosted members included), or
-   *  else an exact terminal alias (pid, pane with its GUI, Orca handle),
-   *  preferring the registration in `conversationId`. Never the lone binding
-   *  of a name, so a name alone proves nothing. */
-  function callerRegistration(req: express.Request, name: string, conversationId?: string): AgentBindingEntry | undefined {
+   *  else an exact terminal alias (pid, pane with its GUI, Orca handle).
+   *  Never the lone binding of a name, so a name alone proves nothing. With
+   *  `conversationId` only a registration in that room answers; without it,
+   *  aliases matching registrations in more than one room are ambiguous. */
+  function callerRegistration(req: express.Request, name: string, conversationId?: string): AgentBindingEntry | "ambiguous" | undefined {
+    const inRoom = (e: AgentBindingEntry): boolean => conversationId === undefined || e.conversationId === conversationId;
     const registration = registrationOf(req);
-    if (registration !== undefined) return manager.bindingsOf(name).find((e) => e.registration === registration);
+    if (registration !== undefined) {
+      const byId = manager.bindingsOf(name).find((e) => e.registration === registration);
+      return byId && inRoom(byId) ? byId : undefined;
+    }
     const num = (raw: unknown, min: number): number | undefined => {
       const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
       return Number.isInteger(n) && n >= min ? n : undefined;
@@ -2024,7 +2033,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const weztermGui = weztermGuiOf(req);
     const orcaTerminal = orcaOf(req);
     if (pid === undefined && (paneId === undefined || weztermGui === undefined) && orcaTerminal === undefined) return undefined;
-    return manager.bindingEntryForTerminal(name, { pid, paneId, weztermGui, orcaTerminal }, conversationId);
+    // Terminal aliases never reach a hosted registration (it has none here).
+    const matches = manager.bindingsOf(name).filter((e) => !e.host && inRoom(e) && bindingMatchesTerminal(e, { pid, paneId, weztermGui, orcaTerminal }));
+    if (matches.length > 1) return "ambiguous";
+    return matches[0];
   }
 
   /** The candidates of a name registered more than once, for a 403 or 409:
