@@ -1801,10 +1801,18 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.status(400).json({ error: "status must be one of " + TASK_STATUSES.join(", ") });
       return;
     }
-    if (assignee !== undefined && assignee !== null && typeof assignee !== "string") {
+    // An assignee is a name (at most 64 characters, no control characters),
+    // or null or empty to clear.
+    if (assignee !== undefined && assignee !== null && assignee !== "" && validWebName(assignee) === null) {
       res.status(400).json({ error: "assignee must be a name, or null or empty to clear" });
       return;
     }
+    // The route stays open to token-less callers (agents and scripts use it
+    // to resolve, as documented), but only the web viewer's own board moves
+    // are announced in the room, under the registered viewer's name: a
+    // token-less caller cannot put words of its choosing into a room.
+    const announce = webAuthorized(webTokenOf(req));
+    const mover = announce ? webViewer() : null;
     const convId = conversation || manager.getActiveId();
     if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
     if (manager.isRemote(convId)) { res.status(400).json({ error: "Tasks of a remote room are resolved on its home server" }); return; }
@@ -1812,7 +1820,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const before = taskStore.get(convId, id);
     const prevStatus = before?.status;
     const prevAssignee = before?.assignee;
-    const task = taskStore.update(convId, id, { status, response, respondedBy, assignee, priority });
+    const assigneeClean = assignee === undefined ? undefined : assignee === null || assignee === "" ? null : validWebName(assignee);
+    const task = taskStore.update(convId, id, { status, response, respondedBy, assignee: assigneeClean, priority });
     if (!task) { res.status(404).json({ error: "Task not found" }); return; }
 
     // Post system message if task was resolved
@@ -1821,12 +1830,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       if (room) {
         room.send("system", `[Task #${task.id} done] ${respondedBy ?? "someone"} responded: ${response.slice(0, 200)}`);
       }
-    } else if (room && status !== undefined && status !== prevStatus) {
+    } else if (announce && room && status !== undefined && status !== prevStatus) {
       // A move on the board: the room hears it, as agents read the room.
       const label = status === "in_progress" ? "in progress" : status === "review" ? "in review" : status;
-      room.send("system", `[Task #${task.id} ${label}] ${task.title}${respondedBy ? ` (moved by ${respondedBy})` : ""}`);
+      room.send("system", `[Task #${task.id} ${label}] ${task.title}${mover ? ` (moved by ${mover})` : ""}`);
     }
-    if (room && assignee !== undefined && (task.assignee ?? null) !== (prevAssignee ?? null)) {
+    if (announce && room && assignee !== undefined && (task.assignee ?? null) !== (prevAssignee ?? null)) {
       room.send("system", task.assignee
         ? `[Task #${task.id} for ${task.assignee}] ${task.title}`
         : `[Task #${task.id} unassigned] ${task.title}`);

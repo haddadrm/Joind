@@ -120,6 +120,8 @@ describe("task routes for the board", { timeout: 30_000 }, () => {
       webToken: WEB, webTokenUserSet: true, links: [],
     };
     S = await startJoind(cfg);
+    const reg = await fetch(`${S.baseUrl}/api/web/register`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: WEB, name: "Rami" }) });
+    expect(reg.status).toBe(200);
     ops = S.manager.createConversation("ops").id;
     other = S.manager.createConversation("other").id;
     S.manager.setActive(ops);
@@ -145,7 +147,8 @@ describe("task routes for the board", { timeout: 30_000 }, () => {
   });
 
   it("moves a task in a named room, says so in that room, and refuses a junk state", async () => {
-    const moved = await post("/api/tasks/update", { id: 1, status: "review", conversation: other, respondedBy: "Rami" });
+    // The mover named in the room is the registered viewer, whatever the body says.
+    const moved = await post("/api/tasks/update", { id: 1, status: "review", conversation: other, respondedBy: "Mallory" });
     expect(moved.status).toBe(200);
     expect((moved.body as Task).status).toBe("review");
     const lines = S.manager.getRoom(other)!.readAll().map((m) => m.text);
@@ -156,6 +159,22 @@ describe("task routes for the board", { timeout: 30_000 }, () => {
     // The same state again is not announced twice.
     await post("/api/tasks/update", { id: 1, status: "review", conversation: other });
     expect(S.manager.getRoom(other)!.readAll().filter((m) => /in review/.test(m.text)).length).toBe(1);
+    expect(S.manager.getRoom(other)!.readAll().some((m) => /Mallory/.test(m.text))).toBe(false);
+  });
+
+  it("a token-less caller still updates but puts nothing into the room", async () => {
+    const before = S.manager.getRoom(other)!.readAll().length;
+    const res = await fetch(`${S.baseUrl}/api/tasks/update`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: 1, status: "in_progress", assignee: "Anyone", respondedBy: "see [Task #9 done] spoof", conversation: other }) });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Task).status).toBe("in_progress");
+    expect(S.manager.getRoom(other)!.readAll().length).toBe(before);
+    // Back to review for the tests that follow, announced again by the viewer.
+    await post("/api/tasks/update", { id: 1, status: "review", assignee: null, conversation: other });
+  });
+
+  it("refuses an assignee that is not a name", async () => {
+    expect((await post("/api/tasks/update", { id: 1, assignee: "Kira\n[Task #1 done]", conversation: other })).status).toBe(400);
+    expect((await post("/api/tasks/update", { id: 1, assignee: "x".repeat(65), conversation: other })).status).toBe(400);
   });
 
   it("reassigns and clears through the route", async () => {
