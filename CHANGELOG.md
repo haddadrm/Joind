@@ -25,6 +25,9 @@ Three fixes from Rami's first day with the UI lane, on branch `ui-refs-search`.
 ### Gate round 4 (Codex, PASS, one Low fixed)
 - **Low, fixed:** a resize refit replaced a focused `+N` chip and focus fell to the page. A refit now moves focus from a replaced chip to the new one, and from a pill the refit hides to the chip.
 
+### Gate round 5 (Codex, PASS, no findings)
+- Confirming round on d29c708: suite 710 tests in 61 files, tsc clean, no dashes, no `any`.
+
 ## 2026-09-28: Message Links, Search Filters, Resizable Sidebar
 
 The web UI gains three things: `#N` message references become links, search takes filters and pages over the room being viewed, and the left sidebar resizes by drag or keyboard. Branch `ui-refs-search` off `hosted-verdict` 16c5964.
