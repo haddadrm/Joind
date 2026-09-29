@@ -231,9 +231,16 @@ function revertRename() {
   var senderInput = document.getElementById('sender-name');
   if (senderInput) senderInput.value = prev;
   var display = document.getElementById('you-name-display');
-  if (display) {
-    display.textContent = prev;
-    display.style.color = getSenderColor(prev);
+  if (display) display.textContent = prev;
+  var avatar = document.getElementById('you-avatar');
+  if (avatar) {
+    avatar.textContent = prev.charAt(0).toUpperCase();
+    avatar.style.background = getSenderColor(prev);
+  }
+  var pill = document.getElementById('you-pill');
+  if (pill) {
+    pill.title = 'You: ' + prev;
+    pill.setAttribute('aria-label', 'Your menu, ' + prev);
   }
 }
 
@@ -1066,6 +1073,12 @@ function openConvMore(evt) {
     return b;
   });
   pop.addEventListener('keydown', function(e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      closePopover();
+      if (btn) btn.focus();
+      return;
+    }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     var at = buttons.indexOf(document.activeElement);
     var next = e.key === 'ArrowDown' ? Math.min(buttons.length - 1, at + 1) : Math.max(0, at - 1);
@@ -3635,7 +3648,12 @@ function openUserMenu() {
       e.preventDefault();
       items[e.key === 'Home' ? 0 : items.length - 1].focus();
     } else if (e.key === 'Tab') {
+      // Leaving the menu: close it and hand focus back to the avatar (the
+      // menu sits at the end of the page, so native Tab order from a
+      // removed item has nowhere sensible to go).
+      e.preventDefault();
       closePopover();
+      pill.focus();
     }
   });
 
@@ -3667,6 +3685,14 @@ function signOut() {
   closePopover();
   closeSettingsModal(false);
   closeSidePanel(false);
+  // Panels and dialogs that live outside the app element go too: the
+  // signed-out screen makes only the app inert.
+  if (notifyPanelOpen) closeNotifyPanel();
+  if (decisionsPanelOpen) closeDecisionsPanel();
+  closeCrewPanel();
+  closeLaunchDialog();
+  closeMobileDrawer();
+  document.querySelectorAll('.session-modal-overlay, .notify-panel-overlay, .crew-panel-overlay, .launch-dialog-overlay').forEach(function(el) { el.remove(); });
   if (ws) { try { ws.close(); } catch (e) { /* already closed */ } }
   showSignedOut(served);
 }
@@ -3704,6 +3730,13 @@ function showSignedOut(served) {
   box.appendChild(text);
   box.appendChild(btn);
   overlay.appendChild(box);
+  // The app behind is out of reach (inert: no focus, no clicks) until the
+  // page reloads, and Tab stays on the one control here.
+  var app = document.querySelector('.app');
+  if (app) app.inert = true;
+  overlay.addEventListener('keydown', function(e) {
+    if (e.key === 'Tab') { e.preventDefault(); btn.focus(); }
+  });
   document.body.appendChild(overlay);
   btn.focus();
 }
