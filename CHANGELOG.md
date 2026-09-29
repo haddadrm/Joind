@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-29: Backlog After the Redesign
+
+- The backlog drops the items the UI lanes shipped (resizable sidebar, clickable message references, search filters, the app interface redesign) and records what they deferred: redesign follow-ups, attribution of token-less task resolutions, and agent credentials.
+
 ## 2026-09-29: Redesign, Variant A
 
 Rami chose variant A of the redesign exploration ("A feels most comfortable and well rounded"), with B's command palette and C's members panel to follow. The design note, the three variant pages and the screenshots are in `docs/design/2026-09-29-redesign/`. Built lane by lane on branch `redesign-a`, each lane gated by Codex.
