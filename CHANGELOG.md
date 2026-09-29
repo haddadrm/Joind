@@ -15,6 +15,10 @@ Rami chose variant A of the redesign exploration ("A feels most comfortable and 
 - **IME composition** (Medium). Enter picking an input-method candidate ran the selected item. Keys during composition are left to the input method, in the field and for the shortcut.
 - **Low, fixed:** an open palette now follows the state it shows (rooms, DMs and their states, unread counts, the waiting decisions), redrawing from their renderers and keeping the selected item selected.
 
+#### Lane 6 gate round 2 (Codex, PASS, one Low fixed)
+- **Low, fixed:** the Ctrl+K shortcut also ignores the composition key code (229), as the palette field does.
+- Gate observed: 770 tests in 67 files, tsc clean, no dashes, no `any`.
+
 ### Lane 5: the task board
 - **Four task states.** `Task.status` is `open`, `in_progress`, `review` or `done`. Files written before the board hold only `open` and `done`, which keep their meaning; an unknown state read from a file is treated as `open`. Every state but `done` counts as open for the badge, the urgent flag and the `open` list filter (so existing callers of `status=open` still get every unfinished task); `in_progress` and `review` also filter exactly. Reopening a done task clears its resolved time. `TASK_STATUSES`, `isTaskStatus` and `isActiveStatus` are exported from `src/tasks.ts`.
 - **Routes.** `POST /api/tasks/update` refuses an unknown state (400), accepts (with the web token) board moves and an assignee change and `null` or an empty string to clear it, and, for a web-authorized caller, posts one system line to the task's room when a card moves (`[Task #5 in review] title (moved by Rami)`, naming the registered viewer) or is reassigned (`[Task #5 for Kira] title`, `[Task #5 unassigned] title`), so agents reading the room see board moves; resolving with a response is unchanged. `GET /api/tasks?scope=all` lists every local room's tasks with the room name, behind the web token (optional `status` and `assignee` filters).

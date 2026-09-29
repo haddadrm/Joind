@@ -4878,7 +4878,7 @@ function closePalette(returnFocus) {
 // key has no other use there).
 document.addEventListener('keydown', function(e) {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || String(e.key).toLowerCase() !== 'k') return;
-  if (e.isComposing) return;
+  if (e.isComposing || e.keyCode === 229) return;
   if (signedOut || settingsOverlay) return;
   // Not over another dialog (the launcher, the crew roster, a prompt, the
   // notifications or decisions overlays, the image viewer); Ctrl+K inside
