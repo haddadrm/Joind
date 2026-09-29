@@ -5132,7 +5132,8 @@ document.addEventListener('keydown', function(e) {
 // --- The composer bar: the plus-menu, decision, task ---
 // The plus button opens one menu: Files, Images, Paste image, URL, Prompt
 // snippets and Decision card, with a tip line. Arrow keys move, Home and
-// End jump, Escape closes (focus back to the plus button), Tab closes.
+// End jump, Escape closes from either view (focus back to the plus
+// button), Tab closes.
 var attachMenuOpen = false;
 var attachMenuView = 'main'; // 'main' or 'snippets'
 var snippetsCache = null;    // the viewer's snippets, loaded on demand
@@ -5266,7 +5267,7 @@ function onAttachMenuKey(e) {
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopPropagation();
-    if (attachMenuView === 'snippets') { attachMenuView = 'main'; renderAttachMenu(); var s = document.getElementById('attach-item-snippets'); if (s) s.focus(); return; }
+    // Escape closes the whole menu from either view (Back returns to the list).
     closeAttachMenu(true);
     return;
   }
