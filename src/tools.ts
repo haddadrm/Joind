@@ -524,7 +524,7 @@ export function registerTools(
         // come back to this server, where the terminal is. Kept here only if
         // this join is still current below.
         const reg = await remote.registerMember(convId, name, registration, {
-          pid, paneId: resolvedPaneId ?? undefined, gui: paneResolution.gui, orcaTerminal: resolvedOrca ?? undefined, role: persistedRole,
+          pid, paneId: resolvedPaneId ?? undefined, gui: paneResolution.gui, orcaTerminal: resolvedOrca ?? undefined, role: persistedRole, joinRoute: "mcp",
         });
         if (!reg.ok) {
           const cands = reg.candidates ? ` Candidates: ${JSON.stringify(reg.candidates)}` : "";
@@ -539,7 +539,7 @@ export function registerTools(
         return { content: [{ type: "text" as const, text: `Join superseded: ${name} joined again or left while this join was being validated. Retry if you are the live session.` }] };
       }
 
-      const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui, registration, threadParse.value, homeParse.value);
+      const agent = room.join(name, pid, resolvedPaneId, persistedRole, resolvedOrca, paneResolution.gui, registration, threadParse.value, homeParse.value, "mcp");
       manager.bindAgent(name, convId, pid, resolvedPaneId, resolvedOrca, paneResolution.gui, registration);
       sessionBindings.set(extra.sessionId, {
         convId, name, registration, pid,

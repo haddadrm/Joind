@@ -28,7 +28,7 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import type { LinkConfig } from "./config.js";
 import type { ConversationManager } from "./manager.js";
-import type { ChatMessage, HostedWakeRequest, HostedWakeResult } from "./room.js";
+import type { ChatMessage, HostedWakeRequest, HostedWakeResult, JoinRoute } from "./room.js";
 import { MirrorRoom, type MirrorNotice, type MirrorTransport, type PendingPayload } from "./mirror.js";
 import { ensureDir } from "./persist.js";
 import type { SubmitCheckOptions } from "./submit-check.js";
@@ -573,7 +573,7 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
     return (await c.resolveMirror(r.room)) !== undefined;
   }
 
-  async registerMember(convId: string, name: string, registration: string, t: { pid?: number; paneId?: number; gui?: number; orcaTerminal?: string; role?: string }): Promise<RemoteRegisterOutcome> {
+  async registerMember(convId: string, name: string, registration: string, t: { pid?: number; paneId?: number; gui?: number; orcaTerminal?: string; role?: string; joinRoute?: JoinRoute }): Promise<RemoteRegisterOutcome> {
     const r = parseRemoteRoomId(convId);
     const c = r ? this.clients.get(r.server) : undefined;
     const m = r && c ? c.getMirror(r.room) : undefined;
@@ -605,7 +605,7 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
       return { ok: false, status: 503, error: (err as Error).message };
     }
     try {
-      const res = await c.register({ room: r.room, name, host: this.selfName, registration, terminalSummary, ...(t.role ? { role: t.role } : {}) });
+      const res = await c.register({ room: r.room, name, host: this.selfName, registration, terminalSummary, ...(t.role ? { role: t.role } : {}), ...(t.joinRoute ? { joinRoute: t.joinRoute } : {}) });
       // Nothing is kept here yet: the join may still be superseded (gate
       // round 1, finding 3). The caller commits or abandons.
       const out: RemoteRegistered = { ok: true, online: res.online ?? [], homeRegistration: res.registration, hostedRegistration: registration, role: t.role, terminalSummary };
@@ -654,7 +654,7 @@ export class LinkRegistry extends EventEmitter implements RemoteRooms {
         // The member here is the newer join: the home must hold ITS id (live
         // on record already). A reply that lands after it left is debt
         // (confirmMemberRegistration re-checks; gate round 10, finding 3).
-        const res = await c.register({ room: r.room, name, host: this.selfName, registration: current.registration, terminalSummary: current.terminalSummary, ...(current.role ? { role: current.role } : {}) });
+        const res = await c.register({ room: r.room, name, host: this.selfName, registration: current.registration, terminalSummary: current.terminalSummary, ...(current.role ? { role: current.role } : {}), ...(current.joinRoute ? { joinRoute: current.joinRoute } : {}) });
         m.confirmMemberRegistration(name, current.registration, res.registration, { role: current.role, terminalSummary: current.terminalSummary });
       }
       // The live registration first, then every other id by id.

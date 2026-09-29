@@ -31,7 +31,7 @@ import { join } from "path";
 import type { LinkConfig } from "./config.js";
 import { tokensEqual } from "./config.js";
 import { newRegistrationId, type ConversationManager } from "./manager.js";
-import { visibleToViewer, type ChatMessage, type ChatRoom, type RoomEvent } from "./room.js";
+import { visibleToViewer, parseJoinRoute, type ChatMessage, type ChatRoom, type RoomEvent } from "./room.js";
 import type { LinkRegistry } from "./link.js";
 import { WAKE_ID_PATTERN, type PeerAction, type PeerEvent, type PeerSubscribeResult, type PeerWakeVerdictResult } from "./peer-types.js";
 
@@ -360,9 +360,12 @@ export class PeerHub {
       if (human) { conflict(); return; }
       if (existing && existing.host !== peer) { conflict(); return; }
       if (!existing && localBinding) { conflict(); return; }
+      const joinRoute = parseJoinRoute(body.joinRoute);
       if (existing && room.hostedRegistrationOf(name) === hostedRegistration) {
-        // The same host and the same hosted registration: idempotent.
+        // The same host and the same hosted registration: idempotent (the
+        // join route is taken as sent, an older host sending none).
         const registration = room.registrationOf(name) ?? newRegistrationId();
+        room.setJoinRoute(name, joinRoute);
         room.touch(name);
         res.json({ ok: true, registration, online: room.whoNames() });
         return;
@@ -372,7 +375,7 @@ export class PeerHub {
       const role = str(body.role) ?? this.opts.getPersistedRole?.(name);
       // A local join of this name still validating is superseded (finding 4).
       manager.supersedeRoomJoins(roomId, name);
-      room.joinHosted(name, peer, registration, hostedRegistration, role);
+      room.joinHosted(name, peer, registration, hostedRegistration, role, joinRoute);
       manager.bindHosted(name, roomId, registration, peer);
       res.json({ ok: true, registration, online: room.whoNames() });
     });

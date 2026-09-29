@@ -284,6 +284,7 @@ export class ConversationManager extends EventEmitter {
         onAskResolve: (messageId, by, at) => askStore.record(id, { messageId, resolvedBy: by, at }),
       });
       room.homeId = id;
+      room.displayName = () => this.meta.get(id)?.name;
       if (this.injectBaseUrl) room.injectBaseUrl = this.injectBaseUrl;
       // Late-bound: the link layer may attach after rooms exist.
       room.hostedWaker = (req) => this.hostedWaker

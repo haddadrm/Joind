@@ -139,6 +139,15 @@ export interface ChatMessage {
   local?: boolean;
 }
 
+/** How a member joined: through the MCP tools (it holds chat_read and
+ *  chat_send) or the REST routes (it may hold nothing but a shell). */
+export type JoinRoute = "mcp" | "rest";
+
+/** A join route from the wire: "mcp" or "rest", anything else unknown. */
+export function parseJoinRoute(raw: unknown): JoinRoute | undefined {
+  return raw === "mcp" || raw === "rest" ? raw : undefined;
+}
+
 export interface Agent {
   name: string;
   pid: number;
@@ -168,6 +177,11 @@ export interface Agent {
    *  identity here; its wakes go to the host over the link. Unset for a
    *  member whose terminal is on this server. */
   host?: string;
+  /** The route of the member's latest join. Stamped at every join (a rejoin
+   *  restamps it; a join that names none clears it). Only "mcp" earns the
+   *  short wake prompt; unknown gets the full REST recipe, which any member
+   *  can follow. A hosted member's comes from its host through the link. */
+  joinRoute?: JoinRoute;
 }
 
 /** A wake request for a hosted member, sent to its host over the link. */
@@ -423,6 +437,8 @@ export class ChatRoom extends EventEmitter {
   homeId?: string;
   /** The base URL a wake prompt names; the process default when unset. */
   injectBaseUrl?: string;
+  /** This room's display name (set by the manager), for the short wake prompt. */
+  displayName?: () => string | undefined;
   /** Carries wakes of hosted members to their host (set by the manager). */
   hostedWaker?: HostedWaker;
   /** The submit check's stores and timings; the defaults ($CODEX_HOME and
@@ -485,7 +501,7 @@ export class ChatRoom extends EventEmitter {
    *  undefined keeps. `codexThread` (with its `codexHome`) binds when given
    *  and clears on null, and undefined keeps it only for the same pid: a
    *  new process that did not name a thread must not inherit the old one. */
-  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null, weztermGui?: number, registration?: string, codexThread?: string | null, codexHome?: string): Agent {
+  join(name: string, pid: number, weztermPaneId?: number | null, persistedRole?: string, orcaTerminal?: string | null, weztermGui?: number, registration?: string, codexThread?: string | null, codexHome?: string, joinRoute?: JoinRoute): Agent {
     const existing = this.agents.get(name);
     if (existing && registration != null) memberRegistrations.set(existing, registration);
     if (existing?.host) {
@@ -532,6 +548,7 @@ export class ChatRoom extends EventEmitter {
       if (codexThread != null) { existing.codexThread = codexThread; existing.codexHome = codexHome; }
       else if (codexThread === null || !samePid) { existing.codexThread = undefined; existing.codexHome = undefined; }
       if (!existing.role && persistedRole) existing.role = persistedRole;
+      existing.joinRoute = joinRoute;
       existing.lastSeen = now;
       liveTerminals.set(this.warnKey(name), terminalRefOf(existing));
       // Any change of terminal identity (pid, pane or Orca handle) is a fresh wake path:
@@ -553,6 +570,7 @@ export class ChatRoom extends EventEmitter {
       weztermGui: weztermPaneId != null && weztermGui != null ? weztermGui : undefined,
       orcaTerminal: orcaTerminal ?? undefined,
       ...(codexThread ? { codexThread, ...(codexHome ? { codexHome } : {}) } : {}),
+      ...(joinRoute ? { joinRoute } : {}),
     };
     if (registration != null) memberRegistrations.set(agent, registration);
     this.agents.set(name, agent);
@@ -571,7 +589,7 @@ export class ChatRoom extends EventEmitter {
    * for it; `hostedRegistration` is the host's id, sent back with its wakes.
    * A rejoin from the host under a new hosted registration is a new session.
    */
-  joinHosted(name: string, host: string, registration: string, hostedRegistration: string, persistedRole?: string): Agent {
+  joinHosted(name: string, host: string, registration: string, hostedRegistration: string, persistedRole?: string, joinRoute?: JoinRoute): Agent {
     const now = Date.now();
     const existing = this.agents.get(name);
     if (existing) {
@@ -589,6 +607,7 @@ export class ChatRoom extends EventEmitter {
       existing.orcaTerminal = undefined;
       existing.codexThread = undefined;
       existing.codexHome = undefined;
+      existing.joinRoute = joinRoute;
       existing.active = true;
       existing.lastSeen = now;
       if (!existing.role && persistedRole) existing.role = persistedRole;
@@ -599,7 +618,7 @@ export class ChatRoom extends EventEmitter {
       this.emit("room", { type: "join", data: existing } as RoomEvent);
       return existing;
     }
-    const agent: Agent = { name, pid: 0, joinedAt: now, active: true, role: persistedRole, lastSeen: now, host };
+    const agent: Agent = { name, pid: 0, joinedAt: now, active: true, role: persistedRole, lastSeen: now, host, ...(joinRoute ? { joinRoute } : {}) };
     memberRegistrations.set(agent, registration);
     hostedRegistrations.set(agent, hostedRegistration);
     this.agents.set(name, agent);
@@ -891,6 +910,18 @@ export class ChatRoom extends EventEmitter {
     const since = mention !== undefined
       ? Math.max(0, Math.min(cursor ?? Number.POSITIVE_INFINITY, mention - 1))
       : (cursor ?? 0);
+    if (agent.joinRoute === "mcp") {
+      // Joined through the MCP tools: it holds chat_read and chat_send, so
+      // the prompt names them instead of the REST recipe. The registration
+      // keeps both calls on this room's registration of the name.
+      const room = roomLabel ?? this.displayName?.() ?? this.homeId;
+      const regArg = registration ? `, registration="${registration}"` : "";
+      return (
+        `[joind] @${agent.name} mentioned by ${sender}${room ? ` in ${room}` : ""}.${roleHint} ` +
+        `Read from message ${since + 1} with chat_read(sender="${agent.name}", since=${since}${regArg}), ` +
+        `then reply with chat_send(sender="${agent.name}"${regArg}).`
+      );
+    }
     return (
       `[joind] @${agent.name} mentioned by ${sender}${where}.${roleHint} ` +
       `Read: curl -s "${base}/api/agent/read?sender=${agent.name}&since=${since}${pidParam}${paneParam}${orcaParam}${regParam}" then ` +
@@ -1432,6 +1463,13 @@ export class ChatRoom extends EventEmitter {
 
   getAgent(name: string): Agent | undefined {
     return this.agents.get(name);
+  }
+
+  /** Restamp a member's join route (a hosted member re-registered by its
+   *  host with the same registration). */
+  setJoinRoute(name: string, joinRoute: JoinRoute | undefined): void {
+    const agent = this.agents.get(name);
+    if (agent) agent.joinRoute = joinRoute;
   }
 
   touch(name: string): void {

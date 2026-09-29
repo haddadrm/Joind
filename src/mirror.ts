@@ -24,7 +24,7 @@
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { dirname } from "path";
-import { ChatRoom, visibleToViewer, type Agent, type ChatMessage, type HostedVerdict, type HostedWakeResult } from "./room.js";
+import { ChatRoom, visibleToViewer, type Agent, type ChatMessage, type HostedVerdict, type HostedWakeResult, type JoinRoute } from "./room.js";
 import { ensureDir } from "./persist.js";
 import { HumanState, HumanStateError, type HumanStateData } from "./human-state.js";
 import { MemberState, type MemberRecord } from "./member-state.js";
@@ -687,12 +687,12 @@ export class MirrorRoom extends ChatRoom {
   }
 
   /** Local members with what re-registering them needs. */
-  shadowsForRegister(): Array<{ name: string; registration: string; role?: string; terminalSummary?: string }> {
-    const out: Array<{ name: string; registration: string; role?: string; terminalSummary?: string }> = [];
-    for (const name of this.agents.keys()) {
+  shadowsForRegister(): Array<{ name: string; registration: string; role?: string; terminalSummary?: string; joinRoute?: JoinRoute }> {
+    const out: Array<{ name: string; registration: string; role?: string; terminalSummary?: string; joinRoute?: JoinRoute }> = [];
+    for (const [name, agent] of this.agents) {
       const reg = this.registrationOf(name);
       const info = this.shadows.get(name);
-      if (reg) out.push({ name, registration: reg, role: info?.role, terminalSummary: info?.terminalSummary });
+      if (reg) out.push({ name, registration: reg, role: info?.role, terminalSummary: info?.terminalSummary, ...(agent.joinRoute ? { joinRoute: agent.joinRoute } : {}) });
     }
     return out;
   }
@@ -856,7 +856,8 @@ export class MirrorRoom extends ChatRoom {
             });
           }
           const info = this.shadows.get(name);
-          const r = await this.transport.register({ room: this.homeRoomId, name, host: this.selfName, registration: id, terminalSummary: info?.terminalSummary, role: info?.role });
+          const joinRoute = this.agents.get(name)?.joinRoute;
+          const r = await this.transport.register({ room: this.homeRoomId, name, host: this.selfName, registration: id, terminalSummary: info?.terminalSummary, role: info?.role, ...(joinRoute ? { joinRoute } : {}) });
           this.confirmMemberRegistration(name, id, r.registration);
         } else if (this.memberState.get(name).live) {
           this.memberState.update(name, (r) => { if (r.live) r.releasesOwed.push(r.live); r.live = null; });

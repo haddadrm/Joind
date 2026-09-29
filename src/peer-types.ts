@@ -7,7 +7,7 @@
  * the name of the link to it) and <room> is the home's own conversation id.
  */
 
-import type { Agent, ChatMessage } from "./room.js";
+import type { Agent, ChatMessage, JoinRoute } from "./room.js";
 import { SUBMIT_CHECK_CAP_MS, SUBMIT_CHECK_GRACE_MS } from "./submit-check.js";
 
 /** How long a home waits for its host to answer a hosted wake. It bounds the
@@ -85,6 +85,9 @@ export interface PeerRegisterBody {
   registration: string;
   terminalSummary?: string;
   role?: string;
+  /** How the member joined on its host ("mcp" or "rest"): the home keeps it
+   *  on the hosted member, as the host keeps it on its own. */
+  joinRoute?: JoinRoute;
   /** The host's human web viewer: may post and read DMs, is never woken. */
   human?: boolean;
 }
@@ -227,7 +230,7 @@ export interface RemoteRooms {
   /** Register a local member with the remote room's home server. Nothing
    *  changes on this server: the caller commits (commitMember) only when its
    *  join is still current, and abandons (abandonMember) otherwise. */
-  registerMember(convId: string, name: string, registration: string, terminal: { pid?: number; paneId?: number; gui?: number; orcaTerminal?: string; role?: string }): Promise<RemoteRegisterOutcome>;
+  registerMember(convId: string, name: string, registration: string, terminal: { pid?: number; paneId?: number; gui?: number; orcaTerminal?: string; role?: string; joinRoute?: JoinRoute }): Promise<RemoteRegisterOutcome>;
   /** The join is current and joined locally: keep its home registration,
    *  resume any queued messages of that author. */
   commitMember(convId: string, name: string, outcome: RemoteRegistered): void;

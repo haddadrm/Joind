@@ -2155,7 +2155,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (room instanceof MirrorRoom) {
       // Registered on the home server as hosted here: wakes come back here.
       // Kept here only if this join is still current (gate round 1, finding 3).
-      const reg = await linkRegistry.registerMember(convId, name, registration, { pid: pid || undefined, paneId: boundPane ?? undefined, gui: paneResolution.gui, orcaTerminal: boundOrca ?? undefined, role: agentRoles[name] });
+      const reg = await linkRegistry.registerMember(convId, name, registration, { pid: pid || undefined, paneId: boundPane ?? undefined, gui: paneResolution.gui, orcaTerminal: boundOrca ?? undefined, role: agentRoles[name], joinRoute: "rest" });
       if (!reg.ok) { res.status(reg.status).json({ error: reg.error, ...(reg.candidates ? { candidates: reg.candidates } : {}) }); return; }
       remoteReg = reg;
     }
@@ -2166,7 +2166,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.status(409).json(ownedNow ?? { error: "Join superseded by a newer join or a departure for this name" }); return;
     }
 
-    const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui, registration, threadParse.value, homeParse.value);
+    const agent = room.join(name, pid || 0, boundPane, agentRoles[name], boundOrca, paneResolution.gui, registration, threadParse.value, homeParse.value, "rest");
     manager.bindAgent(name, convId, pid, boundPane, boundOrca, paneResolution.gui, registration);
     room.touch(name);
     if (remoteReg) {
