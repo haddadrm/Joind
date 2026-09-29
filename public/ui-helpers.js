@@ -1,7 +1,8 @@
 // Pure helpers for the page, kept apart from app.js so the tests can load
 // them under Node: the bare message number in the search box, the sidebar
-// drag outcome, and the agent pill strip (presence order, short ages, how
-// many pills fit before the +N chip).
+// drag outcome, member presence (order, short ages, how many pills fit
+// before a +N chip), and the rail and members panel (which sections a rail
+// view shows, offline authors, the panel's groups, the button's count).
 //
 // Loaded as a plain script in the page (defines window.joindUi) and
 // evaluated by the tests with a stand-in `module`.
@@ -77,7 +78,72 @@
     return k;
   }
 
+  // --- Redesign lane 2: the rail and the members panel ---
+
+  // The rail views that change what the sidebar shows. Anything else (a
+  // stale or hand-edited stored value) falls back to rooms.
+  var RAIL_VIEWS = ['rooms', 'dms', 'crew'];
+  function railView(value) {
+    return RAIL_VIEWS.indexOf(value) >= 0 ? value : 'rooms';
+  }
+
+  // Whether a sidebar section belongs to a view. `views` is the section's
+  // space-separated data-views list; a section without one shows in every
+  // view.
+  function sectionInView(views, view) {
+    if (views == null || String(views).trim() === '') return true;
+    return String(views).trim().split(/\s+/).indexOf(view) >= 0;
+  }
+
+  // Room members who are not connected: the authors of the loaded messages
+  // who are not in `present` and are not `me`, newest post first, at most
+  // `limit`. System lines and this server's local lines (negative ids) are
+  // not authors. Returns [{ name, lastAt }].
+  function offlineAuthors(messages, present, me, limit) {
+    var seen = {};
+    var out = [];
+    var max = limit == null ? 20 : limit;
+    for (var i = (messages || []).length - 1; i >= 0 && out.length < max; i--) {
+      var m = messages[i];
+      if (!m || typeof m.sender !== 'string' || m.sender === '' || m.sender === 'system') continue;
+      if (typeof m.id === 'number' && m.id < 0) continue;
+      if (m.sender === me || present.indexOf(m.sender) >= 0) continue;
+      if (Object.prototype.hasOwnProperty.call(seen, m.sender)) continue;
+      seen[m.sender] = true;
+      out.push({ name: m.sender, lastAt: typeof m.timestamp === 'number' ? m.timestamp : null });
+    }
+    return out;
+  }
+
+  // The panel's groups, in order, each [key, label, items], empty groups
+  // left out. Connected members are grouped by presence: online is Active
+  // now, stale (presence lost) is Idle, silent (quiet 30 minutes) is Silent;
+  // `offline` fills the last group. The incoming order holds within a group.
+  var GROUPS = [['active', 'Active now'], ['idle', 'Idle'], ['silent', 'Silent'], ['offline', 'Offline']];
+  var GROUP_OF = { online: 'active', stale: 'idle', silent: 'silent' };
+  function memberGroups(items, presenceOf, offline) {
+    var by = { active: [], idle: [], silent: [], offline: (offline || []).slice() };
+    items.forEach(function(item) { by[GROUP_OF[presenceOf(item)] || 'active'].push(item); });
+    return GROUPS
+      .filter(function(g) { return by[g[0]].length > 0; })
+      .map(function(g) { return [g[0], g[1], by[g[0]]]; });
+  }
+
+  // The members button: the count it shows and the words behind it.
+  function membersSummary(connected, offline) {
+    var total = connected + offline;
+    if (total === 0) return { count: 0, label: 'No members yet' };
+    var parts = [connected + ' connected'];
+    if (offline > 0) parts.push(offline + ' offline');
+    return { count: total, label: 'Members: ' + parts.join(', ') };
+  }
+
   return {
+    railView: railView,
+    sectionInView: sectionInView,
+    offlineAuthors: offlineAuthors,
+    memberGroups: memberGroups,
+    membersSummary: membersSummary,
     parseBareMessageNumber: parseBareMessageNumber,
     sidebarDragOutcome: sidebarDragOutcome,
     pillPresence: pillPresence,

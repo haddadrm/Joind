@@ -4,74 +4,86 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=23">
+  <link rel="stylesheet" href="style.css?v=24">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <!-- Vendored and pinned (no CDN): marked renders Markdown, DOMPurify sanitizes it (public/sanitize.js). -->
   <script src="vendor/marked-17.0.5.umd.js"></script>
   <script src="vendor/purify-3.4.16.min.js"></script>
-  <script src="sanitize.js?v=23"></script>
+  <script src="sanitize.js?v=24"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
   <div class="app">
-    <aside class="sidebar" id="sidebar">
-      <div class="ws-header">
-        <h1 class="logo"><span class="logo-icon" aria-hidden="true"><i data-lucide="hexagon" width="18" height="18"></i></span><span id="instance-name">Joind</span></h1>
-        <div class="ws-header-actions">
-          <button class="task-badge" id="decisions-btn" onclick="toggleDecisionsPanel()" title="Decisions waiting on you" aria-label="Open decisions panel">
-            <i data-lucide="scale" width="16" height="16" aria-hidden="true"></i>
-            <span id="decisions-badge" class="notify-badge" hidden aria-live="polite">0</span>
-          </button>
-          <button class="task-badge" id="notify-btn" onclick="toggleNotifyPanel()" title="Notifications" aria-label="Notifications">
-            <i data-lucide="bell" width="16" height="16" aria-hidden="true"></i>
-            <span id="notify-badge" class="notify-badge" hidden aria-live="polite">0</span>
-          </button>
-          <button class="task-badge" id="task-badge" onclick="toggleTaskPanel()" title="Tasks" aria-label="Open task panel">
-            <i data-lucide="clipboard-list" width="16" height="16" aria-hidden="true"></i>
-            <span class="task-badge-count" id="task-badge-count" aria-live="polite">0</span>
-          </button>
-          <span class="connection-dot" id="connection-dot" title="Connected" role="status" aria-label="Connection status"></span>
+    <!-- The rail: Rooms, DMs and Crew switch what the sidebar shows;
+         Decisions, Tasks, Search and Activity open their panels. At phone
+         width it becomes the bottom tab bar. -->
+    <nav class="rail" id="rail" aria-label="Sections">
+      <div class="rail-brand" id="rail-brand" title="Joind" aria-hidden="true"><i data-lucide="hexagon" width="20" height="20"></i></div>
+      <button class="rail-item" type="button" id="rail-rooms" data-rail-view="rooms" title="Rooms" aria-label="Rooms">
+        <span class="rail-ico" aria-hidden="true"><i data-lucide="hash" width="18" height="18"></i></span><span class="rail-label">Rooms</span>
+      </button>
+      <button class="rail-item" type="button" id="rail-dms" data-rail-view="dms" title="Direct messages" aria-label="Direct messages">
+        <span class="rail-ico" aria-hidden="true"><i data-lucide="message-circle" width="18" height="18"></i></span><span class="rail-label">DMs</span>
+        <span class="rail-badge" id="rail-dm-badge" hidden></span>
+      </button>
+      <button class="rail-item task-badge" type="button" id="decisions-btn" onclick="toggleDecisionsPanel()" title="Decisions waiting on you" aria-label="Decisions waiting on you" aria-haspopup="dialog" aria-expanded="false">
+        <span class="rail-ico" aria-hidden="true"><i data-lucide="scale" width="18" height="18"></i></span><span class="rail-label">Decisions</span>
+        <span id="decisions-badge" class="rail-badge notify-badge warn" hidden aria-live="polite">0</span>
+      </button>
+      <button class="rail-item task-badge" type="button" id="task-badge" onclick="toggleTaskPanel()" title="Tasks" aria-label="Tasks" aria-expanded="false" aria-controls="task-panel">
+        <span class="rail-ico" aria-hidden="true"><i data-lucide="clipboard-list" width="18" height="18"></i></span><span class="rail-label">Tasks</span>
+        <span class="rail-badge task-badge-count" id="task-badge-count" aria-live="polite" hidden></span>
+      </button>
+      <button class="rail-item" type="button" id="rail-crew" data-rail-view="crew" title="Crew, terminals and sessions" aria-label="Crew">
+        <span class="rail-ico" aria-hidden="true"><i data-lucide="users" width="18" height="18"></i></span><span class="rail-label">Crew</span>
+      </button>
+      <div class="rail-spacer" aria-hidden="true"></div>
+      <button class="rail-item" type="button" id="rail-search" onclick="toggleSearch()" title="Search this room" aria-label="Search this room">
+        <span class="rail-ico" aria-hidden="true"><i data-lucide="search" width="18" height="18"></i></span><span class="rail-label">Search</span>
+      </button>
+      <button class="rail-item task-badge" type="button" id="notify-btn" onclick="toggleNotifyPanel()" title="Notifications" aria-label="Notifications" aria-haspopup="dialog" aria-expanded="false">
+        <span class="rail-ico" aria-hidden="true"><i data-lucide="bell" width="18" height="18"></i></span><span class="rail-label">Activity</span>
+        <span id="notify-badge" class="rail-badge notify-badge" hidden aria-live="polite">0</span>
+      </button>
+      <div class="rail-item rail-you you-pill" id="you-pill" title="Your profile" role="button" tabindex="0" aria-label="Your profile" aria-haspopup="dialog">
+        <span class="you-avatar" id="you-avatar" aria-hidden="true">?</span><span class="rail-label you-name" id="you-name-display">human</span>
+      </div>
+    </nav>
+
+    <aside class="sidebar" id="sidebar" data-view="rooms">
+      <div class="ws-header side-head">
+        <div class="side-head-text">
+          <h1 class="side-title" id="side-title">Rooms</h1>
+          <span class="side-sub" id="instance-name">Joind</span>
         </div>
+        <span class="connection-dot" id="connection-dot" title="Connected" role="status" aria-label="Connection status"></span>
       </div>
 
       <div class="sidebar-scroll">
-        <!-- Actions on top -->
-        <div class="sidebar-section sidebar-actions">
-          <div class="quick-actions" role="toolbar" aria-label="Conversation actions">
-            <button class="btn btn-action btn-launch" id="launch-btn" onclick="openLaunchDialog()" title="Launch Agent" aria-label="Launch Agent"><i data-lucide="rocket" width="18" height="18" aria-hidden="true"></i></button>
-            <button class="btn btn-action" id="crew-btn" onclick="openCrewPanel()" title="Crew" aria-label="Open crew panel"><i data-lucide="users" width="18" height="18" aria-hidden="true"></i></button>
-            <span class="btn-group-sep" aria-hidden="true"></span>
-            <button class="btn btn-action" onclick="toggleSearch()" title="Search messages" aria-label="Search messages"><i data-lucide="search" width="18" height="18" aria-hidden="true"></i></button>
-            <button class="btn btn-action" onclick="exportChat()" title="Export conversation" aria-label="Export conversation"><i data-lucide="download" width="18" height="18" aria-hidden="true"></i></button>
-            <button class="btn btn-action" onclick="openImportDialog()" title="Import conversation" aria-label="Import conversation"><i data-lucide="upload" width="18" height="18" aria-hidden="true"></i></button>
-            <span class="btn-group-sep" aria-hidden="true"></span>
-            <button class="btn btn-action" id="mute-btn" onclick="toggleMute()" title="Toggle sound" aria-label="Toggle sound" aria-pressed="false"><i data-lucide="volume-2" width="18" height="18" aria-hidden="true"></i></button>
-            <button class="btn btn-action" onclick="openSoundSettings(event)" title="Settings" aria-label="Open settings"><i data-lucide="settings" width="18" height="18" aria-hidden="true"></i></button>
-            <input type="file" id="import-file-input" accept="application/json,.json" hidden />
+        <!-- Crew view: the roster and the launcher -->
+        <div class="sidebar-section" data-views="crew">
+          <div class="section-header" onclick="toggleSection(this)">
+            <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> Crew</h2>
           </div>
-          <div class="turn-guard-row" id="turn-guard-row">
-            <label class="turn-guard-label" title="Limit consecutive agent turns before requiring human input">
-              <span class="turn-guard-text">Turn limit</span>
-              <label class="toggle-switch">
-                <input type="checkbox" id="turn-guard-toggle" onchange="toggleTurnGuard(this.checked)" />
-                <span class="toggle-slider"></span>
-              </label>
-            </label>
-            <input type="number" class="turn-guard-spinner" id="turn-guard-limit" min="1" max="100" value="20" disabled onchange="setTurnGuardLimit(this.value)" title="Max agent turns" />
+          <div class="section-body">
+            <ul class="crew-links">
+              <li><button type="button" class="side-row" id="crew-btn" onclick="openCrewPanel()"><span class="side-row-ico" aria-hidden="true"><i data-lucide="users" width="14" height="14"></i></span><span class="side-row-name">Crew roster</span></button></li>
+              <li><button type="button" class="side-row side-row-accent" id="launch-btn" onclick="openLaunchDialog()"><span class="side-row-ico" aria-hidden="true"><i data-lucide="rocket" width="14" height="14"></i></span><span class="side-row-name">Launch an agent</span></button></li>
+            </ul>
           </div>
         </div>
 
-        <!-- Conversations — collapsible -->
-        <div class="sidebar-section">
+        <!-- Rooms: local rooms and the linked servers' rooms -->
+        <div class="sidebar-section" data-views="rooms">
           <div class="section-header" onclick="toggleSection(this)">
-            <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> Channels</h2>
-            <button class="btn btn-sm" onclick="event.stopPropagation(); newConversation()">+ New</button>
+            <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> Rooms</h2>
+            <button class="btn btn-sm" onclick="event.stopPropagation(); newConversation()" aria-label="New room">+ New</button>
           </div>
           <div class="section-body">
             <div id="active-session" class="active-session">No conversation selected</div>
             <div class="conv-search-wrap">
               <i data-lucide="search" width="12" height="12" aria-hidden="true" class="conv-search-icon"></i>
-              <input type="text" class="conv-search" id="conv-search" placeholder="Find a channel" spellcheck="false" aria-label="Search conversations" />
+              <input type="text" class="conv-search" id="conv-search" placeholder="Find a room" spellcheck="false" aria-label="Find a room" />
             </div>
             <ul id="conversation-list" class="conversation-list"></ul>
             <!-- Linked servers: one "remote: <server>" group per link, filled by renderRemoteSections() -->
@@ -79,8 +91,8 @@
           </div>
         </div>
 
-        <!-- Direct messages — collapsible -->
-        <div class="sidebar-section">
+        <!-- Direct messages: in the Rooms view too, as in Slack -->
+        <div class="sidebar-section" data-views="rooms dms">
           <div class="section-header" onclick="toggleSection(this)">
             <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> Direct messages</h2>
           </div>
@@ -89,8 +101,8 @@
           </div>
         </div>
 
-        <!-- Terminals — collapsible -->
-        <div class="sidebar-section">
+        <!-- Terminals: crew tooling, in the Crew view -->
+        <div class="sidebar-section" data-views="crew">
           <div class="section-header" onclick="toggleSection(this)">
             <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> Terminals</h2>
             <button class="btn btn-sm" id="scan-btn" onclick="event.stopPropagation(); scanTerminals()">
@@ -104,8 +116,8 @@
           </div>
         </div>
 
-        <!-- Sessions — collapsible -->
-        <div class="sidebar-section">
+        <!-- Session templates: crew tooling, in the Crew view -->
+        <div class="sidebar-section" data-views="crew">
           <div class="section-header" onclick="toggleSection(this)">
             <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> Sessions</h2>
           </div>
@@ -116,25 +128,52 @@
         </div>
       </div>
 
-      <div class="ws-footer">
-        <div class="you-pill" id="you-pill" title="Click to change your name" role="button" tabindex="0" aria-label="Change your name">
-          <span class="you-label">you</span>
-          <span class="you-name" id="you-name-display">human</span>
+      <!-- Preferences: sound, settings and the turn limit -->
+      <div class="ws-footer side-prefs">
+        <div class="turn-guard-row" id="turn-guard-row">
+          <label class="turn-guard-label" title="Limit consecutive agent turns before requiring human input">
+            <span class="turn-guard-text">Turn limit</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="turn-guard-toggle" onchange="toggleTurnGuard(this.checked)" />
+              <span class="toggle-slider"></span>
+            </label>
+          </label>
+          <input type="number" class="turn-guard-spinner" id="turn-guard-limit" min="1" max="100" value="20" disabled onchange="setTurnGuardLimit(this.value)" title="Max agent turns" aria-label="Max agent turns" />
+          <button class="btn btn-action" type="button" id="mute-btn" onclick="toggleMute()" title="Toggle sound" aria-label="Toggle sound" aria-pressed="false"><i data-lucide="volume-2" width="16" height="16" aria-hidden="true"></i></button>
+          <button class="btn btn-action" type="button" onclick="openSoundSettings(event)" title="Settings" aria-label="Open settings"><i data-lucide="settings" width="16" height="16" aria-hidden="true"></i></button>
         </div>
       </div>
       <div class="sidebar-seam" id="sidebar-seam" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuemin="180" aria-valuemax="480" tabindex="0" title="Drag to resize, or far left to collapse; arrow keys when focused"></div>
     </aside>
 
     <div class="main">
-      <header class="header channel-header">
+      <!-- The conversation toolbar: the room title, then the room's actions -->
+      <header class="header channel-header convbar">
         <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar"><i data-lucide="menu" width="18" height="18" aria-hidden="true"></i></button>
         <div class="channel-header-info">
           <span class="channel-name" id="channel-title">#</span>
           <span class="channel-topic" id="channel-topic"></span>
         </div>
-        <div class="agent-pills" id="agent-pills" role="list" aria-label="Connected agents"></div>
+        <div class="conv-tools" id="conv-tools" role="toolbar" aria-label="Room actions">
+          <button class="tsearch" type="button" id="room-search-btn" onclick="toggleSearch()" title="Search this room" aria-label="Search this room">
+            <i data-lucide="search" width="14" height="14" aria-hidden="true"></i><span class="tsearch-text" id="room-search-label">Search this room</span>
+          </button>
+          <button class="tbtn room-only" type="button" id="pins-btn" onclick="toggleSidePanel('pins')" title="Pinned messages" aria-label="Pinned messages" aria-expanded="false" aria-controls="side-panel">
+            <i data-lucide="pin" width="16" height="16" aria-hidden="true"></i><span class="tbtn-count" id="pins-count" hidden></span>
+          </button>
+          <span class="tsep desk-only" aria-hidden="true"></span>
+          <button class="tbtn desk-only" type="button" id="export-btn" onclick="exportChat()" title="Export this room" aria-label="Export this room"><i data-lucide="download" width="16" height="16" aria-hidden="true"></i></button>
+          <button class="tbtn desk-only" type="button" id="import-btn" onclick="openImportDialog()" title="Import a room" aria-label="Import a room"><i data-lucide="upload" width="16" height="16" aria-hidden="true"></i></button>
+          <input type="file" id="import-file-input" accept="application/json,.json" hidden />
+          <span class="tsep desk-only room-only" aria-hidden="true"></span>
+          <button class="tbtn members-btn room-only" type="button" id="members-btn" onclick="toggleSidePanel('members')" title="Members" aria-label="Members" aria-expanded="false" aria-controls="side-panel">
+            <span class="members-ico" id="members-ico" aria-hidden="true"><i data-lucide="users" width="16" height="16"></i></span><span class="avatar-stack" id="members-stack" aria-hidden="true"></span><span class="tbtn-count" id="members-count"></span>
+          </button>
+          <button class="tbtn mobile-only" type="button" id="conv-more-btn" onclick="openConvMore(event)" title="More" aria-label="More room actions" aria-haspopup="menu" aria-expanded="false"><i data-lucide="more-horizontal" width="16" height="16" aria-hidden="true"></i></button>
+        </div>
       </header>
 
+      <div class="main-body">
       <div class="content">
         <div class="search-bar hidden" id="search-bar" role="search">
           <input type="text" id="search-input" placeholder="Search this room: words, from:name, @name, #10-40" spellcheck="false" aria-label="Search messages in this room" />
@@ -152,7 +191,7 @@
               <h2>Joind</h2>
               <p class="welcome-sub">universal agent chat via MCP</p>
               <div class="welcome-steps">
-                <div class="welcome-step"><span class="step-num">1</span>Scan for terminal sessions in the sidebar</div>
+                <div class="welcome-step"><span class="step-num">1</span>Open Crew in the rail and scan for terminal sessions</div>
                 <div class="welcome-step"><span class="step-num">2</span>Invite agents or let them <code>/join</code> themselves</div>
                 <div class="welcome-step"><span class="step-num">3</span>Use <code>@name</code> to mention &mdash; they'll respond</div>
               </div>
@@ -234,11 +273,24 @@
           </footer>
         </main>
       </div>
+      <!-- Right side panel: members and pins. Its outer edge is pinned to
+           the window; the content column beside it is flex 1, min-width 0. -->
+      <aside class="side-panel" id="side-panel" aria-label="Room details" hidden>
+        <div class="side-panel-head">
+          <div class="side-panel-tabs" role="tablist" aria-label="Room details">
+            <button type="button" role="tab" class="ptab" id="side-tab-members" data-panel="members" aria-selected="true" aria-controls="side-panel-body">Members <span class="ptab-count" id="side-tab-members-count"></span></button>
+            <button type="button" role="tab" class="ptab" id="side-tab-pins" data-panel="pins" aria-selected="false" aria-controls="side-panel-body" tabindex="-1">Pins <span class="ptab-count" id="side-tab-pins-count"></span></button>
+          </div>
+          <button type="button" class="tbtn side-panel-close" id="side-panel-close" onclick="closeSidePanel(true)" title="Close" aria-label="Close panel"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
+        </div>
+        <div class="side-panel-body" id="side-panel-body" role="tabpanel" tabindex="0"></div>
+      </aside>
+      </div>
     </div>
   </div>
 
-  <script src="ui-helpers.js?v=23"></script>
-  <script src="app.js?v=23"></script>
+  <script src="ui-helpers.js?v=24"></script>
+  <script src="app.js?v=24"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();

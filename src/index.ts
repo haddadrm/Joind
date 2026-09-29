@@ -1403,8 +1403,17 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   app.get("/api/pins", (req, res) => {
     if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
-    const room = manager.getActiveRoom();
-    if (!room) { res.json([]); return; }
+    // ?conversation= names the room (the side panel asks for the room on
+    // screen, which can differ from the server's active room while a switch
+    // is in flight); without it, the active room as before. A named room
+    // that does not exist is a 404, never the active room in its place.
+    const conv = req.query.conversation;
+    const room = viewedRoom(conv);
+    if (!room) {
+      if (conv !== undefined) { res.status(404).json({ error: "Conversation not found" }); return; }
+      res.json([]);
+      return;
+    }
     // Viewer is the registered web name, never the request (fails closed).
     res.json(room.getPinnedMessages().filter((m) => visibleToViewer(m, webViewer())));
   });

@@ -24,6 +24,10 @@ if (!soundSettings._global) soundSettings._global = 'soft-chime';
 
 var ws = null;
 var agents = [];
+// The room `agents` (and the loaded messages) belong to. During a room
+// switch the new room is active before its members arrive; until then the
+// members button and panel show nothing rather than the old room.
+var agentsConv = null;
 var clockOffset = 0; // server clock minus browser clock; ages are computed against server time
 function serverNow() { return Date.now() + clockOffset; }
 function touchAgent(name, fields) {
@@ -43,6 +47,7 @@ function touchAgent(name, fields) {
 var onlineNames = new Set();
 var mentionMenuIndex = -1;
 var openPopover = null;
+var popoverAnchor = null; // what opened the popover, for focus on Escape
 var lastSender = null; // for message grouping
 var lastScanResults = []; // cached scan results for auto-refresh
 var isMuted = JSON.parse(localStorage.getItem('joind-muted') || 'false');
@@ -264,6 +269,7 @@ function connect() {
       case 'init':
         if (typeof event.data.serverNow === 'number') clockOffset = event.data.serverNow - Date.now();
         agents = event.data.agents;
+        agentsConv = event.data.activeConversation ? event.data.activeConversation.id : null;
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         allMessages = (event.data.messages || []).slice();
         historyView = null;
@@ -587,23 +593,21 @@ function formatAge(ms) {
 }
 
 // Ages drift while nothing else re-renders; keep them honest once a minute.
-setInterval(function() { if (typeof agents !== 'undefined' && agents.length > 0) renderPills(); }, 60000);
+setInterval(function() { if (activeConversation) renderPills(); }, 60000);
 
-// The strip shows members in presence order (online, then stale, then
-// silent) on one line. When they do not all fit, the role and status text
-// go first (compact), then the tail of the list moves behind a +N chip that
-// opens the full list. A ResizeObserver on the header refits on resize;
-// joins and leaves refit through renderPills. The header's width does not
-// depend on the strip's content, so a refit cannot trigger another.
-var pillStripObserver = null;
-var pillStripWidth = -1;
-var pillFitFrame = 0;
-var pillInfos = [];    // the strip's members, in strip order
-var pillOverflow = []; // the members behind the +N chip, in strip order
+// --- Members: the toolbar button and the right side panel (redesign lane 2) ---
+// The header no longer carries a pill per agent. The members button shows
+// up to four stacked avatars (presence order, then offline) and a count of
+// everyone the panel lists; it never clips, because overflow is the count.
+// The panel groups members as Active now (online), Idle (stale: presence
+// lost), Silent (quiet for 30 minutes) and Offline (authors of the loaded
+// messages who are not connected), each row with role, wake route, age and
+// a remote tag. A row opens the member's usual popover.
 var popoverOnClose = null;
-// The strip's CSS max-width (55%) and room kept for the channel title.
-var PILL_STRIP_SHARE = 0.55;
-var PILL_TITLE_MIN = 96;
+var sidePanelTab = null;      // 'members' | 'pins' | null (closed)
+var sidePanelOpener = null;   // the control that opened the panel, for Escape
+var pinsState = { conv: null, list: null, seq: 0 };
+var STACK_MAX = 4;
 
 function pillInfo(a, nowMs) {
   var postAge = a.lastPostAt ? Math.max(0, nowMs - a.lastPostAt) : null;
@@ -621,325 +625,443 @@ function pillInfo(a, nowMs) {
     (quietText ? ' · ' + quietText : '') +
     (seenAge != null ? ' · seen ' + formatAge(seenAge) + ' ago' : '') +
     (postAge != null ? ' · last posted ' + formatAge(postAge) + ' ago' : ' · no posts this session');
-  return { a: a, presence: presence, quietAge: quietAge, quietText: quietText, title: title };
+  return { a: a, presence: presence, quietAge: quietAge, seenAge: seenAge, quietText: quietText, title: title };
 }
 
 function shortPillAge(ms) {
   return window.joindUi ? window.joindUi.shortAge(ms) : formatAge(ms);
 }
 
-function renderPills() {
-  var c = document.getElementById('agent-pills');
-  if (!c) return;
-  // A rebuild (presence events, the minute tick) must not drop keyboard
-  // focus: remember the focused pill or chip and focus its successor.
-  var focused = document.activeElement && c.contains(document.activeElement) ? document.activeElement : null;
-  var focusKey = focused ? (focused.classList.contains('pill-more') ? '+' : focused.getAttribute('data-agent')) : null;
-  c.textContent = '';
+// How a member is woken: the route the server uses, which is what a
+// "harness" means to the room. Hosted members live on a linked server.
+function memberRoute(a) {
+  if (a.host) return 'hosted on ' + a.host;
+  if (a.codexThread) return 'Codex queue';
+  if (a.orcaTerminal) return 'Orca';
+  if (a.weztermPaneId != null) return 'WezTerm';
+  if (a.pid) return 'terminal';
+  return '';
+}
+
+// The room's members as the panel lists them: connected (presence order)
+// and offline (recent authors not connected).
+function roomMembers() {
   var nowMs = serverNow();
+  if (!activeConversation || agentsConv !== activeConversation.id) return { infos: [], offline: [], now: nowMs };
   var infos = agents.map(function(a) { return pillInfo(a, nowMs); });
   if (window.joindUi) infos = window.joindUi.orderByPresence(infos, function(x) { return x.presence; });
-  infos.forEach(function(x) { c.appendChild(buildPill(x)); });
-  pillInfos = infos;
-  fitPills();
-  watchPillStrip(c);
-  if (focusKey !== null) restorePillFocus(c, focusKey);
+  var present = agents.map(function(a) { return a.name; });
+  var offline = window.joindUi && !activeDm ? window.joindUi.offlineAuthors(allMessages, present, myName(), 20) : [];
+  return { infos: infos, offline: offline, now: nowMs };
 }
 
-function restorePillFocus(c, key) {
-  var target = null;
-  if (key !== '+') {
-    var pills = c.querySelectorAll('.agent-pill');
-    for (var i = 0; i < pills.length; i++) {
-      if (pills[i].getAttribute('data-agent') === key) { target = pills[i]; break; }
-    }
-    if (target && target.hidden) target = null;
-  }
-  target = target || c.querySelector('.pill-more') || c.querySelector('.agent-pill:not([hidden])');
-  if (target) target.focus();
+function memberAvatar(name, cls) {
+  var av = document.createElement('span');
+  av.className = 'mav' + (cls ? ' ' + cls : '');
+  av.style.background = getSenderColor(name);
+  av.textContent = (name || '?').charAt(0).toUpperCase();
+  return av;
 }
 
-function buildPill(x) {
-  var a = x.a;
-  var pill = document.createElement('div');
-  var pillClass = 'agent-pill';
-  if (x.presence === 'stale') pillClass += ' stale';
-  if (x.presence === 'silent') pillClass += ' silent';
-  if (typingNames.has(a.name)) pillClass += ' working';
-  pill.className = pillClass;
-  pill.setAttribute('role', 'listitem');
-  pill.setAttribute('data-agent', a.name || '');
-  pill.tabIndex = 0;
-  var color = getSenderColor(a.name);
-  pill.style.setProperty('--pill-color', color);
-  pill.style.borderColor = color + '30';
+// Kept under its old name: every presence event, join, leave, rename, role
+// and typing change already calls renderPills.
+function renderPills() {
+  var m = roomMembers();
+  renderMembersButton(m);
+  if (sidePanelTab === 'members') renderSidePanel(m);
+  if (sidePanelTab) syncSidePanelTabs(m);
+}
 
-  var dot = document.createElement('span');
-  dot.className = 'pill-dot';
-  // Green = online (default CSS), agent color only when stale
-
-  var name = document.createElement('span');
-  name.className = 'pill-name'; name.style.color = color;
-  name.textContent = a.name;
-
-  pill.appendChild(dot); pill.appendChild(name);
-  if (a.role) {
-    var role = document.createElement('span');
-    role.className = 'pill-role';
-    role.textContent = a.role;
-    pill.appendChild(role);
-  }
-  // Linked servers: a hosted member's terminal lives on a peer server; the
-  // room sees who is woken elsewhere. Local members carry no host.
-  if (a.host) {
-    var hostEl = document.createElement('span');
-    hostEl.className = 'pill-host';
-    hostEl.textContent = 'via ' + a.host;
-    pill.appendChild(hostEl);
-  }
-  // Proof-of-life age: presence can look fine while nothing runs (a hung
-  // resident keeps heartbeating). Once an agent has been quiet for 30
-  // minutes the pill carries a short age (9h); the tooltip has the full
-  // text (silent 9h 45m) and both ages. Ages are measured against the
-  // server clock (init carries serverNow) and never go negative. An agent
-  // that has not posted yet is measured from its join, and says so.
-  pill.title = x.title;
-  pill.setAttribute('aria-label', x.title);
-  if (x.quietText) {
-    var ageEl = document.createElement('span');
-    ageEl.className = 'pill-age';
-    ageEl.textContent = shortPillAge(x.quietAge);
-    ageEl.title = x.quietText;
-    pill.appendChild(ageEl);
-  }
-  if (a.status) {
-    var statusEl = document.createElement('span');
-    statusEl.className = 'pill-status';
-    statusEl.textContent = a.status;
-    pill.appendChild(statusEl);
-  }
-
-  pill.addEventListener('click', function(e) {
-    e.stopPropagation();
-    showPopover(pill, a);
+function renderMembersButton(m) {
+  var btn = document.getElementById('members-btn');
+  var stack = document.getElementById('members-stack');
+  var countEl = document.getElementById('members-count');
+  var ico = document.getElementById('members-ico');
+  if (!btn || !stack || !countEl) return;
+  var summary = window.joindUi
+    ? window.joindUi.membersSummary(m.infos.length, m.offline.length)
+    : { count: m.infos.length, label: 'Members: ' + m.infos.length + ' connected' };
+  stack.textContent = '';
+  var faces = m.infos.map(function(x) { return { name: x.a.name, dim: x.presence !== 'online', working: typingNames.has(x.a.name) }; })
+    .concat(m.offline.map(function(o) { return { name: o.name, dim: true, working: false }; }))
+    .slice(0, STACK_MAX);
+  faces.forEach(function(f) {
+    stack.appendChild(memberAvatar(f.name, 'sm' + (f.dim ? ' dim' : '') + (f.working ? ' working' : '')));
   });
-  pill.addEventListener('keydown', function(e) {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    e.preventDefault();
-    e.stopPropagation();
-    showPopover(pill, a);
+  stack.hidden = faces.length === 0;
+  if (ico) ico.hidden = faces.length > 0;
+  countEl.textContent = summary.count > 0 ? String(summary.count) : '';
+  btn.title = summary.label;
+  btn.setAttribute('aria-label', summary.label + '. Open the members panel');
+}
+
+// --- The right side panel ---
+function toggleSidePanel(tab) {
+  if (sidePanelTab === tab) { closeSidePanel(true); return; }
+  openSidePanel(tab, document.activeElement);
+}
+
+function openSidePanel(tab, opener) {
+  var panel = document.getElementById('side-panel');
+  if (!panel || activeDm || !activeConversation) return;
+  closePopover();
+  sidePanelTab = tab === 'pins' ? 'pins' : 'members';
+  // The control that opened it gets focus back on Escape or close; a
+  // stale opener (removed, or inside the panel) falls back to the button.
+  if (opener && opener !== document.body && opener.isConnected && !panel.contains(opener)) sidePanelOpener = opener;
+  panel.hidden = false;
+  document.body.classList.add('side-panel-open');
+  if (sidePanelTab === 'pins') loadPins(true);
+  renderSidePanel();
+  syncSidePanelTabs();
+  var tabBtn = document.getElementById(sidePanelTab === 'pins' ? 'side-tab-pins' : 'side-tab-members');
+  if (tabBtn) tabBtn.focus();
+}
+
+function closeSidePanel(returnFocus) {
+  var panel = document.getElementById('side-panel');
+  if (!panel || !sidePanelTab) return;
+  var hadFocus = panel.contains(document.activeElement);
+  sidePanelTab = null;
+  panel.hidden = true;
+  document.body.classList.remove('side-panel-open');
+  closePopover();
+  syncSidePanelTabs();
+  if (returnFocus || hadFocus) {
+    var back = sidePanelOpener && sidePanelOpener.isConnected && sidePanelOpener.offsetParent !== null
+      ? sidePanelOpener : document.getElementById('members-btn');
+    if (back && back.offsetParent !== null) back.focus();
+  }
+  sidePanelOpener = null;
+}
+
+// Tabs and toolbar buttons tell the truth about what is open.
+function syncSidePanelTabs(m) {
+  var tabs = [['members', 'side-tab-members', 'members-btn'], ['pins', 'side-tab-pins', 'pins-btn']];
+  tabs.forEach(function(t) {
+    var on = sidePanelTab === t[0];
+    var tab = document.getElementById(t[1]);
+    if (tab) { tab.setAttribute('aria-selected', on ? 'true' : 'false'); tab.tabIndex = on || !sidePanelTab && t[0] === 'members' ? 0 : -1; tab.classList.toggle('on', on); }
+    var btn = document.getElementById(t[2]);
+    if (btn) { btn.setAttribute('aria-expanded', on ? 'true' : 'false'); btn.classList.toggle('on', on); }
   });
-  return pill;
+  var mc = document.getElementById('side-tab-members-count');
+  if (mc) {
+    var mm = m || roomMembers();
+    var n = mm.infos.length + mm.offline.length;
+    mc.textContent = n > 0 ? String(n) : '';
+  }
+  var pc = document.getElementById('side-tab-pins-count');
+  if (pc) pc.textContent = pinsState.list && pinsState.list.length > 0 ? String(pinsState.list.length) : '';
 }
 
-// The width the strip may take: its CSS share of the header, less what the
-// toggle and a minimum channel title need.
-function pillStripAvailable(c) {
-  var header = c.parentElement;
-  if (!header) return 0;
-  var cs = getComputedStyle(header);
-  var inner = header.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-  var gap = parseFloat(cs.columnGap) || 0;
-  var others = 0;
-  for (var i = 0; i < header.children.length; i++) {
-    var ch = header.children[i];
-    if (ch === c || ch.classList.contains('channel-header-info')) continue;
-    if (ch.offsetWidth > 0) others += ch.offsetWidth + gap;
-  }
-  var own = getComputedStyle(c);
-  var pad = (parseFloat(own.paddingLeft) || 0) + (parseFloat(own.paddingRight) || 0);
-  return Math.floor(Math.min(inner * PILL_STRIP_SHARE, inner - others - gap - PILL_TITLE_MIN) - pad) - 1;
-}
-
-// Refit the strip. An open +N list is rebuilt from the new overflow (so a
-// member who left or now fits is not listed), or closed when nothing
-// overflows any more; focus inside it follows the same member, else the
-// first row, else the first pill. Focus on the strip itself survives too: a
-// focused chip moves to its replacement, and a focused pill that is now
-// hidden hands focus to the chip.
-function fitPills() {
-  var c = document.getElementById('agent-pills');
-  if (!c) return;
-  var listOpen = !!(openPopover && openPopover.classList.contains('pill-overflow'));
-  var listFocus = null;
-  if (listOpen && openPopover.contains(document.activeElement)) {
-    listFocus = document.activeElement.getAttribute('data-agent') || '';
-  }
-  var stripFocus = document.activeElement && c.contains(document.activeElement) ? document.activeElement : null;
-  var chip = layoutPills(c);
-  if (stripFocus && (!stripFocus.isConnected || stripFocus.hidden)) {
-    var next = chip || c.querySelector('.agent-pill:not([hidden])');
-    if (next) next.focus();
-  }
-  if (!listOpen) return;
-  if (!chip) {
-    closePopover();
-    if (listFocus !== null) {
-      var first = c.querySelector('.agent-pill:not([hidden])');
-      if (first) first.focus();
+function renderSidePanel(m) {
+  var body = document.getElementById('side-panel-body');
+  if (!body || !sidePanelTab) return;
+  var tabId = sidePanelTab === 'pins' ? 'side-tab-pins' : 'side-tab-members';
+  body.setAttribute('aria-labelledby', tabId);
+  // A rebuild must not drop keyboard focus from a row: remember it by key.
+  var focusKey = body.contains(document.activeElement) && document.activeElement !== body
+    ? document.activeElement.getAttribute('data-key') : null;
+  body.textContent = '';
+  if (sidePanelTab === 'pins') renderPinsList(body);
+  else renderMembersList(body, m || roomMembers());
+  if (focusKey) {
+    var rows = body.querySelectorAll('[data-key]');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-key') === focusKey) { rows[i].focus(); return; }
     }
+    if (rows[0]) rows[0].focus(); else body.focus();
+  }
+}
+
+function renderMembersList(body, m) {
+  var groups = window.joindUi
+    ? window.joindUi.memberGroups(m.infos, function(x) { return x.presence; }, m.offline)
+    : [['active', 'Active now', m.infos]];
+  if (groups.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'side-empty';
+    empty.textContent = 'No members yet. Agents appear here when they join this room or post in it.';
+    body.appendChild(empty);
     return;
   }
-  showPillOverflow(chip, false);
-  if (listFocus === null || !openPopover) return;
-  var rows = openPopover.querySelectorAll('.pill-overflow-row');
-  var target = null;
-  for (var i = 0; i < rows.length; i++) {
-    if (rows[i].getAttribute('data-agent') === listFocus) { target = rows[i]; break; }
+  groups.forEach(function(g) {
+    var head = document.createElement('div');
+    head.className = 'mgroup';
+    head.textContent = g[1] + ' · ' + g[2].length;
+    body.appendChild(head);
+    g[2].forEach(function(item) {
+      body.appendChild(g[0] === 'offline' ? buildOfflineRow(item, m.now) : buildMemberRow(item));
+    });
+  });
+}
+
+function buildMemberRow(x) {
+  var a = x.a;
+  var row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'member-row ' + x.presence + (typingNames.has(a.name) ? ' working' : '');
+  row.setAttribute('data-key', 'm:' + (a.name || ''));
+  row.setAttribute('data-agent', a.name || '');
+  row.title = x.title;
+  var av = memberAvatar(a.name, x.presence === 'online' ? '' : 'dim');
+  var dot = document.createElement('span');
+  dot.className = 'mdot ' + x.presence;
+  av.appendChild(dot);
+  row.appendChild(av);
+
+  var text = document.createElement('span');
+  text.className = 'mtext';
+  var nameLine = document.createElement('span');
+  nameLine.className = 'mname';
+  var nm = document.createElement('span');
+  nm.textContent = a.name;
+  nm.style.color = getSenderColor(a.name);
+  nameLine.appendChild(nm);
+  if (a.host) {
+    var tag = document.createElement('span');
+    tag.className = 'remote-tag';
+    tag.textContent = 'remote: ' + a.host;
+    nameLine.appendChild(tag);
   }
-  target = target || rows[0] || chip;
-  target.focus();
-}
+  text.appendChild(nameLine);
 
-// Lay the strip out; returns the +N chip, or null when every pill shows.
-function layoutPills(c) {
-  var oldChip = c.querySelector('.pill-more-item');
-  if (oldChip) oldChip.remove();
-  c.classList.remove('pills-compact');
-  var pills = Array.prototype.slice.call(c.querySelectorAll('.agent-pill'));
-  pills.forEach(function(p) { p.hidden = false; });
-  pillOverflow = [];
-  if (pills.length === 0 || !window.joindUi) return null;
-  var avail = pillStripAvailable(c);
-  if (avail <= 0) return null; // not laid out (hidden header): the next resize refits
-  var gap = parseFloat(getComputedStyle(c).columnGap) || 0;
-  var measure = function() { return pills.map(function(p) { return p.getBoundingClientRect().width; }); };
-  var fit = window.joindUi.pillsThatFit;
-  if (fit(measure(), avail, gap, 0) === pills.length) return null;
-  // Short on space: drop the role and status text before any pill.
-  c.classList.add('pills-compact');
-  var widths = measure();
-  if (fit(widths, avail, gap, 0) === pills.length) return null;
-  var item = document.createElement('div');
-  item.className = 'pill-more-item';
-  item.setAttribute('role', 'listitem');
-  var chip = document.createElement('button');
-  chip.type = 'button';
-  chip.className = 'pill-more';
-  chip.setAttribute('aria-haspopup', 'dialog');
-  chip.setAttribute('aria-expanded', 'false');
-  // Sized with the widest count it could show, then set to the real one.
-  chip.textContent = '+' + pills.length;
-  item.appendChild(chip);
-  c.appendChild(item);
-  var k = fit(widths, avail, gap, item.getBoundingClientRect().width);
-  for (var i = k; i < pills.length; i++) pills[i].hidden = true;
-  pillOverflow = pillInfos.slice(k);
-  var n = pills.length - k;
-  chip.textContent = '+' + n;
-  chip.title = n + ' more: ' + pillOverflow.map(function(x) { return x.a.name; }).join(', ');
-  chip.setAttribute('aria-label', n + ' more agents');
-  chip.addEventListener('click', function(e) {
+  var sub = [];
+  if (a.role) sub.push(a.role);
+  var route = memberRoute(a);
+  if (route && !a.host) sub.push(route);
+  if (typingNames.has(a.name)) sub.push('working');
+  else if (x.presence === 'online') sub.push(x.seenAge != null && x.seenAge >= 60000 ? 'seen ' + formatAge(x.seenAge) + ' ago' : 'online');
+  else if (x.presence === 'stale') sub.push('stale' + (x.seenAge != null ? ', seen ' + formatAge(x.seenAge) + ' ago' : ''));
+  else sub.push(x.quietText);
+  var subEl = document.createElement('span');
+  subEl.className = 'msub';
+  subEl.textContent = sub.join(' · ');
+  text.appendChild(subEl);
+  if (a.status) {
+    var st = document.createElement('span');
+    st.className = 'mstatus';
+    st.textContent = a.status;
+    text.appendChild(st);
+  }
+  row.appendChild(text);
+  row.addEventListener('click', function(e) {
     e.stopPropagation();
-    // detail 0: activated from the keyboard, so focus moves into the list.
-    showPillOverflow(chip, e.detail === 0);
+    showPopover(row, a);
   });
-  return chip;
+  return row;
 }
 
-// The chip on screen now (a refit replaces it), for focus and anchoring.
-function currentPillChip() {
-  return document.querySelector('#agent-pills .pill-more');
+function buildOfflineRow(o, nowMs) {
+  var row = document.createElement('div');
+  row.className = 'member-row offline';
+  row.setAttribute('data-key', 'o:' + o.name);
+  row.tabIndex = -1;
+  var av = memberAvatar(o.name, 'dim');
+  row.appendChild(av);
+  var text = document.createElement('span');
+  text.className = 'mtext';
+  var nameLine = document.createElement('span');
+  nameLine.className = 'mname';
+  nameLine.textContent = o.name;
+  text.appendChild(nameLine);
+  var subEl = document.createElement('span');
+  subEl.className = 'msub';
+  subEl.textContent = o.lastAt ? 'not connected · last posted ' + formatAge(Math.max(0, nowMs - o.lastAt)) + ' ago' : 'not connected';
+  text.appendChild(subEl);
+  row.appendChild(text);
+  return row;
 }
 
-function watchPillStrip(c) {
-  if (pillStripObserver || typeof ResizeObserver === 'undefined' || !c.parentElement) return;
-  pillStripWidth = c.parentElement.clientWidth;
-  pillStripObserver = new ResizeObserver(function(entries) {
-    var w = Math.round(entries[0].contentRect.width);
-    if (w === pillStripWidth) return;
-    pillStripWidth = w;
-    // One refit per frame, after layout settles.
-    if (pillFitFrame) cancelAnimationFrame(pillFitFrame);
-    pillFitFrame = requestAnimationFrame(function() { pillFitFrame = 0; fitPills(); });
-  });
-  pillStripObserver.observe(c.parentElement);
+// --- Pins: the room's pinned messages, fetched from the server (which
+// applies DM visibility for this viewer). Latest request wins, and a reply
+// for a room that is no longer on screen is dropped.
+function loadPins(force) {
+  var conv = activeConversation ? activeConversation.id : null;
+  if (!conv) return;
+  if (!force && pinsState.conv === conv && pinsState.list) return;
+  var seq = ++pinsState.seq;
+  if (pinsState.conv !== conv) {
+    pinsState.conv = conv;
+    pinsState.list = null;
+    renderPinsCount();
+    if (sidePanelTab === 'pins') renderSidePanel();
+  }
+  // The room on screen by name: the server's active room can lag a switch.
+  fetch('/api/pins?conversation=' + encodeURIComponent(conv) + '&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { if (!r.ok) throw new Error('pins ' + r.status); return r.json(); })
+    .then(function(list) {
+      if (seq !== pinsState.seq || !activeConversation || activeConversation.id !== conv) return;
+      pinsState.list = Array.isArray(list) ? list : [];
+      renderPinsCount();
+      if (sidePanelTab === 'pins') renderSidePanel();
+      if (sidePanelTab) syncSidePanelTabs();
+    })
+    .catch(function() {
+      if (seq !== pinsState.seq) return;
+      pinsState.list = pinsState.conv === conv ? (pinsState.list || []) : [];
+      renderPinsCount();
+      if (sidePanelTab === 'pins') renderSidePanel();
+    });
 }
 
-// The members behind the +N chip: name, role, presence and age, each row
-// opening that member's usual popover. Escape closes it and returns focus
-// to the chip; arrows move between rows; Tab leaves it (no trap).
-function showPillOverflow(chip, fromKeyboard) {
-  var list = pillOverflow.slice();
-  closePopover();
-  if (list.length === 0) return;
-  var pop = document.createElement('div');
-  pop.className = 'pill-popover pill-overflow';
-  pop.setAttribute('role', 'dialog');
-  pop.setAttribute('aria-label', 'More agents');
-  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+function renderPinsCount() {
+  var el = document.getElementById('pins-count');
+  if (!el) return;
+  var n = pinsState.list ? pinsState.list.length : 0;
+  el.textContent = n > 0 ? String(n) : '';
+  el.hidden = n === 0;
+  var btn = document.getElementById('pins-btn');
+  if (btn) btn.setAttribute('aria-label', n > 0 ? n + ' pinned messages' : 'Pinned messages');
+}
 
-  var hdr = document.createElement('div');
-  hdr.className = 'pop-header';
-  var hdrText = document.createElement('span');
-  hdrText.textContent = list.length + ' more in this room';
-  hdr.appendChild(hdrText);
-  pop.appendChild(hdr);
-
-  var rows = [];
-  list.forEach(function(x) {
+function renderPinsList(body) {
+  if (!pinsState.list) {
+    var loading = document.createElement('div');
+    loading.className = 'side-empty';
+    loading.textContent = 'Loading pins...';
+    body.appendChild(loading);
+    return;
+  }
+  if (pinsState.list.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'side-empty';
+    empty.textContent = 'Nothing pinned in this room.';
+    body.appendChild(empty);
+    return;
+  }
+  var conv = pinsState.conv;
+  pinsState.list.slice().sort(function(a, b) { return b.id - a.id; }).forEach(function(msg) {
     var row = document.createElement('button');
     row.type = 'button';
-    row.className = 'pill-overflow-row ' + x.presence;
-    row.setAttribute('data-agent', x.a.name || '');
-    row.title = x.title;
-    var dot = document.createElement('span');
-    dot.className = 'pill-dot';
-    var name = document.createElement('span');
-    name.className = 'pill-name';
-    name.style.color = getSenderColor(x.a.name);
-    name.textContent = x.a.name;
-    row.appendChild(dot);
-    row.appendChild(name);
-    if (x.a.role) {
-      var role = document.createElement('span');
-      role.className = 'pill-overflow-role';
-      role.textContent = x.a.role;
-      row.appendChild(role);
-    }
-    var state = document.createElement('span');
-    state.className = 'pill-overflow-state';
-    state.textContent = x.presence === 'online' ? 'online' : x.presence === 'stale' ? 'stale' : x.quietText;
-    row.appendChild(state);
+    row.className = 'pin-row';
+    row.setAttribute('data-key', 'p:' + msg.id);
+    var head = document.createElement('span');
+    head.className = 'pin-head';
+    var id = document.createElement('span');
+    id.className = 'pin-id';
+    id.textContent = '#' + msg.id;
+    var who = document.createElement('span');
+    who.className = 'pin-sender';
+    who.textContent = msg.sender;
+    who.style.color = getSenderColor(msg.sender);
+    var when = document.createElement('span');
+    when.className = 'pin-time';
+    when.textContent = msg.timestamp ? formatTimeShort(msg.timestamp) : '';
+    head.appendChild(id); head.appendChild(who); head.appendChild(when);
+    var text = document.createElement('span');
+    text.className = 'pin-text';
+    var first = String(msg.text || '').split('\n').filter(function(l) { return l.trim() !== ''; })[0] || '';
+    text.textContent = first.length > 160 ? first.slice(0, 160) + '...' : first;
+    row.appendChild(head);
+    row.appendChild(text);
+    row.title = 'Go to message #' + msg.id;
     row.addEventListener('click', function(e) {
       e.stopPropagation();
-      var anchor = currentPillChip() || document.getElementById('agent-pills');
-      showPopover(anchor, x.a);
+      if (isMobileView() || window.innerWidth <= 1024) closeSidePanel(false);
+      jumpToMessage(conv, msg.id, msg);
     });
-    rows.push(row);
-    pop.appendChild(row);
+    body.appendChild(row);
   });
+}
 
-  pop.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
+// Tabs: click, arrows between the two, Escape closes (a popover first).
+function initSidePanel() {
+  var panel = document.getElementById('side-panel');
+  if (!panel) return;
+  var tabs = [document.getElementById('side-tab-members'), document.getElementById('side-tab-pins')];
+  tabs.forEach(function(tab, i) {
+    if (!tab) return;
+    tab.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var want = tab.getAttribute('data-panel');
+      if (want === sidePanelTab) return;
+      sidePanelTab = want;
+      if (want === 'pins') loadPins(true);
+      renderSidePanel();
+      syncSidePanelTabs();
+    });
+    tab.addEventListener('keydown', function(e) {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
       e.preventDefault();
-      closePopover();
-      var current = currentPillChip();
-      if (current) current.focus();
-      return;
-    }
+      var next = tabs[(i + 1) % tabs.length];
+      if (next) { next.click(); next.focus(); }
+    });
+  });
+  panel.addEventListener('click', function(e) { if (!e.target.closest('.member-row, .pin-row')) closePopover(); e.stopPropagation(); });
+  // Arrow keys move between rows inside the panel body.
+  var body = document.getElementById('side-panel-body');
+  if (body) body.addEventListener('keydown', function(e) {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    var rows = Array.prototype.slice.call(body.querySelectorAll('.member-row, .pin-row'));
+    if (rows.length === 0) return;
     var at = rows.indexOf(document.activeElement);
     var next = e.key === 'ArrowDown' ? Math.min(rows.length - 1, at + 1) : Math.max(0, at - 1);
     e.preventDefault();
     rows[next].focus();
   });
+}
 
+// Escape: an open popover or menu first (focus back to what opened it),
+// then the side panel when focus is inside it.
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  if (openPopover) {
+    var anchor = popoverAnchor;
+    closePopover();
+    if (anchor && anchor.isConnected && anchor.offsetParent !== null) anchor.focus();
+    e.preventDefault();
+    return;
+  }
+  var panel = document.getElementById('side-panel');
+  if (panel && sidePanelTab && panel.contains(document.activeElement)) {
+    e.preventDefault();
+    closeSidePanel(true);
+  }
+});
+
+// The room actions that do not fit a phone toolbar: export and import.
+function openConvMore(evt) {
+  if (evt) evt.stopPropagation();
+  var btn = document.getElementById('conv-more-btn');
+  if (openPopover && openPopover.classList.contains('conv-more-menu')) { closePopover(); return; }
+  closePopover();
+  var pop = document.createElement('div');
+  pop.className = 'pill-popover conv-more-menu';
+  pop.setAttribute('role', 'menu');
+  pop.setAttribute('aria-label', 'More room actions');
+  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+  var items = [['Export this room', exportChat], ['Import a room', openImportDialog]];
+  var buttons = items.map(function(it) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'menu-item';
+    b.setAttribute('role', 'menuitem');
+    b.textContent = it[0];
+    b.addEventListener('click', function() { closePopover(); it[1](); });
+    pop.appendChild(b);
+    return b;
+  });
+  pop.addEventListener('keydown', function(e) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    var at = buttons.indexOf(document.activeElement);
+    var next = e.key === 'ArrowDown' ? Math.min(buttons.length - 1, at + 1) : Math.max(0, at - 1);
+    e.preventDefault();
+    buttons[next].focus();
+  });
   document.body.appendChild(pop);
-  if (!isMobileView()) {
-    var rect = chip.getBoundingClientRect();
-    var popRect = pop.getBoundingClientRect();
-    var top = rect.bottom + 6;
-    var left = rect.right - popRect.width;
-    if (left + popRect.width > window.innerWidth - 8) left = window.innerWidth - popRect.width - 8;
-    if (top + popRect.height > window.innerHeight - 8) top = rect.top - popRect.height - 6;
-    pop.style.top = Math.max(8, top) + 'px';
-    pop.style.left = Math.max(8, left) + 'px';
+  if (!isMobileView() && btn) {
+    var rect = btn.getBoundingClientRect();
+    var pr = pop.getBoundingClientRect();
+    pop.style.top = Math.max(8, rect.bottom + 6) + 'px';
+    pop.style.left = Math.max(8, Math.min(window.innerWidth - pr.width - 8, rect.right - pr.width)) + 'px';
   }
   openPopover = pop;
-  chip.setAttribute('aria-expanded', 'true');
-  popoverOnClose = function() { chip.setAttribute('aria-expanded', 'false'); };
-  if (fromKeyboard && rows[0]) rows[0].focus();
+  popoverAnchor = btn;
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+  popoverOnClose = function() { if (btn) btn.setAttribute('aria-expanded', 'false'); };
+  buttons[0].focus();
 }
 
 function renderTypingBar() {
@@ -969,6 +1091,7 @@ function renderTypingBar() {
 
 function showPopover(anchor, agent) {
   closePopover();
+  popoverAnchor = anchor;
   var pop = document.createElement('div');
   pop.className = 'pill-popover';
   pop.addEventListener('click', function(e) { e.stopPropagation(); });
@@ -1151,6 +1274,7 @@ function showPopover(anchor, agent) {
 }
 
 function closePopover() {
+  popoverAnchor = null;
   if (openPopover) { openPopover.remove(); openPopover = null; }
   if (popoverOnClose) { var done = popoverOnClose; popoverOnClose = null; done(); }
 }
@@ -2700,8 +2824,8 @@ function kickAgent(name) {
 function isMobileView() { return window.innerWidth <= 560; }
 
 // --- Resizable sidebar (desktop only) ---
-// A seam on the sidebar's right edge. Width = pointer x minus the app
-// container's left edge, applied on every pointermove and clamped; saved
+// A seam on the sidebar's right edge. Width = pointer x minus the sidebar's
+// own left edge (the rail sits before it), applied on every pointermove and clamped; saved
 // once on pointerup. Arrow keys on the focused seam step 16 px. Below the
 // mobile breakpoint the sidebar is a drawer and the saved width is not applied.
 // Dragging the seam below SIDEBAR_COLLAPSE_AT (40 px under the minimum)
@@ -2779,8 +2903,8 @@ function initSidebarResize() {
   seam.addEventListener('pointermove', function(e) {
     if (!dragging) return;
     var out = window.joindUi
-      ? window.joindUi.sidebarDragOutcome(e.clientX - app.getBoundingClientRect().left, SIDEBAR_MIN, SIDEBAR_MAX, SIDEBAR_COLLAPSE_AT)
-      : { width: clampSidebarWidth(e.clientX - app.getBoundingClientRect().left), collapse: false };
+      ? window.joindUi.sidebarDragOutcome(e.clientX - sb.getBoundingClientRect().left, SIDEBAR_MIN, SIDEBAR_MAX, SIDEBAR_COLLAPSE_AT)
+      : { width: clampSidebarWidth(e.clientX - sb.getBoundingClientRect().left), collapse: false };
     willCollapse = out.collapse;
     sb.classList.toggle('will-collapse', willCollapse);
     // Below the threshold the release collapses, so no width is kept from it.
@@ -2887,6 +3011,98 @@ function toggleSection(header) {
   header.classList.toggle('collapsed');
   var body = header.nextElementSibling;
   if (body) body.classList.toggle('collapsed');
+}
+
+// --- The rail (redesign lane 2) ---
+// Rooms, DMs and Crew switch what the sidebar shows (each section lists its
+// views in data-views); Decisions, Tasks, Search and Activity open their
+// panels and show as pressed while open. The view is remembered per
+// browser. At phone width the rail is the bottom tab bar and a view opens
+// the sidebar drawer.
+var RAIL_VIEW_KEY = 'joind-rail-view';
+var RAIL_TITLES = { rooms: 'Rooms', dms: 'Direct messages', crew: 'Crew' };
+var railViewNow = 'rooms';
+
+function readRailView() {
+  var v = null;
+  try { v = localStorage.getItem(RAIL_VIEW_KEY); } catch (e) { /* storage unavailable */ }
+  return window.joindUi ? window.joindUi.railView(v) : 'rooms';
+}
+
+function setRailView(view, fromUser) {
+  var v = window.joindUi ? window.joindUi.railView(view) : 'rooms';
+  railViewNow = v;
+  var sb = document.getElementById('sidebar');
+  if (sb) sb.setAttribute('data-view', v);
+  document.querySelectorAll('.sidebar-section[data-views]').forEach(function(sec) {
+    var show = window.joindUi ? window.joindUi.sectionInView(sec.getAttribute('data-views'), v) : true;
+    // Focus inside a section that is going away moves to the rail item.
+    if (!show && sec.contains(document.activeElement)) {
+      var item = document.querySelector('.rail-item[data-rail-view="' + v + '"]');
+      if (item) item.focus();
+    }
+    sec.hidden = !show;
+  });
+  var title = document.getElementById('side-title');
+  if (title) title.textContent = RAIL_TITLES[v];
+  document.querySelectorAll('.rail-item[data-rail-view]').forEach(function(btn) {
+    var on = btn.getAttribute('data-rail-view') === v;
+    btn.classList.toggle('active', on);
+    if (on) btn.setAttribute('aria-current', 'true'); else btn.removeAttribute('aria-current');
+  });
+  if (fromUser) {
+    try { localStorage.setItem(RAIL_VIEW_KEY, v); } catch (e) { /* storage unavailable: the view holds for this page */ }
+    if (isMobileView()) {
+      openMobileDrawer();
+    } else if (sb && sb.classList.contains('hidden')) {
+      setSidebarHidden(false);
+    }
+  }
+}
+
+// Panels opened from the rail show as pressed while open.
+function syncRailPanels() {
+  var searchBar = document.getElementById('search-bar');
+  var states = [
+    ['decisions-btn', typeof decisionsPanelOpen !== 'undefined' && decisionsPanelOpen],
+    ['notify-btn', typeof notifyPanelOpen !== 'undefined' && notifyPanelOpen],
+    ['task-badge', typeof taskPanelOpen !== 'undefined' && taskPanelOpen],
+    ['rail-search', !!searchBar && !searchBar.classList.contains('hidden')],
+  ];
+  states.forEach(function(s) {
+    var el = document.getElementById(s[0]);
+    if (!el) return;
+    el.classList.toggle('open', !!s[1]);
+    if (el.hasAttribute('aria-expanded')) el.setAttribute('aria-expanded', s[1] ? 'true' : 'false');
+  });
+}
+
+// The DMs item carries the total of unread direct messages.
+function renderRailDmBadge() {
+  var badge = document.getElementById('rail-dm-badge');
+  if (!badge) return;
+  var total = 0;
+  Object.keys(dmUnread).forEach(function(k) { total += dmUnread[k] || 0; });
+  badge.textContent = total > 99 ? '99+' : String(total);
+  badge.hidden = total === 0;
+  var btn = document.getElementById('rail-dms');
+  if (btn) btn.setAttribute('aria-label', total > 0 ? 'Direct messages, ' + total + ' unread' : 'Direct messages');
+}
+
+function initRail() {
+  document.querySelectorAll('.rail-item[data-rail-view]').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      setRailView(btn.getAttribute('data-rail-view'), true);
+    });
+  });
+  setRailView(readRailView(), false);
+  syncRailPanels();
+  renderRailDmBadge();
+  // The instance name titles the rail brand as well as the sidebar head.
+  var brand = document.getElementById('rail-brand');
+  var inst = document.getElementById('instance-name');
+  if (brand && inst) brand.title = inst.textContent;
 }
 
 // --- Utils ---
@@ -3007,7 +3223,13 @@ function setupYouPill() {
   function syncName() {
     var name = senderInput.value || 'human';
     display.textContent = name;
-    display.style.color = getSenderColor(name);
+    var avatar = document.getElementById('you-avatar');
+    if (avatar) {
+      avatar.textContent = name.charAt(0).toUpperCase();
+      avatar.style.background = getSenderColor(name);
+    }
+    pill.title = 'You: ' + name;
+    pill.setAttribute('aria-label', 'Your profile, ' + name);
     localStorage.setItem('joind-sender-name', name);
     // Renames flow only through the authenticated socket (web-rename); HTTP
     // register is first-boot only and would 409 here. If no OPEN socket can
@@ -3132,18 +3354,19 @@ function setupYouPill() {
     document.body.appendChild(pop);
     var rect = pill.getBoundingClientRect();
     var popRect = pop.getBoundingClientRect();
-    var ptop = rect.bottom + 6;
-    var pleft = rect.left;
+    // Beside the rail, level with the pill's foot (a phone shows a sheet).
+    var ptop = rect.bottom - popRect.height;
+    var pleft = rect.right + 8;
     if (pleft + popRect.width > window.innerWidth - 8) {
       pleft = window.innerWidth - popRect.width - 8;
     }
-    if (ptop + popRect.height > window.innerHeight - 8) {
-      ptop = rect.top - popRect.height - 6;
+    if (!isMobileView()) {
+      pop.style.top = Math.max(8, Math.min(window.innerHeight - popRect.height - 8, ptop)) + 'px';
+      pop.style.left = Math.max(8, pleft) + 'px';
     }
-    pop.style.top = Math.max(8, ptop) + 'px';
-    pop.style.left = Math.max(8, pleft) + 'px';
 
     openPopover = pop;
+    popoverAnchor = pill;
     nameInput.focus();
     nameInput.select();
   });
@@ -3210,6 +3433,7 @@ function selectConversation(id, after) {
     resetRoomTasks(id);
     renderConversationList();
     renderDmList();
+    renderPills();
   }
   var c = document.getElementById('messages');
   c.textContent = '';
@@ -3244,6 +3468,7 @@ function selectConversation(id, after) {
         }
         allMessages = (data.messages || []).slice();
         agents = data.agents || [];
+        agentsConv = data.conversation.id;
         onlineNames = new Set(agents.map(function(a) { return a.name; }));
         renderPills();
         renderChannelView();
@@ -3274,6 +3499,7 @@ function showNoConversation() {
     '<p class="welcome-sub">Select a conversation or start a new one</p>';
   c.appendChild(empty);
   agents = [];
+  agentsConv = null;
   renderPills();
 }
 
@@ -3406,6 +3632,7 @@ function fetchDmPartners() {
 }
 
 function renderDmList() {
+  renderRailDmBadge();
   var list = document.getElementById('dm-list');
   if (!list) return;
   list.textContent = '';
@@ -3610,26 +3837,34 @@ function syncChannelHeader() {
   var title = document.getElementById('channel-title');
   var topic = document.getElementById('channel-topic');
   if (!title || !topic) return;
+  // Presence lives on the members button now (its count lists everyone the
+  // panel does), so the topic no longer says "0 member(s)" in a room whose
+  // agents are simply not connected.
   if (activeDm) {
     title.textContent = activeDm;
     topic.textContent = 'Direct message';
   } else if (activeConversation) {
     title.textContent = '# ' + activeConversation.name;
     var server = remoteServerOf(activeConversation.id);
-    if (server) {
-      // Home server and link state lead, so a narrow header truncates the
-      // member count rather than the link state.
-      topic.textContent = '';
-      appendRemoteHeaderState(topic, server);
-      topic.appendChild(document.createTextNode(' · ' + agents.length + ' member(s)'));
-    } else {
-      topic.textContent = agents.length + ' member(s)';
-    }
+    topic.textContent = '';
+    if (server) appendRemoteHeaderState(topic, server);
   } else {
     title.textContent = '#';
     topic.textContent = '';
   }
+  syncConvTools();
   syncLinkHint();
+}
+
+// The toolbar follows the view: members and pins belong to a room, so a
+// DM (a cross-room mailbox) hides them and closes the side panel.
+function syncConvTools() {
+  var inRoom = !!activeConversation && !activeDm;
+  document.querySelectorAll('.conv-tools .room-only').forEach(function(el) { el.hidden = !inRoom; });
+  if (!inRoom && sidePanelTab) closeSidePanel(false);
+  var label = document.getElementById('room-search-label');
+  if (label) label.textContent = activeDm ? 'Search' : activeConversation ? 'Search # ' + activeConversation.name : 'Search this room';
+  if (inRoom && pinsState.conv !== activeConversation.id) loadPins(false);
 }
 
 // ============================================================
@@ -4602,7 +4837,9 @@ function renderTaskBadgeFromCount(count, hasUrgent) {
   var badge = document.getElementById('task-badge');
   var countEl = document.getElementById('task-badge-count');
   if (!badge || !countEl) return;
-  countEl.textContent = count;
+  countEl.textContent = count > 0 ? (count > 99 ? '99+' : String(count)) : '';
+  countEl.hidden = count === 0;
+  badge.setAttribute('aria-label', count > 0 ? 'Tasks, ' + count + ' open' : 'Tasks');
   badge.classList.toggle('has-tasks', count > 0);
   badge.classList.toggle('has-urgent', hasUrgent);
 }
@@ -4656,6 +4893,7 @@ function toggleTaskPanel() {
     loadTasks(activeConversation.id);
   }
   if (window.lucide) lucide.createIcons({ root: panel });
+  syncRailPanels();
 }
 
 function setTaskFilter(filter, btn) {
@@ -5011,6 +5249,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!info || !info.name) return;
     var el = document.getElementById('instance-name');
     if (el) el.textContent = info.name;
+    var brand = document.getElementById('rail-brand');
+    if (brand) brand.title = info.name;
     document.title = info.name === 'Joind' ? 'Joind' : info.name + ' — Joind';
   }).catch(function() { /* ignore */ });
   // Wire conversation search
@@ -5028,6 +5268,8 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('sidebar').classList.add('hidden');
   }
   initSidebarResize();
+  initRail();
+  initSidePanel();
 });
 
 // renderRolesPanel is now integrated into the settings dialog
@@ -6985,6 +7227,7 @@ function toggleSearch() {
       inp.addEventListener('keydown', onSearchInputKeydown);
     }
   }
+  syncRailPanels();
 }
 // Results left from an earlier query text can be neither clicked nor
 // focused (inert) and are dimmed, until the current query's answer lands.
@@ -7003,6 +7246,7 @@ function closeSearch() {
   renderSearchChips('');
   searchSeq++;
   searchState = null;
+  syncRailPanels();
 }
 // Switch to the view that owns a message, then reveal it. Targeted
 // messages open their DM thread; channel messages return to channel view.
@@ -7426,12 +7670,14 @@ function toggleNotifyPanel() {
   document.body.appendChild(overlay);
   renderNotifyPanel();
   loadNotifications();
+  syncRailPanels();
 }
 
 function closeNotifyPanel() {
   notifyPanelOpen = false;
   var overlay = document.getElementById('notify-panel-overlay');
   if (overlay) overlay.remove();
+  syncRailPanels();
 }
 
 function renderNotifyPanel() {
@@ -7602,12 +7848,14 @@ function toggleDecisionsPanel() {
   document.body.appendChild(overlay);
   renderDecisionsPanel();
   refreshDecisionsBadge();
+  syncRailPanels();
 }
 
 function closeDecisionsPanel() {
   decisionsPanelOpen = false;
   var overlay = document.getElementById('decisions-panel-overlay');
   if (overlay) overlay.remove();
+  syncRailPanels();
 }
 
 function renderDecisionsPanel() {
