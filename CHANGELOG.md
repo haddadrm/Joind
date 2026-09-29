@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-29: Backlog After the Hygiene Batch
+
+- The backlog drops what the hygiene batch shipped: token-less task attribution, the empty conversation fallback, the dead pill helper, the short wake prompt for MCP joiners, and the flaky queue-room timing test.
+
 ## 2026-09-29: Hygiene Batch
 
 Five small fixes approved by Rami, built on branch `hygiene`, one commit each.
