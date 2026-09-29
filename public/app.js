@@ -170,7 +170,7 @@ function promptWebToken(after) {
   title.textContent = 'Web token required';
   var hint = document.createElement('p');
   hint.textContent = 'This Joind uses a user-set web token. Enter it to view DMs (kept for this tab session only).';
-  hint.style.fontSize = '13px';
+  hint.style.fontSize = 'var(--fs-ui)';
   hint.style.opacity = '0.8';
   var input = document.createElement('input');
   input.type = 'password';
@@ -1022,7 +1022,7 @@ function showPopover(anchor, agent) {
   var rl = document.createElement('label');
   rl.textContent = 'Role';
   var roleDisplay = document.createElement('span');
-  roleDisplay.style.fontSize = '11px';
+  roleDisplay.style.fontSize = 'var(--fs-meta)';
   roleDisplay.style.color = color;
   roleDisplay.textContent = agent.role || 'none';
   roleLabel.appendChild(rl);
@@ -2308,7 +2308,7 @@ function openSettings(evt, defaultTab) {
     agentHdr.style.paddingTop = '8px';
     agentHdr.style.paddingBottom = '2px';
     var agentHdrLabel = document.createElement('span');
-    agentHdrLabel.style.fontSize = '9px';
+    agentHdrLabel.style.fontSize = 'var(--fs-meta)';
     agentHdrLabel.style.textTransform = 'uppercase';
     agentHdrLabel.style.letterSpacing = '1px';
     agentHdrLabel.style.color = 'var(--text-muted)';
@@ -2900,7 +2900,7 @@ function customPrompt(message, defaultValue, callback) {
 
   var title = document.createElement('div');
   title.className = 'session-modal-title';
-  title.style.fontSize = '14px';
+  title.style.fontSize = 'var(--fs-body)';
   title.textContent = message;
   modal.appendChild(title);
 
@@ -2910,7 +2910,7 @@ function customPrompt(message, defaultValue, callback) {
   input.style.width = '100%';
   input.style.marginTop = '12px';
   input.style.marginBottom = '16px';
-  input.style.fontSize = '13px';
+  input.style.fontSize = 'var(--fs-ui)';
   input.style.padding = '8px 12px';
   input.value = defaultValue || '';
   modal.appendChild(input);
@@ -2934,7 +2934,7 @@ function customPrompt(message, defaultValue, callback) {
   okBtn.style.padding = '6px 16px';
   okBtn.style.width = 'auto';
   okBtn.style.height = 'auto';
-  okBtn.style.fontSize = '12px';
+  okBtn.style.fontSize = 'var(--fs-label)';
   okBtn.textContent = 'OK';
   okBtn.addEventListener('click', function() {
     var val = input.value;
@@ -4502,7 +4502,7 @@ function startSessionUI(template) {
   startBtn.style.padding = '6px 16px';
   startBtn.style.width = 'auto';
   startBtn.style.height = 'auto';
-  startBtn.style.fontSize = '11px';
+  startBtn.style.fontSize = 'var(--fs-meta)';
   startBtn.textContent = 'Start Session';
   startBtn.addEventListener('click', function() {
     var cast = {};
@@ -4884,7 +4884,7 @@ function showCreateTaskForm() {
   cancelBtn.addEventListener('click', function() { form.remove(); });
   var submitBtn = document.createElement('button');
   submitBtn.className = 'btn btn-send';
-  submitBtn.style.cssText = 'padding:4px 12px;width:auto;height:auto;font-size:11px;';
+  submitBtn.style.cssText = 'padding:4px 12px;width:auto;height:auto;font-size:var(--fs-meta);';
   submitBtn.textContent = 'Create';
   submitBtn.addEventListener('click', function() {
     var title = titleInput.value.trim();
@@ -5857,7 +5857,7 @@ function renderFlagsForm(harness, container) {
   var flags = harness.flags || [];
   if (flags.length === 0) {
     var empty = document.createElement('div');
-    empty.style.fontSize = '11px';
+    empty.style.fontSize = 'var(--fs-meta)';
     empty.style.color = 'var(--text-muted)';
     empty.style.fontStyle = 'italic';
     empty.textContent = 'No configurable options';
@@ -5898,7 +5898,7 @@ function renderFlagsForm(harness, container) {
       checkWrap.appendChild(input);
       if (flag.help) {
         var helpSpan = document.createElement('span');
-        helpSpan.style.fontSize = '10px';
+        helpSpan.style.fontSize = 'var(--fs-meta)';
         helpSpan.style.color = 'var(--text-muted)';
         helpSpan.textContent = flag.help;
         checkWrap.appendChild(helpSpan);
@@ -5970,14 +5970,14 @@ function buildAddCrewForm(onAdd, onCancel) {
   var cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-launch-cancel';
   cancelBtn.style.padding = '4px 12px';
-  cancelBtn.style.fontSize = '11px';
+  cancelBtn.style.fontSize = 'var(--fs-meta)';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', onCancel);
 
   var addBtn = document.createElement('button');
   addBtn.className = 'btn-launch-go';
   addBtn.style.padding = '4px 12px';
-  addBtn.style.fontSize = '11px';
+  addBtn.style.fontSize = 'var(--fs-meta)';
   addBtn.textContent = 'Add';
   addBtn.addEventListener('click', function() {
     var path = pathInput.value.trim();
@@ -6183,7 +6183,7 @@ function showLaunchStatus(content, footer, result, convId, joinAs) {
   } else if (result.command) {
     // Manual mode — show command string
     var manualLabel = document.createElement('div');
-    manualLabel.style.fontSize = '11px';
+    manualLabel.style.fontSize = 'var(--fs-meta)';
     manualLabel.style.color = 'var(--text-muted)';
     manualLabel.textContent = 'Run this command in the agent\'s terminal:';
     view.appendChild(manualLabel);
@@ -6266,7 +6266,7 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
   var pollIndicator = document.createElement('div');
   pollIndicator.className = 'launch-status-line';
   pollIndicator.style.color = 'var(--text-muted)';
-  pollIndicator.style.fontSize = '11px';
+  pollIndicator.style.fontSize = 'var(--fs-meta)';
   pollIndicator.textContent = 'Waiting for agent...';
   view.appendChild(pollIndicator);
 
@@ -6669,14 +6669,14 @@ function buildCrewEditForm(row, crew, onChanged) {
   var cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-launch-cancel';
   cancelBtn.style.padding = '4px 12px';
-  cancelBtn.style.fontSize = '11px';
+  cancelBtn.style.fontSize = 'var(--fs-meta)';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', function() { onChanged(); });
 
   var saveBtn = document.createElement('button');
   saveBtn.className = 'btn-launch-go';
   saveBtn.style.padding = '4px 12px';
-  saveBtn.style.fontSize = '11px';
+  saveBtn.style.fontSize = 'var(--fs-meta)';
   saveBtn.textContent = 'Save';
   saveBtn.addEventListener('click', function() {
     errLine.style.display = 'none';
@@ -6800,7 +6800,7 @@ function buildCrewScaffoldForm(meta, harnesses, onScaffolded) {
   var createBtn = document.createElement('button');
   createBtn.className = 'btn-launch-go';
   createBtn.style.padding = '4px 12px';
-  createBtn.style.fontSize = '11px';
+  createBtn.style.fontSize = 'var(--fs-meta)';
   createBtn.textContent = 'Create';
   createBtn.addEventListener('click', function() {
     var name = nameInput.value.trim();

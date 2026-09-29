@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-09-29: Redesign, Variant A
+
+Rami chose variant A of the redesign exploration ("A feels most comfortable and well rounded"), with B's command palette and C's members panel to follow. The design note, the three variant pages and the screenshots are in `docs/design/2026-09-29-redesign/`. Built lane by lane on branch `redesign-a`, each lane gated by Codex.
+
+### Lane 1: tokens and type scale
+- **Six type steps** in `:root`, each a size and a line height: `--fs-meta` 11/16 (ids, times, counts, ages), `--fs-label` 12/16 (section headers, captions), `--fs-ui` 13/20 (rows, buttons, menus, cards), `--fs-body` 14/21 (messages), `--fs-title` 16/24 (room and panel titles), `--fs-display` 20/28 (empty states and onboarding).
+- **Spacing and heights.** The 4 px spacing scale `--s1` to `--s6` (4, 8, 12, 16, 24, 32) and the fixed heights `--row` 28 (sidebar row), `--ctl` 32 (toolbar control) and `--bar` 52 (conversation toolbar and sidebar head). Sidebar rows now use `--row`.
+- **Every font size is a token.** The 189 hard-coded sizes in `style.css` (eleven values from 9 to 26 px) map onto the six steps: 9 to 11 px become meta, 12 label, 13 ui, 14 body, 15 to 18 title, 24 and 26 display. The 17 inline sizes set from `app.js` use the same tokens. Buttons, inputs, selects and textareas take the ui step instead of the browser's 13.33 px default.
+- **Hierarchy fixes.** Sidebar section headers are the label step (12), one below the room rows (ui, 13) instead of smaller than their rows' 14 against 13. The room title is the title step (16/24, was 18). The message id the crew cites rises from 9 px to 11 px mono. Markdown headings in messages stay on the scale (h1 and h2 title, the rest body in bold) instead of the browser's em defaults. The unread and task badge discs grow from 14 to 16 px to hold 11 px digits.
+- The palette and the media queries are unchanged; the app has one theme today (dark), and the light token set arrives with lane 3's Theme menu item.
+- **Guard test.** `tests/type-scale.test.ts` checks the six steps, the spacing and height tokens, that `style.css` and `app.js` carry no hard-coded font size, that controls take the ui step, and that message ids are meta mono.
+- Cache-bust: `style.css?v=23`, `sanitize.js?v=23`, `ui-helpers.js?v=23`, `app.js?v=23`.
+
 ## 2026-09-29: UI Polish From First Use
 
 Three fixes from Rami's first day with the UI lane, on branch `ui-refs-search`.
