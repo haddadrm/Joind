@@ -62,10 +62,24 @@ async function settle(rounds = 40): Promise<void> { for (let i = 0; i < rounds; 
 
 describe("a room wakes a member with a codexThread through codex queue", () => {
   let logs: string[];
+  /** Waiters for a log line: a test waits on the line it asserts, never on
+   *  a count of event-loop turns (the submit check reads the filesystem,
+   *  and under load that read can take any number of turns). */
+  let logWaiters: Array<{ re: RegExp; resolve: (line: string) => void }>;
+  function waitForLog(re: RegExp): Promise<string> {
+    const seen = logs.find((l) => re.test(l));
+    if (seen !== undefined) return Promise.resolve(seen);
+    return new Promise((resolve) => { logWaiters.push({ re, resolve }); });
+  }
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     logs = [];
-    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
+    logWaiters = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => {
+      const line = a.map(String).join(" ");
+      logs.push(line);
+      logWaiters = logWaiters.filter((w) => { if (!w.re.test(line)) return true; w.resolve(line); return false; });
+    });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     state.queueMode = "ok"; state.queue = []; state.console = []; state.options = []; state.onQueue = null;
   });
@@ -190,8 +204,8 @@ describe("a room wakes a member with a codexThread through codex queue", () => {
       await mention(r);
       expect(state.queue).toHaveLength(1);
       expect(state.console).toEqual([4242]);
-      for (let i = 0; i < 2000 && verifyLogs().length === 0; i++) await tick();
-      expect(verifyLogs().some((l) => /\[verify\] Data: not verifiable/.test(l))).toBe(true);
+      // The submit check's own verdict line, however long its read takes.
+      expect(await waitForLog(/\[verify\] Data: not verifiable/)).toMatch(/\[verify\] Data: not verifiable/);
       expect(systemLines(r).some((l) => /Could not wake|did not confirm/.test(l))).toBe(false);
     } finally {
       r.destroy();
