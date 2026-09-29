@@ -16,7 +16,6 @@ interface UiHelpers {
   pillPresence(stale: boolean, quietMs: number | null): Presence;
   orderByPresence<T>(items: T[], presenceOf: (item: T) => Presence): T[];
   shortAge(ms: number): string;
-  pillsThatFit(widths: number[], available: number, gap: number, chipWidth: number): number;
 }
 
 function load(): UiHelpers {
@@ -92,24 +91,5 @@ describe("shortAge", () => {
     expect(ui.shortAge(47 * 3600000 + 59 * 60000)).toBe("47h");
     expect(ui.shortAge(3 * 86400000 + 5 * 3600000)).toBe("3d");
     expect(ui.shortAge(-5000)).toBe("0m");
-  });
-});
-
-describe("pillsThatFit", () => {
-  it("shows everything when all pills and gaps fit exactly", () => {
-    expect(ui.pillsThatFit([50, 50, 50], 158, 4, 30)).toBe(3);
-    expect(ui.pillsThatFit([], 10, 4, 30)).toBe(0);
-  });
-
-  it("reserves the chip and its gap once the pills overflow", () => {
-    // 3 pills need 158; with 157 the chip (30) takes the room of the last two.
-    expect(ui.pillsThatFit([50, 50, 50], 157, 4, 30)).toBe(2);
-    // 30 + (50 + 4) * 2 = 138 fits, a third would need 192.
-    expect(ui.pillsThatFit([50, 50, 50, 50], 150, 4, 30)).toBe(2);
-    expect(ui.pillsThatFit([50, 50, 50, 50], 137, 4, 30)).toBe(1);
-  });
-
-  it("keeps order: a narrow later pill never jumps a wide earlier one", () => {
-    expect(ui.pillsThatFit([120, 20, 20, 20], 100, 4, 24)).toBe(0);
   });
 });

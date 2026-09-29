@@ -61,23 +61,6 @@
     return Math.floor(h / 24) + 'd';
   }
 
-  // How many pills (in order) fit in `available` px. All of them when their
-  // widths and the gaps between them fit; otherwise the largest count that
-  // still leaves room for the +N chip (and its gap) after them.
-  function pillsThatFit(widths, available, gap, chipWidth) {
-    var n = widths.length;
-    var total = 0;
-    for (var i = 0; i < n; i++) total += widths[i] + (i > 0 ? gap : 0);
-    if (total <= available) return n;
-    var used = chipWidth;
-    var k = 0;
-    while (k < n && used + widths[k] + gap <= available) {
-      used += widths[k] + gap;
-      k++;
-    }
-    return k;
-  }
-
   // --- Redesign lane 2: the rail and the members panel ---
 
   // The rail views that change what the sidebar shows. Anything else (a
@@ -352,7 +335,6 @@
     sidebarDragOutcome: sidebarDragOutcome,
     pillPresence: pillPresence,
     orderByPresence: orderByPresence,
-    shortAge: shortAge,
-    pillsThatFit: pillsThatFit
+    shortAge: shortAge
   };
 });
