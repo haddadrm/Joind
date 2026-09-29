@@ -754,7 +754,9 @@ function pillStripAvailable(c) {
 // Refit the strip. An open +N list is rebuilt from the new overflow (so a
 // member who left or now fits is not listed), or closed when nothing
 // overflows any more; focus inside it follows the same member, else the
-// first row, else the first pill.
+// first row, else the first pill. Focus on the strip itself survives too: a
+// focused chip moves to its replacement, and a focused pill that is now
+// hidden hands focus to the chip.
 function fitPills() {
   var c = document.getElementById('agent-pills');
   if (!c) return;
@@ -763,7 +765,12 @@ function fitPills() {
   if (listOpen && openPopover.contains(document.activeElement)) {
     listFocus = document.activeElement.getAttribute('data-agent') || '';
   }
+  var stripFocus = document.activeElement && c.contains(document.activeElement) ? document.activeElement : null;
   var chip = layoutPills(c);
+  if (stripFocus && (!stripFocus.isConnected || stripFocus.hidden)) {
+    var next = chip || c.querySelector('.agent-pill:not([hidden])');
+    if (next) next.focus();
+  }
   if (!listOpen) return;
   if (!chip) {
     closePopover();
