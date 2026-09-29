@@ -74,6 +74,26 @@ describe("light theme contrast", () => {
     }
   });
 
+  it("code blocks keep their text readable in the light theme", () => {
+    const code = rgb(token(light, "code-bg"));
+    for (const t of ["text", "text-dim", "text-muted"]) {
+      expect(contrast(rgb(token(light, t)), code)).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("only scrims, backdrops and the lightbox use a fixed black tint", () => {
+    // A fixed black tint under text reads in the dark theme only; content
+    // surfaces take a token that the light theme redefines.
+    const offenders: string[] = [];
+    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = rule.exec(css)) !== null) {
+      const selector = m[1].trim().split("\n").pop() ?? "";
+      if (/(^|\s|;)background(-color)?:\s*rgba\(0, 0, 0/.test(m[2]) && !/overlay|backdrop|lightbox/.test(selector)) offenders.push(selector);
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it("the warning badge on the rail takes white in the light theme", () => {
     expect(css).toMatch(/:root\[data-theme="light"\] \.rail \.rail-badge\.warn \{ color: #fff; \}/);
   });
