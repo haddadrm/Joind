@@ -11,6 +11,9 @@ Rami approved the lane on 29 Sep. The agent API needed no credential on a tailne
 - The identity kit says where the key comes from. Cache-bust `?v=31`.
 - Tests: `tests/agent-auth.test.ts` (units; a walk of every app route under require with no key and with a wrong key; REST, the fallbacks, MCP over HTTP with header and URL key, the wake prompt's own lines, rotation, warn and off serving everything, two linked servers both in require).
 
+### Gate round 1 (Codex, CHANGES REQUESTED, one Medium, fixed)
+- **Resolve took a body-only web token under require** (Medium). The web branch of `/api/message/:id/resolve` now needs the web token (or the key) in the header or query, like every gated route; counted in warn. Rotation also ends open MCP sessions.
+
 ## 2026-09-29: Backlog After the Hygiene Batch
 
 - The backlog drops what the hygiene batch shipped: token-less task attribution, the empty conversation fallback, the dead pill helper, the short wake prompt for MCP joiners, and the flaky queue-room timing test.

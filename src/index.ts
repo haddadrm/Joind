@@ -327,6 +327,22 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   }
 
   /**
+   * For a branch of a callback route that is not a registration callback:
+   * the same rule as a gated route (the key or the web token in the header
+   * or query). Counted in warn, refused in require. False after a 401.
+   */
+  function gatedCredentialPresent(res: express.Response): boolean {
+    if (agentAuth.mode === "off") return true;
+    const cred = res.locals.agentCred as Credential | undefined;
+    if (cred === "key" || cred === "web" || res.locals.agentNoted === true) return true;
+    const req = res.req;
+    agentAuth.note(routeLabel(req.method, req.path), cred === "bad" ? "bad" : "missing", req.socket.remoteAddress);
+    if (!agentAuth.enforcing) return true;
+    refuseAgent(req, res, cred === "bad" ? "bad" : "missing");
+    return false;
+  }
+
+  /**
    * A callback route's admission once its body is parsed: the key or the web
    * token (seen by the gate), else a registration of this exact name that a
    * join on this server issued and no rotation revoked. False after a 401.
@@ -876,6 +892,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!CONFIG.webTokenUserSet) { res.status(409).json({ error: SERVED_TOKEN_REFUSAL }); return; }
     try {
       const out = agentAuth.rotate(manager.allRegistrations());
+      // Open MCP sessions end with the key that opened them (every request
+      // is checked anyway; this also ends a standing GET stream).
+      for (const [id, sess] of [...mcpSessions.entries()]) {
+        mcpSessions.delete(id);
+        void sess.transport.close().catch(() => undefined);
+      }
       res.json({ ok: true, ...out });
     } catch (err) {
       if (err instanceof AgentKeyRotateError) { res.status(409).json({ error: err.message }); return; }
@@ -1368,6 +1390,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     let room; let by: string;
     if (token !== undefined) {
       if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
+      // The web branch is not a registration callback: under the agent gate
+      // it needs the web token (or the key) in the header or query, as any
+      // gated route does, not only in the body.
+      if (!gatedCredentialPresent(res)) return;
       // Message ids are per conversation; the panel resolves across rooms, so
       // an explicit conversation id wins over whatever room happens to be active.
       room = viewedRoom(conversation);

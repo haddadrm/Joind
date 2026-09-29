@@ -469,6 +469,19 @@ describe("require: one server", { timeout: 30_000 }, () => {
     expect(reply.status).toBe(200);
   });
 
+  it("resolve: the web branch needs the web token in the header or query, not only in the body", async () => {
+    const ask = await post(S.baseUrl, "/api/agent/send", { sender: "Curzon", text: "ask Rami", askFor: "Rami", pid: PID }, bearer(KEY));
+    expect(ask.status).toBe(200);
+    const id = ask.json.id as number;
+    const bodyOnly = await post(S.baseUrl, `/api/message/${id}/resolve`, { token: WEB, conversation: room });
+    expect(bodyOnly.status).toBe(401);
+    const wrongBody = await post(S.baseUrl, `/api/message/${id}/resolve`, { token: "nope", conversation: room });
+    expect(wrongBody.status).toBe(403);
+    // The agent branch with the key resolves it.
+    const agent = await post(S.baseUrl, `/api/message/${id}/resolve`, { sender: "Curzon", pid: PID }, bearer(KEY));
+    expect(agent.status).toBe(200);
+  });
+
   it("the status route never carries the key; reveal and rotate need the web token, not the agent key", async () => {
     const st = await get(S.baseUrl, "/api/agent-auth", webHdr);
     expect(st.status).toBe(200);
