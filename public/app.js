@@ -1809,17 +1809,38 @@ var MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 // its upload runs, so a slow first upload still goes out first.
 var pendingImages = [];
 var imageUploadsInFlight = 0;
-// Where the open DM would be routed, from its thread read: { partner, remote }.
+// Where the open DM would be routed, from its thread read: { partner,
+// remote } (remote null when the read failed). Cleared on every DM
+// selection, so until the read answers the route is unknown.
 var dmRoute = null;
 
-function composerIsRemote() {
-  if (activeDm) return !!(dmRoute && dmRoute.partner === activeDm && dmRoute.remote);
-  return !!activeConversation && isRemoteConversation(activeConversation.id);
+// 'local', 'remote', or 'unknown' (a DM whose route is not known yet).
+// Attachments are offered only for 'local'.
+function composerRoute() {
+  if (activeDm) {
+    if (!dmRoute || dmRoute.partner !== activeDm || dmRoute.remote === null) return 'unknown';
+    return dmRoute.remote ? 'remote' : 'local';
+  }
+  return activeConversation && isRemoteConversation(activeConversation.id) ? 'remote' : 'local';
+}
+
+function composerIsRemote() { return composerRoute() !== 'local'; }
+
+function attachmentsBlockedReason() {
+  var route = composerRoute();
+  if (route === 'remote') return 'Attachments are not supported in remote rooms. Only text is carried across a link.';
+  if (route === 'unknown') {
+    return dmRoute && dmRoute.partner === activeDm && dmRoute.remote === null
+      ? 'Could not tell where this direct message goes, so attachments are off. Reopen the conversation to try again.'
+      : 'Still checking where this direct message goes. Try again in a moment.';
+  }
+  return '';
 }
 
 function attachmentsRefusedHere() {
-  if (!composerIsRemote()) return false;
-  showComposerError('Attachments are not supported in remote rooms. Only text is carried across a link.');
+  var why = attachmentsBlockedReason();
+  if (!why) return false;
+  showComposerError(why);
   return true;
 }
 
@@ -5179,7 +5200,8 @@ function renderAttachMenu() {
   head.textContent = 'Attach';
   head.setAttribute('aria-hidden', 'true');
   menu.appendChild(head);
-  var remote = composerIsRemote();
+  var route = composerRoute();
+  var remote = route !== 'local';
   ATTACH_ITEMS.forEach(function(item) {
     var b = document.createElement('button');
     b.type = 'button';
@@ -5195,7 +5217,7 @@ function renderAttachMenu() {
     if (off) {
       b.setAttribute('aria-disabled', 'true');
       b.classList.add('disabled');
-      b.title = 'Attachments are not supported in remote rooms';
+      b.title = route === 'remote' ? 'Attachments are not supported in remote rooms' : 'Checking where this direct message goes';
     }
     b.addEventListener('click', function() {
       if (off) { attachmentsRefusedHere(); closeAttachMenu(true); return; }
@@ -5207,7 +5229,9 @@ function renderAttachMenu() {
   if (remote) {
     var note = document.createElement('div');
     note.className = 'attach-menu-note';
-    note.textContent = 'Remote room: attachments are not carried across a link.';
+    note.textContent = route === 'remote'
+      ? 'Remote room: attachments are not carried across a link.'
+      : 'Attachments wait until it is known where this direct message goes.';
     menu.appendChild(note);
   }
   var tip = document.createElement('div');
@@ -5215,6 +5239,16 @@ function renderAttachMenu() {
   tip.textContent = 'Tip: type @ to mention a crew member';
   menu.appendChild(tip);
   if (window.lucide) lucide.createIcons({ root: menu });
+}
+
+// Redraw an open menu when what it offers changes (a DM route resolved),
+// keeping focus on the same item.
+function refreshAttachMenu() {
+  if (!attachMenuOpen || attachMenuView !== 'main') return;
+  var had = document.activeElement && document.activeElement.id;
+  renderAttachMenu();
+  var again = had ? document.getElementById(had) : null;
+  if (again) again.focus();
 }
 
 function menuItems() {
@@ -6406,6 +6440,7 @@ function mergeDmThread(existing, incoming) {
 function selectDm(name) {
   leavePageFor('dms');
   activeDm = name;
+  dmRoute = null; // unknown until this thread's read answers
   jumpSeq++; // a navigation: pending message jumps must not land after it
   historyExitSeq++; // nor a pending reload of the latest page
   renderHistoryChrome();
@@ -6443,7 +6478,8 @@ function refreshDmThread(name) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (mySeq !== dmFetchSeq || activeDm !== name) return; // superseded
-      dmRoute = { partner: name, remote: data.routesToRemote === true };
+      dmRoute = { partner: name, remote: typeof data.routesToRemote === 'boolean' ? data.routesToRemote : null };
+      refreshAttachMenu();
       // Merge the snapshot with anything that arrived over the socket while
       // the fetch was in flight: union by (conversation, id), then order.
       dmThread = mergeDmThread(dmThread, data.messages || []);
@@ -6463,7 +6499,11 @@ function refreshDmThread(name) {
       }
       renderPendingForActive();
       scrollToBottom();
-    }).catch(function() {});
+    }).catch(function() {
+      if (mySeq !== dmFetchSeq || activeDm !== name) return;
+      dmRoute = { partner: name, remote: null };
+      refreshAttachMenu();
+    });
 }
 
 // Render the channel view from the already-loaded allMessages/agents state.

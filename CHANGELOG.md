@@ -19,6 +19,12 @@ Rami approved the composer menu as suggested (after Orca's attach menu), with Fo
 - **A DM routed into a remote room** (Medium). The composer judged remoteness only for rooms, so in a DM whose partner lives in a remote room it offered attachments the send then refused. `GET /api/dms?with=` now also answers `routesTo` and `routesToRemote` (the same rule `/api/dm/send` uses), and the composer refuses attachments up front in such a DM. The send still decides for itself.
 - **Image order** (Medium). Uploads run side by side and joined the draft as each finished, so a slow first image went out last. Each image now takes its place in the draft when chosen (shown as a placeholder while it uploads), so the message keeps the order they were picked. A browser check delays the first upload and confirms the order.
 
+### Gate round 2 (Codex, CHANGES REQUESTED, one Medium: not in this branch)
+- It read the dependency audit (master 9781b48, landed after the branch was cut) as reverted by this branch. The branch never touched `package.json` or the lockfile; it is rebased onto master and the gate diff is now `master...composer`.
+
+### Gate round 3 (Codex, CHANGES REQUESTED, one Medium, fixed)
+- **A DM before its route is known** (Medium). Between choosing a DM and its thread read answering, the composer treated the DM as local. The route is now cleared on every DM selection and is unknown until the read answers; while unknown (or if the read fails) Files, Images and Paste image are off with a note saying why, and an open menu redraws when the route arrives. A browser check holds the thread read and confirms both states.
+
 ## 2026-09-29: Dependency Audit
 
 The npm audit of master e728334 reported nine advisories (five high, three moderate, one low). Every affected parent already allowed a fixed release, so the fix is a lockfile refresh with no overrides and no major bumps. `npm audit` now reports zero.
