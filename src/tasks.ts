@@ -25,6 +25,16 @@ export function isTaskStatus(v: unknown): v is TaskStatus {
   return typeof v === "string" && (TASK_STATUSES as readonly string[]).includes(v);
 }
 
+/**
+ * Text for a room system line: control characters (a newline above all)
+ * become spaces, so a title, a name or a response can never start a line of
+ * its own that looks like another system message. Applied to every task
+ * line, titles read from older files included.
+ */
+export function oneLine(s: unknown): string {
+  return String(s ?? "").replace(/[\x00-\x1f\x7f]+/g, " ").trim();
+}
+
 /** Not done: open, in progress or in review. */
 export function isActiveStatus(s: TaskStatus): boolean {
   return s !== "done";
@@ -109,7 +119,7 @@ export class TaskStore extends EventEmitter {
     const task: Task = {
       id,
       conversationId: convId,
-      title: opts.title.trim().slice(0, 200),
+      title: oneLine(opts.title).slice(0, 200),
       description: opts.description?.trim().slice(0, 1000),
       creator: opts.creator,
       assignee: opts.assignee,

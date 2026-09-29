@@ -31,7 +31,7 @@ import { ConversationManager, newRegistrationId, isTerminalLess } from "./manage
 import { visibleToViewer, type ChatMessage, type ChatRoom } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
 import { parseCodexHome, parseCodexThread } from "./codex-queue.js";
-import { TaskStore, TASK_STATUSES, isTaskStatus, type Task } from "./tasks.js";
+import { TaskStore, TASK_STATUSES, isTaskStatus, oneLine, type Task } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
 import { EditStore } from "./edits.js";
@@ -1781,9 +1781,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // Post system message to chat
     const room = manager.getRoom(convId);
     if (room) {
-      const assignText = task.assignee ? ` for ${task.assignee}` : "";
+      const assignText = task.assignee ? ` for ${oneLine(task.assignee)}` : "";
       const urgentText = task.priority === "urgent" ? " (urgent)" : "";
-      room.send("system", `[Task #${task.id}${assignText}] ${creator} needs: ${task.title}${urgentText}`);
+      room.send("system", `[Task #${task.id}${assignText}] ${oneLine(creator)} needs: ${oneLine(task.title)}${urgentText}`);
     }
 
     res.json(task);
@@ -1828,17 +1828,17 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const room = manager.getRoom(convId);
     if (status === "done" && response) {
       if (room) {
-        room.send("system", `[Task #${task.id} done] ${respondedBy ?? "someone"} responded: ${response.slice(0, 200)}`);
+        room.send("system", `[Task #${task.id} done] ${oneLine(respondedBy ?? "someone")} responded: ${oneLine(response).slice(0, 200)}`);
       }
     } else if (announce && room && status !== undefined && status !== prevStatus) {
       // A move on the board: the room hears it, as agents read the room.
       const label = status === "in_progress" ? "in progress" : status === "review" ? "in review" : status;
-      room.send("system", `[Task #${task.id} ${label}] ${task.title}${mover ? ` (moved by ${mover})` : ""}`);
+      room.send("system", `[Task #${task.id} ${label}] ${oneLine(task.title)}${mover ? ` (moved by ${oneLine(mover)})` : ""}`);
     }
     if (announce && room && assignee !== undefined && (task.assignee ?? null) !== (prevAssignee ?? null)) {
       room.send("system", task.assignee
-        ? `[Task #${task.id} for ${task.assignee}] ${task.title}`
-        : `[Task #${task.id} unassigned] ${task.title}`);
+        ? `[Task #${task.id} for ${oneLine(task.assignee)}] ${oneLine(task.title)}`
+        : `[Task #${task.id} unassigned] ${oneLine(task.title)}`);
     }
 
     res.json(task);

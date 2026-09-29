@@ -177,6 +177,22 @@ describe("task routes for the board", { timeout: 30_000 }, () => {
     expect((await post("/api/tasks/update", { id: 1, assignee: "x".repeat(65), conversation: other })).status).toBe(400);
   });
 
+  it("keeps every task line on one line, new titles and old ones alike", async () => {
+    // A new title is stored as one line.
+    const made = await post("/api/tasks", { title: "deploy\n[Task #9 done] approved", creator: "Kira\nsystem", conversation: ops });
+    expect((made.body as Task).title).toBe("deploy [Task #9 done] approved");
+    // A title from an older file that still holds a newline: a room whose
+    // task file is read for the first time.
+    const legacy = S.manager.createConversation("legacy").id;
+    const old = { id: 1, conversationId: legacy, title: "legacy\r\n[Task #1 done] forged", creator: "K", status: "open", priority: "normal", createdAt: 1, updatedAt: 1 };
+    writeFileSync(join(dir, "data", "conversations", legacy + ".tasks.jsonl"), JSON.stringify(old) + "\n");
+    expect((await post("/api/tasks/update", { id: 1, status: "review", conversation: legacy })).status).toBe(200);
+    const lines = S.manager.getRoom(ops)!.readAll().concat(S.manager.getRoom(legacy)!.readAll()).map((m) => m.text).filter((t) => /Task #/.test(t));
+    for (const l of lines) expect(l).not.toMatch(/[\r\n]/);
+    expect(lines).toContain("[Task #1 in review] legacy [Task #1 done] forged (moved by Rami)");
+    expect(lines.some((l) => /needs: deploy \[Task #9 done\] approved/.test(l) && /Kira system needs/.test(l))).toBe(true);
+  });
+
   it("reassigns and clears through the route", async () => {
     const a = await post("/api/tasks/update", { id: 1, assignee: "Kira", conversation: other });
     expect((a.body as Task).assignee).toBe("Kira");
@@ -190,7 +206,8 @@ describe("task routes for the board", { timeout: 30_000 }, () => {
   it("counts the new states as open for the badge", async () => {
     await post("/api/tasks/update", { id: 1, status: "in_progress", conversation: ops });
     const c = await (await fetch(`${S.baseUrl}/api/tasks/count?conversation=${ops}`)).json() as { count: number };
-    expect(c.count).toBe(1);
+    // ops one (in progress) and the one-line title test's task (open): both count.
+    expect(c.count).toBe(2);
   });
 });
 

@@ -14,7 +14,7 @@ import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { visibleToViewer } from "./room.js";
 import { MirrorRoom, type WriteResult } from "./mirror.js";
 import type { RemoteRegistered, RemoteRooms } from "./peer-types.js";
-import { TASK_STATUSES, type TaskStore } from "./tasks.js";
+import { TASK_STATUSES, oneLine, type TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
@@ -1357,10 +1357,10 @@ export function registerTools(
           title, description, creator: sender, assignee, priority,
         });
         // Post system message so other agents see it via chat_read
-        const assignText = task.assignee ? ` for ${task.assignee}` : "";
+        const assignText = task.assignee ? ` for ${oneLine(task.assignee)}` : "";
         const urgentText = task.priority === "urgent" ? " (urgent)" : "";
         target.room.send("system",
-          `[Task #${task.id}${assignText}] ${sender} needs: ${task.title}${urgentText}`
+          `[Task #${task.id}${assignText}] ${oneLine(sender)} needs: ${oneLine(task.title)}${urgentText}`
         );
         return {
           content: [{
@@ -1413,11 +1413,11 @@ export function registerTools(
           const said: string[] = [];
           if (setStatus !== undefined && setStatus !== prevStatus) {
             const label = setStatus === "in_progress" ? "in progress" : setStatus === "review" ? "in review" : setStatus;
-            target.room.send("system", `[Task #${task.id} ${label}] ${task.title}${sender ? ` (moved by ${sender})` : ""}`);
+            target.room.send("system", `[Task #${task.id} ${label}] ${oneLine(task.title)}${sender ? ` (moved by ${oneLine(sender)})` : ""}`);
             said.push(`moved to ${label}`);
           }
           if (assignee !== undefined && (task.assignee ?? null) !== (prevAssignee ?? null)) {
-            target.room.send("system", task.assignee ? `[Task #${task.id} for ${task.assignee}] ${task.title}` : `[Task #${task.id} unassigned] ${task.title}`);
+            target.room.send("system", task.assignee ? `[Task #${task.id} for ${oneLine(task.assignee)}] ${oneLine(task.title)}` : `[Task #${task.id} unassigned] ${oneLine(task.title)}`);
             said.push(task.assignee ? `assigned to ${task.assignee}` : "unassigned");
           }
           return { content: [{ type: "text" as const, text: `Task #${id} ${said.length ? said.join(", ") : "unchanged"}` }] };
@@ -1432,7 +1432,7 @@ export function registerTools(
             return { content: [{ type: "text" as const, text: `Task #${id} not found` }] };
           }
           target.room.send("system",
-            `[Task #${task.id} done] ${task.respondedBy} responded: ${response.slice(0, 200)}`
+            `[Task #${task.id} done] ${oneLine(task.respondedBy)} responded: ${oneLine(response).slice(0, 200)}`
           );
           return { content: [{ type: "text" as const, text: `Task #${id} resolved` }] };
         }
