@@ -119,7 +119,11 @@ export interface ChatMessage {
   sender: string;
   text: string;
   timestamp: number;
+  /** The first image (the only one on a single-image message). */
   image?: string;
+  /** Every image, in order, present only when there are two or more; its
+   *  first entry equals `image` (src/attachments.ts has the schema). */
+  images?: string[];
   replyTo?: number;
   tag?: string;
   pinned?: boolean;
@@ -708,14 +712,16 @@ export class ChatRoom extends EventEmitter {
     );
   }
 
-  send(sender: string, text: string, opts?: { image?: string; replyTo?: number; to?: string[]; choices?: string[]; askFor?: string }): ChatMessage {
+  send(sender: string, text: string, opts?: { image?: string; images?: string[]; replyTo?: number; to?: string[]; choices?: string[]; askFor?: string }): ChatMessage {
     const msg: ChatMessage = {
       id: this.nextId++,
       sender,
       text,
       timestamp: Date.now(),
     };
-    if (opts?.image) msg.image = opts.image;
+    const imgs = opts?.images && opts.images.length > 0 ? opts.images : opts?.image ? [opts.image] : [];
+    if (imgs.length > 0) msg.image = imgs[0];
+    if (imgs.length > 1) msg.images = imgs.slice();
     if (opts?.replyTo) msg.replyTo = opts.replyTo;
     if (opts?.to && opts.to.length > 0) msg.to = opts.to;
     if (opts?.choices && opts.choices.length > 0) msg.choices = opts.choices;

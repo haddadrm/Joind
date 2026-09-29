@@ -6,12 +6,12 @@
   <title>Joind</title>
   <!-- The chosen theme before first paint (Settings or the user menu store it). -->
   <script>try { if (localStorage.getItem('joind-theme') === 'light') document.documentElement.setAttribute('data-theme', 'light'); } catch (e) { /* storage unavailable: dark */ }</script>
-  <link rel="stylesheet" href="style.css?v=29">
+  <link rel="stylesheet" href="style.css?v=30">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <!-- Vendored and pinned (no CDN): marked renders Markdown, DOMPurify sanitizes it (public/sanitize.js). -->
   <script src="vendor/marked-17.0.5.umd.js"></script>
   <script src="vendor/purify-3.4.16.min.js"></script>
-  <script src="sanitize.js?v=29"></script>
+  <script src="sanitize.js?v=30"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
@@ -239,10 +239,10 @@
             <button class="reply-preview-cancel" onclick="clearReply()" type="button" aria-label="Cancel reply"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
           </div>
 
-          <div class="image-preview hidden" id="image-preview" role="status" aria-live="polite">
-            <img id="image-preview-thumb" class="image-preview-thumb" src="" alt="Attached image preview" />
-            <span class="image-preview-label">Image attached</span>
-            <button class="image-preview-cancel" onclick="clearImagePreview()" type="button" aria-label="Remove attached image"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
+          <div class="image-preview hidden" id="image-preview">
+            <div class="image-strip" id="image-strip"></div>
+            <span class="image-preview-label" id="image-preview-label" role="status" aria-live="polite"></span>
+            <button class="image-preview-cancel" onclick="clearImagePreview()" type="button" aria-label="Remove all attached images" title="Remove all"><i data-lucide="x" width="16" height="16" aria-hidden="true"></i></button>
           </div>
 
           <div class="typing-bar" id="typing-bar" aria-live="polite"></div>
@@ -288,7 +288,26 @@
                 <button type="button" class="btn btn-sm btn-primary" id="decide-post">Post</button>
               </div>
             </div>
+            <div class="attach-menu" id="attach-menu" hidden></div>
+            <div class="decide-popover url-popover" id="url-popover" role="dialog" aria-label="Insert a link card" hidden>
+              <div class="decide-row">
+                <label class="decide-label" for="url-input">URL</label>
+                <input type="text" id="url-input" inputmode="url" placeholder="https://example.com/page" autocomplete="off" />
+              </div>
+              <div class="decide-row">
+                <label class="decide-label" for="url-title">Title</label>
+                <input type="text" id="url-title" placeholder="Optional" maxlength="200" autocomplete="off" />
+              </div>
+              <div class="url-error" id="url-error" role="alert" hidden></div>
+              <div class="decide-actions">
+                <span class="url-note">The card shows the title, else the host and path. Nothing is fetched.</span>
+                <span class="decide-spacer"></span>
+                <button type="button" class="btn btn-sm" id="url-cancel">Cancel</button>
+                <button type="button" class="btn btn-sm btn-primary" id="url-insert">Insert</button>
+              </div>
+            </div>
             <div class="link-hint" id="link-hint" role="status" aria-live="polite" hidden></div>
+            <div class="composer-note" id="composer-note" role="status" aria-live="polite" hidden></div>
             <div class="composer-error" id="composer-error" role="alert" hidden></div>
             <div class="input-row composer">
               <div class="input-wrapper">
@@ -297,9 +316,8 @@
                 <textarea id="message-input" placeholder="Message" rows="1" spellcheck="false"></textarea>
               </div>
               <div class="composer-bar">
-                <button class="cbtn" id="attach-btn" onclick="openAttachPicker()" type="button" title="Attach an image" aria-label="Attach an image"><i data-lucide="plus" width="16" height="16" aria-hidden="true"></i></button>
-                <input type="file" id="attach-input" accept="image/*" hidden />
-                <button class="cbtn btn-decide" id="decide-btn" onclick="toggleDecidePopover()" type="button" title="Post a decision card" aria-label="Post a decision card" aria-expanded="false" aria-controls="decide-popover"><i data-lucide="scale" width="16" height="16" aria-hidden="true"></i></button>
+                <button class="cbtn" id="attach-btn" onclick="openAttachPicker()" type="button" title="Attach, link, snippet or decision" aria-label="Attach, link, snippet or decision" aria-haspopup="menu" aria-expanded="false" aria-controls="attach-menu"><i data-lucide="plus" width="16" height="16" aria-hidden="true"></i></button>
+                <input type="file" id="attach-input" multiple hidden />
                 <button class="cbtn" id="new-task-btn" onclick="openNewTask()" type="button" title="New task" aria-label="New task"><i data-lucide="kanban" width="16" height="16" aria-hidden="true"></i></button>
                 <span class="composer-hint input-hint">Enter to send, Shift+Enter for a new line, @name to mention, @all for everyone, /decide for a poll</span>
                 <button class="btn btn-send" id="send-btn" onclick="sendMessage()" type="button" aria-label="Send message"><i data-lucide="send" width="16" height="16" aria-hidden="true"></i></button>
@@ -324,8 +342,8 @@
     </div>
   </div>
 
-  <script src="ui-helpers.js?v=29"></script>
-  <script src="app.js?v=29"></script>
+  <script src="ui-helpers.js?v=30"></script>
+  <script src="app.js?v=30"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();

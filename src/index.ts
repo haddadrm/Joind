@@ -19,6 +19,8 @@ const execFileAsync = promisify(execFile);
 import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { ensureDir } from "./persist.js";
+import { normalizeImages, messageImages } from "./attachments.js";
+import { SnippetStore, SnippetError } from "./snippets.js";
 import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { NotificationStore, TaskTracker, classifyMessage, isNotifiable, type Classified } from "./notifications.js";
 import { initFileLog } from "./log.js";
@@ -759,9 +761,50 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     res.json({ ok: true, name: valid });
   });
 
+  // --- Prompt snippets (composer plus-menu): per viewer, web token only ---
+  // The owner is always the server-side registered viewer, never a name the
+  // caller supplies; with nobody registered there is no owner (409).
+  const snippetStore = new SnippetStore(DATA_DIR);
+  function snippetOwner(req: express.Request, res: express.Response): string | null {
+    if (!requireWebToken(req, res)) return null;
+    const owner = webViewer();
+    if (!owner) { res.status(409).json({ error: "no viewer registered" }); return null; }
+    return owner;
+  }
+  function snippetFail(res: express.Response, err: unknown): void {
+    if (err instanceof SnippetError) { res.status(err.status).json({ error: err.message }); return; }
+    res.status(500).json({ error: "could not save snippets" });
+  }
+  function snippetBody(req: express.Request): { title?: unknown; text?: unknown } {
+    const b: unknown = req.body;
+    if (!b || typeof b !== "object") return {};
+    const r = b as Record<string, unknown>;
+    return { title: r.title, text: r.text };
+  }
+  app.get("/api/snippets", (req, res) => {
+    const owner = snippetOwner(req, res);
+    if (!owner) return;
+    res.json({ snippets: snippetStore.list(owner) });
+  });
+  app.post("/api/snippets", express.json({ limit: "64kb" }), (req, res) => {
+    const owner = snippetOwner(req, res);
+    if (!owner) return;
+    try { res.json({ snippet: snippetStore.create(owner, snippetBody(req)) }); } catch (err) { snippetFail(res, err); }
+  });
+  app.put("/api/snippets/:id", express.json({ limit: "64kb" }), (req, res) => {
+    const owner = snippetOwner(req, res);
+    if (!owner) return;
+    try { res.json({ snippet: snippetStore.update(owner, String(req.params.id), snippetBody(req)) }); } catch (err) { snippetFail(res, err); }
+  });
+  app.delete("/api/snippets/:id", express.json(), (req, res) => {
+    const owner = snippetOwner(req, res);
+    if (!owner) return;
+    try { snippetStore.remove(owner, String(req.params.id)); res.json({ ok: true }); } catch (err) { snippetFail(res, err); }
+  });
+
   app.post("/api/send", express.json(), async (req, res) => {
-    const { sender, text, image, replyTo, choices, to, token, askFor, conversation } = req.body as {
-      sender?: string; text?: string; image?: string; replyTo?: number; choices?: string[]; to?: string[]; token?: string; askFor?: string; conversation?: string;
+    const { sender, text, image, images, replyTo, choices, to, token, askFor, conversation } = req.body as {
+      sender?: string; text?: string; image?: unknown; images?: unknown; replyTo?: number; choices?: string[]; to?: string[]; token?: string; askFor?: string; conversation?: string;
     };
     // The token first: without it, nothing about the rooms is revealed.
     if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
@@ -776,6 +819,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.status(400).json({ error: "to must be an array of strings" });
       return;
     }
+    const pics = normalizeImages(image, images);
+    if (!pics.ok) { res.status(400).json({ error: pics.error }); return; }
     if (room instanceof MirrorRoom) {
       // The human writes into a remote room as the registered viewer only;
       // the home server numbers the message and decides its mentions. While
@@ -784,7 +829,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       if (!viewer || sender !== viewer) { res.status(403).json({ error: "In a remote room you can send only as the registered viewer" }); return; }
       // Not carried across a link yet: refused before anything is queued or
       // reported sent (gate round 7, finding 2).
-      if (image) { res.status(400).json({ error: "Attachments are not supported in remote rooms" }); return; }
+      if (pics.images.length > 0) { res.status(400).json({ error: "Attachments are not supported in remote rooms" }); return; }
       await linkRegistry.ensureHuman(room.id, viewer);
       try {
         const r = await room.writeThrough(viewer, text, {
@@ -810,7 +855,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (activeId && sender !== "system" && !targeted) manager.autoName(activeId, text);
 
     const msg = room.send(sender, text, {
-      image, replyTo, choices, to,
+      images: pics.images, replyTo, choices, to,
       askFor: typeof askFor === "string" ? askFor : undefined,
     });
     res.json({ id: msg.id, sender: msg.sender, text: msg.text, choices: msg.choices, ask: msg.ask });
@@ -923,7 +968,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
         if (orig) md += `> *replying to ${orig.sender}*: ${orig.text.slice(0, 80)}${orig.text.length > 80 ? "…" : ""}\n\n`;
       }
       md += `**${msg.sender}** (${time}):\n${msg.text}\n`;
-      if (msg.image) md += `\n![image](${msg.image})\n`;
+      for (const u of messageImages(msg)) md += `\n![image](${u})\n`;
       md += `\n`;
     }
 
@@ -1227,8 +1272,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // actually reads (their bound conversation, else the pair's last DM room,
   // else the active room). Returns where it landed.
   app.post("/api/dm/send", express.json(), async (req, res) => {
-    const { to, text, token, image, replyTo, replyConversationId } = (req.body ?? {}) as {
-      to?: string; text?: string; token?: string; image?: string; replyTo?: number; replyConversationId?: string;
+    const { to, text, token, image, images, replyTo, replyConversationId } = (req.body ?? {}) as {
+      to?: string; text?: string; token?: string; image?: unknown; images?: unknown; replyTo?: number; replyConversationId?: string;
     };
     if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     const viewer = webViewer();
@@ -1237,6 +1282,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.status(400).json({ error: "to and text required" });
       return;
     }
+    const pics = normalizeImages(image, images);
+    if (!pics.ok) { res.status(400).json({ error: pics.error }); return; }
     const convId = resolveDmTargetConversation(manager, viewer, to);
     const room = convId ? manager.getRoom(convId) : undefined;
     if (!convId || !room) { res.status(400).json({ error: "No conversation available for this DM" }); return; }
@@ -1247,7 +1294,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       typeof replyTo === "number" && replyConversationId === convId && room.getMessageById(replyTo)
         ? replyTo
         : undefined;
-    if (room instanceof MirrorRoom && typeof image === "string" && image) {
+    if (room instanceof MirrorRoom && pics.images.length > 0) {
       // Not carried across a link yet (gate round 7, finding 2).
       res.status(400).json({ error: "Attachments are not supported in remote rooms" }); return;
     }
@@ -1271,7 +1318,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     }
     const msg = room.send(viewer, text, {
       to: [to],
-      image: typeof image === "string" ? image : undefined,
+      images: pics.images,
       replyTo: safeReplyTo,
     });
     res.json({ id: msg.id, conversationId: convId, sender: msg.sender, to: msg.to, text: msg.text, timestamp: msg.timestamp, replyTo: msg.replyTo });

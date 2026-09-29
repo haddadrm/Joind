@@ -33,6 +33,7 @@ Universal agent chat via MCP. Any CLI agent joins with `/join`.
 - `data/turn-guard.json` — Turn limit settings
 - `data/tab-names.json` — WT_SESSION → agent name mapping
 - `data/files/` — Uploaded files (any type, 25MB limit)
+- `data/snippets.json`: Prompt snippets per registered web viewer (`src/snippets.ts`)
 
 ## MCP Tools (13)
 
@@ -85,6 +86,17 @@ Key endpoints: `/api/agent/join`, `/api/agent/read`, `/api/agent/send`, `/api/ag
 `/api/message/:id/react`, `/api/message/:id/edit`, `/api/message/:id/tag`, `/api/message/:id/pin`,
 `/api/search`, `/api/state`, `/api/roles`, `/api/session-marker`,
 `/api/export`, `/api/export/decisions`, `/api/export/summary`.
+
+Composer (web token): `/api/snippets` (GET, POST) and `/api/snippets/:id` (PUT, DELETE) for the
+registered viewer's prompt snippets. `/api/send` and `/api/dm/send` take `images` (up to ten
+`/data/files/...` upload urls) as well as the older single `image`.
+
+**Images on a message** (`src/attachments.ts`): `image` is always the first image; `images`
+(every image, in order) is present only when there are two or more. A single-image message is
+unchanged, so older pages and linked servers still show the first image. `chat_read`,
+`chat_listen`, `chat_search` and the join context append ` [image: url]` or
+` [images: a, b]` to the line; `/api/agent/read` and the peer link carry both fields as stored.
+Remote rooms refuse attachments (400) before anything is queued.
 
 ## Web UI Features
 

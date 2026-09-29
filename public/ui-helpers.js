@@ -230,7 +230,113 @@
       .map(function(x) { return x.item; });
   }
 
+  // --- Composer plus-menu (29 Sep 2026) ---
+
+  // A link card's url: http or https only, parsed and re-serialised, with
+  // no credentials. Anything else (javascript:, data:, a bare word) is null.
+  function linkCardUrl(raw) {
+    var s = String(raw == null ? '' : raw).trim();
+    if (!s || s.length > 2048 || /[\u0000- \u007f]/.test(s)) return null;
+    if (!/^https?:\/\//i.test(s)) return null;
+    var u;
+    try { u = new URL(s); } catch (e) { return null; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (!u.hostname || u.username || u.password) return null;
+    return u.href;
+  }
+
+  // What a card shows without a title: host and path (no query, no
+  // fragment, no trailing slash on a bare host).
+  function linkCardLabel(href) {
+    var u;
+    try { u = new URL(href); } catch (e) { return String(href || ''); }
+    var path = u.pathname === '/' ? '' : u.pathname;
+    try { path = decodeURI(path); } catch (e) { /* keep it encoded */ }
+    return u.host + path;
+  }
+
+  // Markdown characters escaped so a title or a file name stays literal
+  // link text. Newlines become spaces.
+  function escapeLinkText(t) {
+    return String(t == null ? '' : t).replace(/[\r\n\t]+/g, ' ').replace(/[\\`*_\[\]<>~|#!]/g, '\\$&').trim();
+  }
+
+  // The Markdown a link card is written as: a plain link whose title is
+  // "card", so any reader (an agent, an older page, a linked server) sees
+  // an ordinary link and this page draws it as a card. Null for a url the
+  // card refuses.
+  function linkCardMarkdown(raw, title) {
+    var href = linkCardUrl(raw);
+    if (!href) return null;
+    var t = String(title == null ? '' : title).replace(/\s+/g, ' ').trim().slice(0, 200);
+    var text = escapeLinkText(t || href);
+    return '[' + text + '](<' + href.replace(/[<>\s]/g, encodeURIComponent) + '> "card")';
+  }
+
+  // A file upload as the Markdown link chat_upload writes: a paperclip,
+  // the escaped name, the upload url.
+  function fileLinkMarkdown(name, url) {
+    var n = escapeLinkText(String(name || 'file').slice(0, 120)) || 'file';
+    return '📎 [' + n + '](' + url + ')';
+  }
+
+  // Every image a message carries, whichever schema wrote it (`images` for
+  // two or more, else `image`), keeping only this server's upload urls.
+  var UPLOAD_URL = /^\/data\/files\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+  function messageImageList(msg) {
+    if (!msg) return [];
+    var list = Array.isArray(msg.images) && msg.images.length > 0 ? msg.images : (msg.image ? [msg.image] : []);
+    var out = [];
+    list.forEach(function(u) {
+      if (typeof u === 'string' && UPLOAD_URL.test(u) && u.indexOf('..') < 0 && out.indexOf(u) < 0) out.push(u);
+    });
+    return out;
+  }
+
+  // Snippets matching a filter: every word must appear in the title or the
+  // text (case-insensitive); title matches first, then the stored order.
+  function filterSnippets(list, q) {
+    var words = String(q == null ? '' : q).toLowerCase().split(/\s+/).filter(Boolean);
+    var items = (Array.isArray(list) ? list : []).map(function(s, i) { return { s: s, i: i }; });
+    if (words.length === 0) return items.map(function(x) { return x.s; });
+    return items.filter(function(x) {
+      var hay = (String(x.s.title || '') + '\n' + String(x.s.text || '')).toLowerCase();
+      return words.every(function(w) { return hay.indexOf(w) >= 0; });
+    }).map(function(x) {
+      var t = String(x.s.title || '').toLowerCase();
+      return { s: x.s, i: x.i, t: words.every(function(w) { return t.indexOf(w) >= 0; }) ? 0 : 1 };
+    }).sort(function(a, b) { return a.t - b.t || a.i - b.i; }).map(function(x) { return x.s; });
+  }
+
+  // Text inserted into a value at [start, end): the new value and caret.
+  // `ownLine` puts the text on a line of its own.
+  function insertText(value, start, end, text, ownLine) {
+    var v = String(value == null ? '' : value);
+    var a = Math.max(0, Math.min(v.length, start == null ? v.length : start));
+    var b = Math.max(a, Math.min(v.length, end == null ? a : end));
+    var t = String(text == null ? '' : text);
+    if (ownLine) {
+      if (a > 0 && v.charAt(a - 1) !== '\n') t = '\n' + t;
+      if (b < v.length && v.charAt(b) !== '\n') t = t + '\n';
+    }
+    return { value: v.slice(0, a) + t + v.slice(b), caret: a + t.length };
+  }
+
+  // Which images of a batch still fit under the per-message cap.
+  function imagesThatFit(have, adding, max) {
+    var room = Math.max(0, max - have);
+    return { take: Math.min(room, adding), refused: Math.max(0, adding - room) };
+  }
+
   return {
+    linkCardUrl: linkCardUrl,
+    linkCardLabel: linkCardLabel,
+    linkCardMarkdown: linkCardMarkdown,
+    fileLinkMarkdown: fileLinkMarkdown,
+    messageImageList: messageImageList,
+    filterSnippets: filterSnippets,
+    insertText: insertText,
+    imagesThatFit: imagesThatFit,
     paletteScore: paletteScore,
     paletteRank: paletteRank,
     boardColumns: boardColumns,

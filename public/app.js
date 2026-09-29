@@ -1495,14 +1495,8 @@ function appendMessage(msg, scroll) {
     // A message that names you is marked as in A (an accent bar and tint).
     if (mentionsMe(msg)) el.classList.add('mentions-me');
 
-    // Image display
-    if (msg.image) {
-      var img = document.createElement('img');
-      img.className = 'msg-image';
-      img.src = msg.image;
-      img.addEventListener('click', function() { openLightbox(msg.image); });
-      tw.appendChild(img);
-    }
+    // Images: every one the message carries (`images`, else `image`).
+    renderMessageImages(tw, msg, el.dataset.conv);
 
     // Edited badge
     if (msg.edited) {
@@ -1682,6 +1676,7 @@ function renderContent(parent, text, conv) {
     text = text.replace(/\\n/g, '\n');
     parent.innerHTML = window.joindSanitizeHtml(marked.parse(text));
     decorateMentions(parent);
+    decorateLinkCards(parent);
   } else {
     parent.textContent = '';
     renderTextWithMentions(parent, text);
@@ -1803,30 +1798,224 @@ function jumpToBottom() {
   updateNewMsgsPill();
 }
 
-// --- Image upload ---
-var pendingImage = null; // { url } — image attached to current draft
+// --- Composer attachments: several images, files, link cards, snippets ---
+// Images wait in the composer as removable thumbnails and go out in one
+// message (`images`, the first also as `image`: src/attachments.ts). Files
+// are uploaded and written into the text as a link, as chat_upload does.
+// Remote rooms refuse attachments on the server; the composer says so first.
+var MAX_COMPOSER_IMAGES = 10;
+var MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+var pendingImages = []; // [{ url, name }] attached to the current draft
+var imageUploadsInFlight = 0;
 
-function uploadImage(file) {
-  fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': file.type }, body: file })
-    .then(function(r) { return r.json(); })
+function composerIsRemote() {
+  return !activeDm && !!activeConversation && isRemoteConversation(activeConversation.id);
+}
+
+function attachmentsRefusedHere() {
+  if (!composerIsRemote()) return false;
+  showComposerError('Attachments are not supported in remote rooms. Only text is carried across a link.');
+  return true;
+}
+
+function showComposerNote(text) {
+  var el = document.getElementById('composer-note');
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+function uploadFile(file) {
+  return fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file })
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
     .then(function(data) {
-      pendingImage = { url: data.url };
-      showImagePreview(data.url);
+      if (!data || typeof data.url !== 'string') throw new Error('no url');
+      return data.url;
     });
 }
 
-function showImagePreview(url) {
+// Kept for the paste and drop handlers: one image joins the draft.
+function uploadImage(file) { addImageFiles([file]); }
+
+function addImageFiles(files) {
+  var list = Array.prototype.slice.call(files || []).filter(function(f) { return f && /^image\//.test(f.type); });
+  if (list.length === 0) return;
+  if (attachmentsRefusedHere()) return;
+  showComposerError('');
+  var fit = window.joindUi.imagesThatFit(pendingImages.length + imageUploadsInFlight, list.length, MAX_COMPOSER_IMAGES);
+  var notes = [];
+  if (fit.refused > 0) notes.push('At most ' + MAX_COMPOSER_IMAGES + ' images per message; ' + fit.refused + ' not added.');
+  list.slice(0, fit.take).forEach(function(file) {
+    if (file.size > MAX_UPLOAD_BYTES) { notes.push('"' + (file.name || 'image') + '" is over 25 MB.'); return; }
+    imageUploadsInFlight++;
+    renderImageStrip();
+    uploadFile(file).then(function(url) {
+      imageUploadsInFlight--;
+      pendingImages.push({ url: url, name: file.name || 'image' });
+      renderImageStrip();
+    }).catch(function() {
+      imageUploadsInFlight--;
+      renderImageStrip();
+      showComposerError('Could not upload "' + (file.name || 'image') + '".');
+    });
+  });
+  if (notes.length) showComposerError(notes.join(' '));
+}
+
+function renderImageStrip() {
   var bar = document.getElementById('image-preview');
-  var thumb = document.getElementById('image-preview-thumb');
-  thumb.src = url;
-  bar.classList.remove('hidden');
-  document.getElementById('message-input').focus();
+  var strip = document.getElementById('image-strip');
+  var label = document.getElementById('image-preview-label');
+  if (!bar || !strip) return;
+  strip.textContent = '';
+  pendingImages.forEach(function(img, i) {
+    var cell = document.createElement('div');
+    cell.className = 'image-thumb';
+    var pic = document.createElement('img');
+    pic.className = 'image-preview-thumb';
+    pic.src = img.url;
+    pic.alt = 'Attached image ' + (i + 1) + ': ' + img.name;
+    var rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'image-thumb-remove';
+    rm.setAttribute('aria-label', 'Remove image ' + (i + 1) + ' (' + img.name + ')');
+    rm.title = 'Remove';
+    rm.textContent = '×';
+    rm.addEventListener('click', function() {
+      var at = pendingImages.indexOf(img);
+      if (at >= 0) pendingImages.splice(at, 1);
+      renderImageStrip();
+      var rest = strip.querySelectorAll('.image-thumb-remove');
+      if (rest.length) rest[Math.min(at, rest.length - 1)].focus();
+      else document.getElementById('message-input').focus();
+    });
+    cell.appendChild(pic);
+    cell.appendChild(rm);
+    strip.appendChild(cell);
+  });
+  for (var k = 0; k < imageUploadsInFlight; k++) {
+    var wait = document.createElement('div');
+    wait.className = 'image-thumb uploading';
+    wait.setAttribute('aria-hidden', 'true');
+    strip.appendChild(wait);
+  }
+  var n = pendingImages.length;
+  label.textContent = imageUploadsInFlight > 0
+    ? 'Uploading ' + imageUploadsInFlight + (imageUploadsInFlight === 1 ? ' image' : ' images') + '...'
+    : n + (n === 1 ? ' image attached' : ' images attached');
+  bar.classList.toggle('hidden', n === 0 && imageUploadsInFlight === 0);
+  updateSendBtn();
 }
 
 function clearImagePreview() {
-  pendingImage = null;
-  document.getElementById('image-preview').classList.add('hidden');
-  document.getElementById('image-preview-thumb').src = '';
+  pendingImages = [];
+  renderImageStrip();
+}
+
+// Files: uploaded, then written into the draft as a link at the cursor.
+function addFiles(files) {
+  var list = Array.prototype.slice.call(files || []);
+  if (list.length === 0) return;
+  if (attachmentsRefusedHere()) return;
+  showComposerError('');
+  list.forEach(function(file) {
+    if (file.size > MAX_UPLOAD_BYTES) { showComposerError('"' + (file.name || 'file') + '" is over 25 MB.'); return; }
+    uploadFile(file).then(function(url) {
+      insertIntoComposer(window.joindUi.fileLinkMarkdown(file.name, url), true);
+    }).catch(function() {
+      showComposerError('Could not upload "' + (file.name || 'file') + '".');
+    });
+  });
+}
+
+// Plain text into the textarea at the cursor (never as HTML).
+function insertIntoComposer(text, ownLine) {
+  var input = document.getElementById('message-input');
+  var r = window.joindUi.insertText(input.value, input.selectionStart, input.selectionEnd, text, ownLine);
+  input.value = r.value;
+  input.focus();
+  input.setSelectionRange(r.caret, r.caret);
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  updateSendBtn();
+  syncHighlight();
+}
+
+function pickFiles(imagesOnly) {
+  if (attachmentsRefusedHere()) return;
+  var input = document.getElementById('attach-input');
+  if (!input) return;
+  input.value = '';
+  input.accept = imagesOnly ? 'image/*' : '';
+  input.onchange = function() {
+    var files = Array.prototype.slice.call(input.files || []);
+    if (imagesOnly) { addImageFiles(files); return; }
+    // Images picked through Files still join the draft as images.
+    addImageFiles(files.filter(function(f) { return /^image\//.test(f.type); }));
+    addFiles(files.filter(function(f) { return !/^image\//.test(f.type); }));
+  };
+  input.click();
+}
+
+// Paste image from the menu: the async clipboard where the browser allows
+// it, else a note to paste into the box (the paste handler takes it there).
+function pasteImageFromClipboard() {
+  if (attachmentsRefusedHere()) return;
+  var input = document.getElementById('message-input');
+  var fallback = function() {
+    input.focus();
+    showComposerNote('Press Ctrl+V (Cmd+V on a Mac) in the message box to paste an image.');
+  };
+  if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') { fallback(); return; }
+  navigator.clipboard.read().then(function(items) {
+    var blobs = [];
+    var reads = [];
+    items.forEach(function(item) {
+      var type = (item.types || []).find(function(t) { return /^image\//.test(t); });
+      if (type) reads.push(item.getType(type).then(function(b) { blobs.push(new File([b], 'pasted.' + type.split('/')[1], { type: type })); }));
+    });
+    return Promise.all(reads).then(function() {
+      if (blobs.length === 0) { showComposerNote('No image on the clipboard.'); input.focus(); return; }
+      showComposerNote('');
+      addImageFiles(blobs);
+      input.focus();
+    });
+  }).catch(fallback);
+}
+
+// A message's images as a grid of thumbnails, each opening the viewer. In
+// a remote room the files live on the home server, not here, so a line
+// says so instead of loading a same-named file from this server.
+function renderMessageImages(parent, msg, conv) {
+  var list = window.joindUi ? window.joindUi.messageImageList(msg) : [];
+  if (list.length === 0) return;
+  if (conv && isRemoteConversation(conv)) {
+    var note = document.createElement('div');
+    note.className = 'msg-images-remote';
+    note.textContent = (list.length === 1 ? '1 image' : list.length + ' images') + ' on ' + remoteServerOf(conv) + ' (not shown here)';
+    parent.appendChild(note);
+    return;
+  }
+  var grid = document.createElement('div');
+  grid.className = 'msg-images' + (list.length > 1 ? ' multi' : '');
+  list.forEach(function(src, i) {
+    var img = document.createElement('img');
+    img.className = 'msg-image';
+    img.src = src;
+    img.loading = 'lazy';
+    img.alt = list.length > 1 ? 'Image ' + (i + 1) + ' of ' + list.length : 'Image';
+    img.tabIndex = 0;
+    img.setAttribute('role', 'button');
+    img.addEventListener('click', function() { openLightbox(src); });
+    img.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openLightbox(src); }
+    });
+    grid.appendChild(img);
+  });
+  parent.appendChild(grid);
 }
 
 function openLightbox(src) {
@@ -2132,7 +2321,8 @@ function sendMessage() {
   var input = document.getElementById('message-input');
   var sender = document.getElementById('sender-name');
   var text = input.value.trim();
-  if (!text && !pendingImage) return;
+  if (!text && pendingImages.length === 0) return;
+  if (imageUploadsInFlight > 0) { showComposerError('Wait for the images to finish uploading.'); return; }
   if (historyView) exitHistoryView();
 
   // /decide slash command: "/decide Question? | optA | optB | optC"
@@ -2148,8 +2338,8 @@ function sendMessage() {
   // conversation the recipient actually reads (their bound room), not
   // whatever channel happens to be behind this thread.
   if (activeDm) {
-    var dmPayload = { to: activeDm, text: text || '[image]', token: webToken() };
-    if (pendingImage) dmPayload.image = pendingImage.url;
+    var dmPayload = { to: activeDm, text: text || imagesPlaceholder(), token: webToken() };
+    if (pendingImages.length) dmPayload.images = pendingImages.map(function(p) { return p.url; });
     if (replyingTo) {
       // The server keeps the reply only if the quoted message lives in the
       // room the DM is routed to (ids are per room).
@@ -2161,17 +2351,22 @@ function sendMessage() {
     return;
   }
 
-  var payload = { sender: sender.value || 'human', text: text || '[image]', token: webToken() };
+  var payload = { sender: sender.value || 'human', text: text || imagesPlaceholder(), token: webToken() };
   if (replyingTo) payload.replyTo = replyingTo.id;
-  if (pendingImage) payload.image = pendingImage.url;
+  if (pendingImages.length) payload.images = pendingImages.map(function(p) { return p.url; });
   postComposerSend('/api/send', payload, composerDraftSnapshot(text));
+}
+
+// The text an image-only message carries: "[image]" or "[N images]".
+function imagesPlaceholder() {
+  return pendingImages.length > 1 ? '[' + pendingImages.length + ' images]' : '[image]';
 }
 
 // The draft as submitted: its text and the exact image and reply-target
 // objects. A newer draft composed while the send is in flight holds other
 // objects, so identity comparison tells the two apart.
 function composerDraftSnapshot(text) {
-  return { text: text, image: pendingImage, reply: replyingTo };
+  return { text: text, images: pendingImages.slice(), reply: replyingTo };
 }
 
 // One composer send in flight at a time: a second Enter while the first is
@@ -2211,7 +2406,11 @@ function postComposerSend(url, payload, draft) {
         input.value = ''; input.style.height = 'auto';
       }
       if (draft.reply && replyingTo === draft.reply) clearReply();
-      if (draft.image && pendingImage === draft.image) clearImagePreview();
+      if (draft.images && draft.images.length) {
+        pendingImages = pendingImages.filter(function(p) { return draft.images.indexOf(p) < 0; });
+        renderImageStrip();
+      }
+      showComposerNote('');
       input.focus(); updateSendBtn();
       syncHighlight();
       if (res.status === 202 && genAtStart === pendingGeneration) onComposerQueued(res.body, payload, requestSeq);
@@ -2288,6 +2487,8 @@ function toggleDecidePopover() {
 }
 
 function openDecidePopover() {
+  closeAttachMenu(false);
+  closeUrlPopover(false);
   var pop = document.getElementById('decide-popover');
   pop.removeAttribute('hidden');
   var btn = document.getElementById('decide-btn');
@@ -2423,7 +2624,7 @@ var settingsOpener = null;
 
 // Kept under the old names for anything that still calls them.
 function openSoundSettings() { openSettingsModal('sounds'); }
-function openSettings(evt, section) { if (evt && evt.stopPropagation) evt.stopPropagation(); openSettingsModal(section === 'roles' ? 'roles' : section === 'sounds' ? 'sounds' : null); }
+function openSettings(evt, section) { if (evt && evt.stopPropagation) evt.stopPropagation(); openSettingsModal(section === 'roles' ? 'roles' : section === 'sounds' ? 'sounds' : section === 'snippets' ? 'snippets' : null); }
 
 function settingsSection(id, title) {
   var sec = document.createElement('section');
@@ -2873,7 +3074,7 @@ function openSettingsModal(section, opener) {
 
   var body = document.createElement('div');
   body.className = 'settings-body';
-  [buildProfileSection(), buildAppearanceSection(), buildSoundsSection(), buildAgentsSection(), buildRolesSection(), buildTokenSection(), buildViewSection()]
+  [buildProfileSection(), buildAppearanceSection(), buildSoundsSection(), buildAgentsSection(), buildRolesSection(), buildSnippetsSection(), buildTokenSection(), buildViewSection()]
     .forEach(function(s) { body.appendChild(s); });
 
   var foot = document.createElement('div');
@@ -3025,16 +3226,21 @@ function setupInput() {
   input.addEventListener('scroll', syncHighlightScroll);
   input.addEventListener('blur', function() { setTimeout(hideMentionMenu, 150); });
 
-  // Paste handler for images
+  // Paste handler for images: every image on the clipboard joins the draft.
   input.addEventListener('paste', function(e) {
-    var items = (e.clipboardData || e.originalEvent.clipboardData).items;
+    var data = e.clipboardData || (e.originalEvent && e.originalEvent.clipboardData);
+    var items = data ? data.items : [];
+    var files = [];
     for (var i = 0; i < items.length; i++) {
-      if (items[i].type.indexOf('image') !== -1) {
-        e.preventDefault();
-        uploadImage(items[i].getAsFile());
-        return;
+      if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+        var f = items[i].getAsFile();
+        if (f) files.push(f);
       }
     }
+    if (files.length === 0) return;
+    e.preventDefault();
+    showComposerNote('');
+    addImageFiles(files);
   });
 
   // Drop handler for images on chat area
@@ -3042,7 +3248,10 @@ function setupInput() {
   chatArea.addEventListener('dragover', function(e) { e.preventDefault(); chatArea.classList.add('drag-over'); });
   chatArea.addEventListener('dragleave', function() { chatArea.classList.remove('drag-over'); });
   chatArea.addEventListener('drop', function(e) { e.preventDefault(); chatArea.classList.remove('drag-over');
-    if (e.dataTransfer.files.length > 0) uploadImage(e.dataTransfer.files[0]);
+    var files = Array.prototype.slice.call(e.dataTransfer.files || []);
+    if (files.length === 0) return;
+    addImageFiles(files.filter(function(f) { return /^image\//.test(f.type); }));
+    addFiles(files.filter(function(f) { return !/^image\//.test(f.type); }));
   });
 }
 
@@ -3071,7 +3280,8 @@ function syncHighlight() {}
 function syncHighlightScroll() {}
 
 function updateSendBtn() {
-  document.getElementById('send-btn').classList.toggle('inactive', !document.getElementById('message-input').value.trim());
+  var empty = !document.getElementById('message-input').value.trim() && pendingImages.length === 0;
+  document.getElementById('send-btn').classList.toggle('inactive', empty || imageUploadsInFlight > 0);
 }
 
 // --- Terminal scanner ---
@@ -4888,17 +5098,499 @@ document.addEventListener('keydown', function(e) {
   openPalette();
 });
 
-// --- The composer bar: attach, decision, task ---
-function openAttachPicker() {
-  var input = document.getElementById('attach-input');
-  if (!input) return;
-  input.value = '';
-  input.onchange = function() {
-    var file = input.files && input.files[0];
-    if (file && /^image\//.test(file.type)) uploadImage(file);
-  };
-  input.click();
+// --- The composer bar: the plus-menu, decision, task ---
+// The plus button opens one menu: Files, Images, Paste image, URL, Prompt
+// snippets and Decision card, with a tip line. Arrow keys move, Home and
+// End jump, Escape closes (focus back to the plus button), Tab closes.
+var attachMenuOpen = false;
+var attachMenuView = 'main'; // 'main' or 'snippets'
+var snippetsCache = null;    // the viewer's snippets, loaded on demand
+var snippetsSeq = 0;
+
+var ATTACH_ITEMS = [
+  { id: 'files', label: 'Files', icon: 'paperclip', attach: true, run: function() { pickFiles(false); } },
+  { id: 'images', label: 'Images', icon: 'image', attach: true, run: function() { pickFiles(true); } },
+  { id: 'paste', label: 'Paste image', icon: 'clipboard-paste', attach: true, run: pasteImageFromClipboard },
+  { id: 'url', label: 'URL', icon: 'link', run: function() { openUrlPopover(); } },
+  { id: 'snippets', label: 'Prompt snippets', icon: 'message-square-text', stay: true, run: function() { showSnippetsView(); } },
+  { id: 'decision', label: 'Decision card', icon: 'scale', run: function() { openDecidePopover(); } },
+];
+
+// Kept under its old name: the plus button calls it.
+function openAttachPicker() { toggleAttachMenu(); }
+
+function toggleAttachMenu() {
+  if (attachMenuOpen) closeAttachMenu(true);
+  else openAttachMenu();
 }
+
+function openAttachMenu() {
+  closeDecidePopover();
+  closeUrlPopover(false);
+  hideMentionMenu();
+  showComposerNote('');
+  attachMenuOpen = true;
+  attachMenuView = 'main';
+  var btn = document.getElementById('attach-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+  renderAttachMenu();
+  focusFirstMenuItem();
+}
+
+function closeAttachMenu(returnFocus) {
+  if (!attachMenuOpen) return;
+  attachMenuOpen = false;
+  var menu = document.getElementById('attach-menu');
+  if (menu) { menu.hidden = true; menu.textContent = ''; }
+  var btn = document.getElementById('attach-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  if (returnFocus && btn) btn.focus();
+}
+
+function lucideIcon(name) {
+  var i = document.createElement('i');
+  i.setAttribute('data-lucide', name);
+  i.setAttribute('width', '16');
+  i.setAttribute('height', '16');
+  i.setAttribute('aria-hidden', 'true');
+  return i;
+}
+
+function renderAttachMenu() {
+  var menu = document.getElementById('attach-menu');
+  if (!menu) return;
+  menu.textContent = '';
+  menu.hidden = false;
+  if (attachMenuView === 'snippets') { renderSnippetsView(menu); return; }
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'Attach');
+  var head = document.createElement('div');
+  head.className = 'attach-menu-head';
+  head.textContent = 'Attach';
+  head.setAttribute('aria-hidden', 'true');
+  menu.appendChild(head);
+  var remote = composerIsRemote();
+  ATTACH_ITEMS.forEach(function(item) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'attach-item';
+    b.id = 'attach-item-' + item.id;
+    b.setAttribute('role', 'menuitem');
+    b.tabIndex = -1;
+    b.appendChild(lucideIcon(item.icon));
+    var t = document.createElement('span');
+    t.textContent = item.label;
+    b.appendChild(t);
+    var off = !!(item.attach && remote);
+    if (off) {
+      b.setAttribute('aria-disabled', 'true');
+      b.classList.add('disabled');
+      b.title = 'Attachments are not supported in remote rooms';
+    }
+    b.addEventListener('click', function() {
+      if (off) { attachmentsRefusedHere(); closeAttachMenu(true); return; }
+      if (!item.stay) closeAttachMenu(false);
+      item.run();
+    });
+    menu.appendChild(b);
+  });
+  if (remote) {
+    var note = document.createElement('div');
+    note.className = 'attach-menu-note';
+    note.textContent = 'Remote room: attachments are not carried across a link.';
+    menu.appendChild(note);
+  }
+  var tip = document.createElement('div');
+  tip.className = 'attach-menu-tip';
+  tip.textContent = 'Tip: type @ to mention a crew member';
+  menu.appendChild(tip);
+  if (window.lucide) lucide.createIcons({ root: menu });
+}
+
+function menuItems() {
+  var menu = document.getElementById('attach-menu');
+  return menu ? Array.prototype.slice.call(menu.querySelectorAll('.attach-item')) : [];
+}
+
+function focusFirstMenuItem() {
+  var items = menuItems();
+  if (items.length) items[0].focus();
+}
+
+function onAttachMenuKey(e) {
+  if (!attachMenuOpen) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    if (attachMenuView === 'snippets') { attachMenuView = 'main'; renderAttachMenu(); var s = document.getElementById('attach-item-snippets'); if (s) s.focus(); return; }
+    closeAttachMenu(true);
+    return;
+  }
+  if (e.key === 'Tab') { closeAttachMenu(false); return; }
+  var items = attachMenuView === 'snippets'
+    ? Array.prototype.slice.call(document.querySelectorAll('#attach-menu .snippet-item, #attach-menu .snippet-filter'))
+    : menuItems();
+  if (items.length === 0) return;
+  var at = items.indexOf(document.activeElement);
+  var next = -1;
+  if (e.key === 'ArrowDown') next = at < 0 ? 0 : (at + 1) % items.length;
+  else if (e.key === 'ArrowUp') next = at < 0 ? items.length - 1 : (at - 1 + items.length) % items.length;
+  else if (e.key === 'Home' && attachMenuView === 'main') next = 0;
+  else if (e.key === 'End' && attachMenuView === 'main') next = items.length - 1;
+  if (next < 0) return;
+  e.preventDefault();
+  items[next].focus();
+}
+
+// --- Prompt snippets in the menu ---
+function loadSnippets() {
+  var seq = ++snippetsSeq;
+  return fetch('/api/snippets').then(function(r) {
+    return r.json().catch(function() { return {}; }).then(function(body) {
+      if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+      return body;
+    });
+  }).then(function(body) {
+    if (seq === snippetsSeq) snippetsCache = Array.isArray(body.snippets) ? body.snippets : [];
+    return snippetsCache;
+  });
+}
+
+function showSnippetsView() {
+  attachMenuView = 'snippets';
+  renderAttachMenu();
+  var f = document.querySelector('#attach-menu .snippet-filter');
+  if (f) f.focus();
+  loadSnippets().then(function() {
+    if (attachMenuOpen && attachMenuView === 'snippets') refreshSnippetList();
+  }).catch(function(err) {
+    var list = document.getElementById('snippet-list');
+    if (list) { list.textContent = ''; list.appendChild(snippetEmpty('Could not load snippets: ' + err.message)); }
+  });
+}
+
+function snippetEmpty(text) {
+  var d = document.createElement('div');
+  d.className = 'snippet-empty';
+  d.textContent = text;
+  return d;
+}
+
+function renderSnippetsView(menu) {
+  menu.setAttribute('role', 'dialog');
+  menu.setAttribute('aria-label', 'Prompt snippets');
+  var head = document.createElement('div');
+  head.className = 'attach-menu-head snippet-head';
+  var back = document.createElement('button');
+  back.type = 'button';
+  back.className = 'btn-link snippet-back';
+  back.textContent = 'Back';
+  back.setAttribute('aria-label', 'Back to the attach menu');
+  back.addEventListener('click', function() {
+    attachMenuView = 'main';
+    renderAttachMenu();
+    var s = document.getElementById('attach-item-snippets');
+    if (s) s.focus();
+  });
+  var h = document.createElement('span');
+  h.textContent = 'Prompt snippets';
+  head.appendChild(back);
+  head.appendChild(h);
+  menu.appendChild(head);
+  var filter = document.createElement('input');
+  filter.type = 'text';
+  filter.className = 'snippet-filter';
+  filter.id = 'snippet-filter';
+  filter.placeholder = 'Filter snippets';
+  filter.setAttribute('aria-label', 'Filter snippets');
+  filter.setAttribute('aria-controls', 'snippet-list');
+  filter.autocomplete = 'off';
+  filter.addEventListener('input', refreshSnippetList);
+  filter.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var first = document.querySelector('#snippet-list .snippet-item');
+      if (first) first.click();
+    }
+  });
+  menu.appendChild(filter);
+  var list = document.createElement('div');
+  list.className = 'snippet-list';
+  list.id = 'snippet-list';
+  list.setAttribute('role', 'list');
+  menu.appendChild(list);
+  var manage = document.createElement('button');
+  manage.type = 'button';
+  manage.className = 'btn-link snippet-manage';
+  manage.textContent = 'Manage snippets';
+  manage.addEventListener('click', function() {
+    closeAttachMenu(false);
+    openSettingsModal('snippets', document.getElementById('attach-btn'));
+  });
+  menu.appendChild(manage);
+  refreshSnippetList();
+}
+
+function refreshSnippetList() {
+  var list = document.getElementById('snippet-list');
+  var filter = document.getElementById('snippet-filter');
+  if (!list) return;
+  // A reload must not drop keyboard focus from a row: keep its position.
+  var rows = Array.prototype.slice.call(list.querySelectorAll('.snippet-item'));
+  var focusAt = rows.indexOf(document.activeElement);
+  list.textContent = '';
+  if (snippetsCache === null) { list.appendChild(snippetEmpty('Loading...')); return; }
+  var shown = window.joindUi.filterSnippets(snippetsCache, filter ? filter.value : '');
+  if (snippetsCache.length === 0) { list.appendChild(snippetEmpty('No snippets yet. Add one in Settings.')); return; }
+  if (shown.length === 0) { list.appendChild(snippetEmpty('No snippet matches.')); return; }
+  shown.forEach(function(s) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'snippet-item';
+    b.setAttribute('role', 'listitem');
+    var t = document.createElement('span');
+    t.className = 'snippet-title';
+    t.textContent = s.title;
+    var p = document.createElement('span');
+    p.className = 'snippet-preview';
+    p.textContent = String(s.text).replace(/\s+/g, ' ').slice(0, 90);
+    b.appendChild(t);
+    b.appendChild(p);
+    b.addEventListener('click', function() {
+      closeAttachMenu(false);
+      insertIntoComposer(String(s.text), false);
+    });
+    list.appendChild(b);
+  });
+  if (focusAt >= 0) {
+    var again = list.querySelectorAll('.snippet-item');
+    if (again.length) again[Math.min(focusAt, again.length - 1)].focus();
+    else if (filter) filter.focus();
+  }
+}
+
+// --- URL: a link card, drawn from what the viewer typed (no fetching) ---
+function openUrlPopover() {
+  closeDecidePopover();
+  var pop = document.getElementById('url-popover');
+  if (!pop) return;
+  pop.hidden = false;
+  document.getElementById('url-input').value = '';
+  document.getElementById('url-title').value = '';
+  setUrlError('');
+  setTimeout(function() { document.getElementById('url-input').focus(); }, 0);
+}
+
+function closeUrlPopover(returnFocus) {
+  var pop = document.getElementById('url-popover');
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  if (returnFocus) document.getElementById('message-input').focus();
+}
+
+function setUrlError(text) {
+  var el = document.getElementById('url-error');
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+function submitUrlForm() {
+  var raw = document.getElementById('url-input').value;
+  var title = document.getElementById('url-title').value;
+  var md = window.joindUi.linkCardMarkdown(raw, title);
+  if (!md) {
+    setUrlError('Enter a full http or https address, such as https://example.com/page.');
+    document.getElementById('url-input').focus();
+    return;
+  }
+  closeUrlPopover(false);
+  insertIntoComposer(md, true);
+}
+
+// Link cards in a rendered message: a sanitized link whose title is "card"
+// is redrawn as a card with DOM calls; its href already passed the
+// sanitizer, and a card is drawn only for http and https.
+function decorateLinkCards(root) {
+  var links = root.querySelectorAll('a[title="card"]');
+  Array.prototype.forEach.call(links, function(a) {
+    var href = a.getAttribute('href') || '';
+    a.removeAttribute('title');
+    if (!window.joindUi || !window.joindUi.linkCardUrl(href)) return;
+    var text = (a.textContent || '').trim();
+    var label = window.joindUi.linkCardLabel(href);
+    var card = document.createElement('a');
+    card.className = 'link-card';
+    card.href = href;
+    card.target = '_blank';
+    card.rel = 'noopener noreferrer';
+    var ic = lucideIcon('link');
+    ic.setAttribute('class', 'link-card-icon');
+    var body = document.createElement('span');
+    body.className = 'link-card-body';
+    var t = document.createElement('span');
+    t.className = 'link-card-title';
+    t.textContent = text && text !== href ? text : label;
+    var u = document.createElement('span');
+    u.className = 'link-card-url';
+    u.textContent = label;
+    body.appendChild(t);
+    body.appendChild(u);
+    card.appendChild(ic);
+    card.appendChild(body);
+    a.parentNode.replaceChild(card, a);
+    if (window.lucide) lucide.createIcons({ root: card });
+  });
+}
+
+// --- Settings: Prompt snippets (list, add, edit, delete) ---
+function buildSnippetsSection() {
+  var sec = settingsSection('snippets', 'Prompt snippets');
+  var hint = document.createElement('p');
+  hint.className = 'setting-hint snippets-hint';
+  hint.textContent = 'Plain text you insert from the composer plus-menu. Kept on this server for you.';
+  sec.appendChild(hint);
+  var list = document.createElement('div');
+  list.className = 'snippets-manage-list';
+  list.id = 'snippets-manage-list';
+  sec.appendChild(list);
+
+  var form = document.createElement('div');
+  form.className = 'snippet-form';
+  var tl = document.createElement('label');
+  tl.className = 'setting-name';
+  tl.htmlFor = 'snippet-form-title';
+  tl.textContent = 'Title';
+  var ti = document.createElement('input');
+  ti.type = 'text';
+  ti.id = 'snippet-form-title';
+  ti.maxLength = 80;
+  ti.placeholder = 'Review request';
+  var xl = document.createElement('label');
+  xl.className = 'setting-name';
+  xl.htmlFor = 'snippet-form-text';
+  xl.textContent = 'Text';
+  var xt = document.createElement('textarea');
+  xt.id = 'snippet-form-text';
+  xt.rows = 3;
+  xt.maxLength = 8000;
+  xt.placeholder = 'Please review the change and report findings by severity.';
+  var err = document.createElement('div');
+  err.className = 'snippet-form-error';
+  err.setAttribute('role', 'alert');
+  err.hidden = true;
+  var acts = document.createElement('div');
+  acts.className = 'snippet-form-actions';
+  var cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'btn btn-sm';
+  cancel.textContent = 'Cancel edit';
+  cancel.hidden = true;
+  var save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn btn-sm btn-primary';
+  save.id = 'snippet-form-save';
+  save.textContent = 'Add snippet';
+  acts.appendChild(cancel);
+  acts.appendChild(save);
+  form.appendChild(tl); form.appendChild(ti);
+  form.appendChild(xl); form.appendChild(xt);
+  form.appendChild(err); form.appendChild(acts);
+  sec.appendChild(form);
+
+  var editing = null;
+  function resetForm() {
+    editing = null;
+    ti.value = ''; xt.value = '';
+    save.textContent = 'Add snippet';
+    cancel.hidden = true;
+    err.hidden = true;
+  }
+  function fail(text) { err.textContent = text; err.hidden = !text; }
+  cancel.addEventListener('click', resetForm);
+  save.addEventListener('click', function() {
+    var body = { title: ti.value, text: xt.value };
+    if (!body.title.trim()) { fail('Give the snippet a title.'); ti.focus(); return; }
+    if (!body.text.trim()) { fail('The snippet needs some text.'); xt.focus(); return; }
+    var url = editing ? '/api/snippets/' + encodeURIComponent(editing) : '/api/snippets';
+    save.disabled = true;
+    fetch(url, { method: editing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function(r) { return r.json().catch(function() { return {}; }).then(function(b) { return { ok: r.ok, status: r.status, body: b }; }); })
+      .then(function(res) {
+        save.disabled = false;
+        if (!res.ok) { fail('Not saved: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)) + '.'); return; }
+        resetForm();
+        paint();
+        // The disabled button dropped focus; keep it in the dialog.
+        ti.focus();
+      })
+      .catch(function() { save.disabled = false; save.focus(); fail('Not saved: the server could not be reached.'); });
+  });
+
+  function paint() {
+    loadSnippets().then(function(items) {
+      list.textContent = '';
+      if (items.length === 0) { list.appendChild(snippetEmpty('No snippets yet.')); return; }
+      items.forEach(function(s) {
+        var row = document.createElement('div');
+        row.className = 'snippet-row';
+        var text = document.createElement('div');
+        text.className = 'setting-text';
+        var n = document.createElement('span');
+        n.className = 'setting-name';
+        n.textContent = s.title;
+        var p = document.createElement('span');
+        p.className = 'setting-hint snippet-row-text';
+        p.textContent = String(s.text).replace(/\s+/g, ' ').slice(0, 140);
+        text.appendChild(n); text.appendChild(p);
+        var edit = document.createElement('button');
+        edit.type = 'button';
+        edit.className = 'btn btn-sm';
+        edit.textContent = 'Edit';
+        edit.setAttribute('aria-label', 'Edit snippet ' + s.title);
+        edit.addEventListener('click', function() {
+          editing = s.id;
+          ti.value = s.title; xt.value = s.text;
+          save.textContent = 'Save changes';
+          cancel.hidden = false;
+          err.hidden = true;
+          ti.focus();
+        });
+        var del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'btn btn-sm btn-danger-outline';
+        del.textContent = 'Delete';
+        del.setAttribute('aria-label', 'Delete snippet ' + s.title);
+        del.addEventListener('click', function() {
+          if (del.getAttribute('data-confirm') !== 'yes') {
+            del.setAttribute('data-confirm', 'yes');
+            del.textContent = 'Press again to delete';
+            return;
+          }
+          fetch('/api/snippets/' + encodeURIComponent(s.id), { method: 'DELETE' })
+            .then(function(r) {
+              if (!r.ok) { fail('Not deleted: HTTP ' + r.status + '.'); return; }
+              if (editing === s.id) resetForm();
+              paint();
+              ti.focus();
+            })
+            .catch(function() { fail('Not deleted: the server could not be reached.'); });
+        });
+        var ctl = document.createElement('div');
+        ctl.className = 'setting-control';
+        ctl.appendChild(edit); ctl.appendChild(del);
+        row.appendChild(text); row.appendChild(ctl);
+        list.appendChild(row);
+      });
+    }).catch(function(e) {
+      list.textContent = '';
+      list.appendChild(snippetEmpty('Could not load snippets: ' + e.message));
+    });
+  }
+  paint();
+  return sec;
+}
+
 function openNewTask() {
   if (!activeConversation) return;
   if (!taskPanelOpen) toggleTaskPanel();
@@ -7272,6 +7964,30 @@ document.addEventListener('DOMContentLoaded', function() {
   if (decideAdd) decideAdd.addEventListener('click', function() { addDecideOption(); });
   var decidePost = document.getElementById('decide-post');
   if (decidePost) decidePost.addEventListener('click', submitDecideForm);
+  // Plus-menu and URL popover wiring
+  var attachMenu = document.getElementById('attach-menu');
+  if (attachMenu) attachMenu.addEventListener('keydown', onAttachMenuKey);
+  document.addEventListener('mousedown', function(e) {
+    if (!attachMenuOpen) return;
+    var menu = document.getElementById('attach-menu');
+    var plus = document.getElementById('attach-btn');
+    if (menu && menu.contains(e.target)) return;
+    if (plus && plus.contains(e.target)) return;
+    closeAttachMenu(false);
+  });
+  var urlInsert = document.getElementById('url-insert');
+  if (urlInsert) urlInsert.addEventListener('click', submitUrlForm);
+  var urlCancel = document.getElementById('url-cancel');
+  if (urlCancel) urlCancel.addEventListener('click', function() { closeUrlPopover(true); });
+  var urlPop = document.getElementById('url-popover');
+  if (urlPop) urlPop.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeUrlPopover(true); }
+    else if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') { e.preventDefault(); submitUrlForm(); }
+  });
+  var decidePop = document.getElementById('decide-popover');
+  if (decidePop) decidePop.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDecidePopover(); document.getElementById('message-input').focus(); }
+  });
 
   // Show instance name in header + page title
   fetch('/api/instance').then(function(r) { return r.json(); }).then(function(info) {

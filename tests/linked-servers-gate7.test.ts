@@ -192,6 +192,20 @@ describe("gate round 7, routes", { timeout: 20_000 }, () => {
     expect(A.manager.getRoom(roomX)!.messageCount()).toBe(before + 1); // only Kira's join line
   });
 
+  it("composer: several images in a remote room are refused the same way on both routes", async () => {
+    const remote = `alpha:${roomX}`;
+    const mirror = B.manager.getRoom(remote) as MirrorRoom;
+    const before = A.manager.getRoom(roomX)!.messageCount();
+    const send = await post(B.baseUrl, "/api/send", { sender: "Rami", text: "two", images: ["/data/files/a.png", "/data/files/b.png"], token: WEB, conversation: remote });
+    expect(send.status).toBe(400);
+    expect(send.json.error).toBe("Attachments are not supported in remote rooms");
+    const dm = await post(B.baseUrl, "/api/dm/send", { to: "Kira", text: "two", images: ["/data/files/a.png", "/data/files/b.png"], token: WEB });
+    expect(dm.status).toBe(400);
+    expect(dm.json.error).toBe("Attachments are not supported in remote rooms");
+    expect(mirror.queuedCount()).toBe(0);
+    expect(A.manager.getRoom(roomX)!.messageCount()).toBe(before);
+  });
+
   it("finding 3: a selection answers with its own room's metadata and contents when another selection lands meanwhile", async () => {
     holdFor = roomX;
     const x = post(B.baseUrl, "/api/conversations/select", { id: `alpha:${roomX}`, token: WEB });

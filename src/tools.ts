@@ -5,6 +5,7 @@
  * route to that conversation. Different conversations are isolated.
  */
 
+import { imagesSuffix } from "./attachments.js";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -568,7 +569,7 @@ export function registerTools(
       // (filtered to what this agent may see: public + DMs addressed to them)
       const recent = room.read(undefined, 15, undefined, name);
       const recentText = recent.length > 0
-        ? "\n\nRecent messages:\n" + recent.map((m) => `[#${m.id} ${m.sender}] ${m.text}`).join("\n")
+        ? "\n\nRecent messages:\n" + recent.map((m) => `[#${m.id} ${m.sender}] ${m.text}${imagesSuffix(m)}`).join("\n")
         : "";
       const totalCount = room.messageCount();
       const historyHint = totalCount > 15
@@ -714,7 +715,7 @@ export function registerTools(
       const formatted = msgs
         .map((m) => {
           const reply = m.replyTo ? ` [reply to #${m.replyTo}]` : "";
-          return `[#${m.id} ${m.sender}${reply}] ${m.text}`;
+          return `[#${m.id} ${m.sender}${reply}] ${m.text}${imagesSuffix(m)}`;
         })
         .join("\n");
       return { content: [{ type: "text" as const, text: formatted || "(no messages)" }] };
@@ -766,7 +767,7 @@ export function registerTools(
       const formatted = result.messages
         .map((m) => {
           const reply = m.replyTo ? ` [reply to #${m.replyTo}]` : "";
-          return `[#${m.id} ${m.sender}${reply}] ${m.text}`;
+          return `[#${m.id} ${m.sender}${reply}] ${m.text}${imagesSuffix(m)}`;
         })
         .join("\n");
       return { content: [{ type: "text" as const, text: `${formatted}\n(lastId=${result.lastId})` }] };
@@ -903,7 +904,7 @@ export function registerTools(
       if (results.length === 0) {
         return { content: [{ type: "text" as const, text: `No messages found matching "${query}"` }] };
       }
-      const formatted = results.map(r => `[#${r.message.id} ${r.message.sender}] ${r.message.text}`).join("\n");
+      const formatted = results.map(r => `[#${r.message.id} ${r.message.sender}] ${r.message.text}${imagesSuffix(r.message)}`).join("\n");
       return { content: [{ type: "text" as const, text: `Found ${results.length} matches:\n${formatted}` }] };
     }
   );

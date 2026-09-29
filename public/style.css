@@ -4534,3 +4534,242 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
   .palette-overlay { padding: var(--s2); }
   .palette { max-height: calc(100dvh - 16px - 56px); }
 }
+
+/* ================================================================
+   COMPOSER PLUS-MENU (29 Sep 2026): the attach menu, prompt snippets,
+   the URL popover, several image thumbnails, link cards.
+   ================================================================ */
+.attach-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 20px;
+  width: 260px;
+  max-width: calc(100% - 40px);
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+  z-index: 26;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: picker-in 0.12s ease-out;
+}
+.attach-menu-head {
+  padding: 4px 8px 6px;
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.attach-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--fs-ui);
+  text-align: left;
+  cursor: pointer;
+}
+.attach-item svg { color: var(--text-muted); flex-shrink: 0; }
+.attach-item:hover, .attach-item:focus-visible { background: var(--accent-hover); color: var(--text-bright); outline: none; }
+.attach-item:focus-visible { box-shadow: var(--ring-tight); }
+.attach-item.disabled { color: var(--text-muted); cursor: not-allowed; }
+.attach-item.disabled:hover { background: var(--bg-hover); color: var(--text-muted); }
+.attach-menu-note {
+  margin: 4px 2px 0;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+}
+.attach-menu-tip {
+  margin-top: 4px;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+  color: var(--text-muted);
+}
+.snippet-head { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: var(--fs-ui); color: var(--text-bright); }
+.snippet-back { font-size: var(--fs-label); }
+.snippet-filter {
+  margin: 2px 2px 6px;
+  padding: 6px 10px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+}
+.snippet-filter:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring-tight); }
+.snippet-list { display: flex; flex-direction: column; gap: 1px; }
+.snippet-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.snippet-item:hover, .snippet-item:focus-visible { background: var(--accent-hover); outline: none; }
+.snippet-title { font-size: var(--fs-ui); font-weight: 600; color: var(--text-bright); }
+.snippet-preview, .snippet-empty {
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+  color: var(--text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snippet-empty { padding: 6px 8px; white-space: normal; }
+.snippet-manage { align-self: flex-start; margin: 6px 8px 2px; font-size: var(--fs-label); }
+
+/* The URL popover borrows the frame of the decision popover. */
+.url-popover { z-index: 27; }
+.url-error { color: var(--danger); font-size: var(--fs-label); line-height: var(--lh-label); }
+.url-note { font-size: var(--fs-label); line-height: var(--lh-label); color: var(--text-muted); min-width: 0; }
+
+.composer-note {
+  margin: 0 0 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-bright);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+}
+
+/* Several images waiting in the composer. */
+.image-strip { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding-top: 6px; }
+.image-thumb { position: relative; width: 48px; height: 48px; flex-shrink: 0; }
+.image-thumb .image-preview-thumb { display: block; }
+.image-thumb.uploading {
+  border-radius: var(--radius-xs);
+  border: 1px dashed var(--border-strong);
+  background: var(--white-04);
+  animation: thumb-wait 1.2s ease-in-out infinite;
+}
+@keyframes thumb-wait { 50% { opacity: 0.45; } }
+.image-thumb-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: var(--fs-label);
+  line-height: 1;
+  cursor: pointer;
+}
+.image-thumb-remove:hover, .image-thumb-remove:focus-visible { color: var(--danger); background: var(--danger-soft); outline: none; box-shadow: var(--ring-tight); }
+.image-preview .image-preview-label { flex: 1; min-width: 0; }
+
+/* Several images in a message: a wrapping grid of thumbnails. */
+.msg-images.multi { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.msg-images.multi .msg-image {
+  margin-top: 0;
+  width: 160px;
+  height: 120px;
+  max-width: calc(50% - 3px);
+  object-fit: cover;
+}
+.msg-image:focus-visible { outline: none; box-shadow: var(--ring); }
+.msg-images-remote {
+  margin-top: 6px;
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* A link card: title, then host and path; nothing is fetched. */
+.msg-text-wrap a.link-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(420px, 100%);
+  margin: 4px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-bright);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text);
+  text-decoration: none;
+}
+.msg-text-wrap a.link-card:hover { border-color: var(--accent); background: var(--accent-soft); }
+.link-card-icon { color: var(--accent-bright); flex-shrink: 0; }
+.link-card-body { display: flex; flex-direction: column; min-width: 0; }
+.link-card-title {
+  font-size: var(--fs-ui);
+  line-height: var(--lh-ui);
+  font-weight: 600;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-card-url {
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Settings: prompt snippets. */
+.snippets-hint { margin: 0 0 8px; }
+.snippets-manage-list { display: flex; flex-direction: column; }
+.snippet-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.snippet-row .setting-text { flex: 1; min-width: 0; }
+.snippet-row-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.snippet-form { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+.snippet-form input, .snippet-form textarea {
+  padding: 6px 10px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  resize: vertical;
+}
+.snippet-form input:focus, .snippet-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring-tight); }
+.snippet-form-error { color: var(--danger); font-size: var(--fs-label); line-height: var(--lh-label); }
+.snippet-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+@media (max-width: 560px) {
+  .attach-menu { left: 12px; right: 12px; width: auto; max-width: none; }
+  .url-popover { left: 12px; right: 12px; }
+  .url-note { display: none; }
+  .snippet-row { flex-wrap: wrap; }
+  .msg-images.multi .msg-image { width: calc(50% - 3px); height: 96px; }
+}
