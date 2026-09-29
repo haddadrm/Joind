@@ -4508,11 +4508,18 @@ function boardAddForm(colKey, colEl) {
       .then(function(task) {
         board.adding = null;
         if (colKey !== 'open' && task && task.id) {
-          return fetch('/api/tasks/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: task.id, status: colKey, conversation: roomId, respondedBy: myName() }) });
+          // Created as Open, then moved: a refused move leaves it in Open,
+          // and the board says so instead of looking done.
+          return fetch('/api/tasks/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: task.id, status: colKey, conversation: roomId, respondedBy: myName() }) })
+            .then(function(r) { if (!r.ok) throw new Error('move ' + r.status); })
+            .catch(function() {
+              var col = (window.joindUi ? window.joindUi.boardColumns() : []).filter(function(c) { return c[0] === colKey; })[0];
+              showRefNotice('Task ' + task.id + ' was created in Open; it could not be moved to ' + (col ? col[1] : colKey) + '.');
+            });
         }
-      })
+      }, function(err) { input.disabled = false; showRefNotice('Could not create the task.'); throw err; })
       .then(function() { loadBoard(); })
-      .catch(function() { input.disabled = false; showRefNotice('Could not create the task.'); });
+      .catch(function() { /* reported above */ });
   });
   form.appendChild(input);
   colEl.appendChild(form);
