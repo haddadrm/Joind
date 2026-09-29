@@ -1,9 +1,10 @@
 /**
  * Hygiene batch, item 1: a token-less task resolution that names a
- * responder must come from that responder's own registration (its
- * registration id, pid, pane with its GUI, or Orca handle), never from the
- * name alone. Anonymous resolutions stay as they were; the web board (with
- * the token) is untouched.
+ * responder must come from that responder's own registration, proved by
+ * the registration id its join returned. Never the name alone, and never a
+ * pid, pane or Orca handle (request-supplied values anyone can send, and
+ * listed in this server's own candidate answers). Anonymous resolutions
+ * stay as they were; the web board (with the token) is untouched.
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
@@ -102,12 +103,24 @@ describe("token-less task resolution names only the caller", { timeout: 30_000 }
     expect(lines(ops).some((l) => /forged|done by me/.test(l))).toBe(false);
   });
 
-  it("accepts the caller naming itself, by pid or by registration id", async () => {
+  it("a terminal alias never names a responder, not even the caller's own", async () => {
     const a = await newTask(ops, "a");
-    const byPid = await raw({ id: a, status: "done", response: "fixed", respondedBy: "Kira", pid: 999_901, conversation: ops });
-    expect(byPid.status).toBe(200);
-    expect((byPid.body as Task).respondedBy).toBe("Kira");
+    expect((await raw({ id: a, status: "done", response: "by pid", respondedBy: "Kira", pid: 999_901, conversation: ops })).status).toBe(403);
+    expect((await raw({ id: a, status: "done", response: "by pane", respondedBy: "Kira", paneId: 0, weztermGui: 4242, conversation: ops })).status).toBe(403);
+    expect((await raw({ id: a, status: "done", response: "by handle", respondedBy: "Kira", orcaTerminal: "term_x", conversation: ops })).status).toBe(403);
+    expect(await statusOf(ops, a)).toBe("open");
+  });
+
+  it("accepts the caller naming itself by its registration id", async () => {
+    const a = await newTask(ops, "a2");
+    const byReg1 = await raw({ id: a, status: "done", response: "fixed", respondedBy: "Kira", registration: kiraReg, conversation: ops });
+    expect(byReg1.status).toBe(200);
+    expect((byReg1.body as Task).respondedBy).toBe("Kira");
     expect(lines(ops)).toContain(`[Task #${a} done] Kira responded: fixed`);
+    // In the query string too.
+    const q = await newTask(ops, "q");
+    const viaQuery = await fetch(`${S.baseUrl}/api/tasks/update?registration=${encodeURIComponent(kiraReg)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: q, status: "done", response: "via query", respondedBy: "Kira", conversation: ops }) });
+    expect(viaQuery.status).toBe(200);
     const b = await newTask(ops, "b");
     const byReg = await raw({ id: b, status: "done", response: "also fixed", respondedBy: "Kira", registration: kiraReg });
     expect(byReg.status).toBe(200);
@@ -132,19 +145,18 @@ describe("token-less task resolution names only the caller", { timeout: 30_000 }
     expect(await statusOf(other, id)).toBe("open");
   });
 
-  it("aliases matching registrations in two rooms need the conversation; the named one is used", async () => {
-    // Nog: a pid registration in ops, an Orca-handle registration in other.
+  it("a name registered in two rooms: each registration id answers for its own room only", async () => {
     S.manager.bindAgent("Nog", ops, 999_906, null, null, undefined, "reg-nog-ops");
     S.manager.bindAgent("Nog", other, undefined, null, "term_nog", undefined, "reg-nog-other");
     const id = await newTask(other, "two rooms");
-    expect((await raw({ id, status: "done", response: "which?", respondedBy: "Nog", pid: 999_906, orcaTerminal: "term_nog" })).status).toBe(400);
-    expect(await statusOf(other, id)).toBe("open");
-    const r = await raw({ id, status: "done", response: "this one", respondedBy: "Nog", pid: 999_906, orcaTerminal: "term_nog", conversation: other });
+    // No conversation named: the id's own room.
+    const r = await raw({ id, status: "done", response: "this one", respondedBy: "Nog", registration: "reg-nog-other" });
     expect(r.status).toBe(200);
     expect(lines(other)).toContain(`[Task #${id} done] Nog responded: this one`);
     // A registration id of the other room, with this room named: refused.
     const id2 = await newTask(ops, "wrong id");
     expect((await raw({ id: id2, status: "done", response: "x", respondedBy: "Nog", registration: "reg-nog-other", conversation: ops })).status).toBe(403);
+    expect(await statusOf(ops, id2)).toBe("open");
   });
 
   it("keeps the anonymous resolution and the web board as they were", async () => {

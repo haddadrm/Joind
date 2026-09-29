@@ -123,6 +123,15 @@ describe("the wake prompt follows the join route (room)", () => {
     expect(promptOf(host, "Jadzia", `"ops" on alpha (conversation alpha:c1)`, 7)).toContain(`in "ops" on alpha (conversation alpha:c1). Read from message 7 with chat_read(sender="Jadzia", since=6`);
   });
 
+  it("writes names as JSON strings, so a quote or backslash cannot break the call", () => {
+    const room = new ChatRoom();
+    const name = 'Ki"ra\\x';
+    room.join(name, 999_805, undefined, undefined, undefined, undefined, "reg-q", undefined, undefined, "mcp");
+    const p = promptOf(room, name, undefined, 3);
+    expect(p).toContain(`chat_read(sender=${JSON.stringify(name)}, since=2, registration="reg-q")`);
+    expect(p).toContain(`chat_send(sender=${JSON.stringify(name)}, registration="reg-q")`);
+  });
+
   it("parses only the two routes from the wire", () => {
     expect(parseJoinRoute("mcp")).toBe("mcp");
     expect(parseJoinRoute("rest")).toBe("rest");

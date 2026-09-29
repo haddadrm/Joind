@@ -915,11 +915,13 @@ export class ChatRoom extends EventEmitter {
       // the prompt names them instead of the REST recipe. The registration
       // keeps both calls on this room's registration of the name.
       const room = roomLabel ?? this.displayName?.() ?? this.homeId;
+      // Names may hold quotes or backslashes: written as JSON strings.
+      const who = JSON.stringify(agent.name);
       const regArg = registration ? `, registration="${registration}"` : "";
       return (
         `[joind] @${agent.name} mentioned by ${sender}${room ? ` in ${room}` : ""}.${roleHint} ` +
-        `Read from message ${since + 1} with chat_read(sender="${agent.name}", since=${since}${regArg}), ` +
-        `then reply with chat_send(sender="${agent.name}"${regArg}).`
+        `Read from message ${since + 1} with chat_read(sender=${who}, since=${since}${regArg}), ` +
+        `then reply with chat_send(sender=${who}${regArg}).`
       );
     }
     return (

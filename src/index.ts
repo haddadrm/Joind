@@ -29,7 +29,7 @@ import { setDefaultPresenceGrace, setInjectBaseUrl } from "./room.js";
 import { injectBaseUrlFor } from "./wake.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { ConversationManager, newRegistrationId, isTerminalLess, bindingMatchesTerminal, type AgentBindingEntry } from "./manager.js";
+import { ConversationManager, newRegistrationId, isTerminalLess, type AgentBindingEntry } from "./manager.js";
 import { visibleToViewer, type ChatMessage, type ChatRoom } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
 import { parseCodexHome, parseCodexThread } from "./codex-queue.js";
@@ -1905,9 +1905,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       return;
     }
     // A token-less caller that names a responder must be that responder:
-    // the name is tied to the caller's own registration, found by the
-    // registration id, pid, pane (with its GUI) or Orca handle it sends,
-    // never by the name alone. Without a named responder the resolution
+    // the name is tied to the caller's own registration, proved by the
+    // registration id its join returned, never by the name alone or by a
+    // terminal alias anyone could send. Without a named responder the resolution
     // stays anonymous, as before.
     const target = conversationParam(conversation);
     if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
@@ -1918,12 +1918,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
         return;
       }
       const caller = callerRegistration(req, respondedBy, target.named ? target.id : undefined);
-      if (caller === "ambiguous") {
-        res.status(400).json({ error: `${respondedBy} is registered from this terminal in more than one conversation: pass conversation or registration` });
-        return;
-      }
       if (!caller) {
-        res.status(403).json({ error: "respondedBy must be the caller: pass your registration (from your join reply), pid, paneId with weztermGui, or orcaTerminal" });
+        res.status(403).json({ error: "respondedBy must be the caller: pass your registration (from your join reply) in that conversation, or leave respondedBy out" });
         return;
       }
       callerConv = caller.conversationId;
@@ -2009,34 +2005,17 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
   }
 
-  /** The caller's own registration of `name`, proved by what the request
-   *  names: its registration id (matched alone, hosted members included), or
-   *  else an exact terminal alias (pid, pane with its GUI, Orca handle).
-   *  Never the lone binding of a name, so a name alone proves nothing. With
-   *  `conversationId` only a registration in that room answers; without it,
-   *  aliases matching registrations in more than one room are ambiguous. */
-  function callerRegistration(req: express.Request, name: string, conversationId?: string): AgentBindingEntry | "ambiguous" | undefined {
-    const inRoom = (e: AgentBindingEntry): boolean => conversationId === undefined || e.conversationId === conversationId;
+  /** The caller's own registration of `name`, proved by the registration id
+   *  its join returned (matched alone, hosted members included). Only the id
+   *  proves it: a pid, pane or Orca handle is a request-supplied value that
+   *  anyone can guess or read from this server's candidate lists, so it
+   *  never names a responder. With `conversationId`, only a registration in
+   *  that room answers. */
+  function callerRegistration(req: express.Request, name: string, conversationId?: string): AgentBindingEntry | undefined {
     const registration = registrationOf(req);
-    if (registration !== undefined) {
-      const byId = manager.bindingsOf(name).find((e) => e.registration === registration);
-      return byId && inRoom(byId) ? byId : undefined;
-    }
-    const num = (raw: unknown, min: number): number | undefined => {
-      const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
-      return Number.isInteger(n) && n >= min ? n : undefined;
-    };
-    const body = (req.body ?? {}) as { pid?: unknown; paneId?: unknown };
-    const pid = num(req.query?.pid ?? body.pid, 1);
-    // WezTerm numbers panes from 0.
-    const paneId = num(req.query?.paneId ?? body.paneId, 0);
-    const weztermGui = weztermGuiOf(req);
-    const orcaTerminal = orcaOf(req);
-    if (pid === undefined && (paneId === undefined || weztermGui === undefined) && orcaTerminal === undefined) return undefined;
-    // Terminal aliases never reach a hosted registration (it has none here).
-    const matches = manager.bindingsOf(name).filter((e) => !e.host && inRoom(e) && bindingMatchesTerminal(e, { pid, paneId, weztermGui, orcaTerminal }));
-    if (matches.length > 1) return "ambiguous";
-    return matches[0];
+    if (registration === undefined) return undefined;
+    const byId = manager.bindingsOf(name).find((e) => e.registration === registration);
+    return byId && (conversationId === undefined || byId.conversationId === conversationId) ? byId : undefined;
   }
 
   /** The candidates of a name registered more than once, for a 403 or 409:
