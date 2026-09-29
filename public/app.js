@@ -3587,6 +3587,7 @@ function clearRoomUnread(convId) {
   renderRailRoomsBadge();
 }
 function renderRailRoomsBadge() {
+  refreshPalette();
   var badge = document.getElementById('rail-rooms-badge');
   if (!badge) return;
   var total = 0;
@@ -4760,6 +4761,8 @@ function openPalette() {
   palette.overlay = overlay;
   input.addEventListener('input', function() { palette.at = 0; drawPalette(); });
   input.addEventListener('keydown', function(e) {
+    // An IME is composing: its keys (Enter picks a candidate) are not ours.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       if (palette.shown.length === 0) return;
@@ -4780,7 +4783,16 @@ function openPalette() {
   input.focus();
 }
 
-function drawPalette() {
+// The list follows the state while open: rooms, DMs, unread and waiting
+// counts (called from their renderers).
+function refreshPalette() {
+  if (!palette.overlay) return;
+  // The selected item stays selected when the list redraws under it.
+  var keep = palette.shown[palette.at] ? palette.shown[palette.at].label : null;
+  drawPalette(keep);
+}
+
+function drawPalette(keepLabel) {
   if (!palette.overlay) return;
   var input = document.getElementById('palette-input');
   var list = document.getElementById('palette-list');
@@ -4822,6 +4834,9 @@ function drawPalette() {
     opt.addEventListener('click', function() { runPalette(i); });
     list.appendChild(opt);
   });
+  if (keepLabel) {
+    for (var ki = 0; ki < palette.shown.length; ki++) { if (palette.shown[ki].label === keepLabel) { palette.at = ki; break; } }
+  }
   if (palette.at >= palette.shown.length) palette.at = 0;
   markPalette();
 }
@@ -4863,7 +4878,12 @@ function closePalette(returnFocus) {
 // key has no other use there).
 document.addEventListener('keydown', function(e) {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || String(e.key).toLowerCase() !== 'k') return;
+  if (e.isComposing) return;
   if (signedOut || settingsOverlay) return;
+  // Not over another dialog (the launcher, the crew roster, a prompt, the
+  // notifications or decisions overlays, the image viewer); Ctrl+K inside
+  // the palette still closes it.
+  if (!palette.overlay && document.querySelector('.session-modal-overlay, .crew-panel-overlay, .launch-dialog-overlay, .notify-panel-overlay, .lightbox')) return;
   e.preventDefault();
   openPalette();
 });
@@ -5452,6 +5472,7 @@ function showNoConversation() {
 }
 
 function renderConversationList() {
+  refreshPalette();
   var list = document.getElementById('conversation-list');
   var activeEl = document.getElementById('active-session');
   list.textContent = '';
@@ -5582,6 +5603,7 @@ function fetchDmPartners() {
 
 function renderDmList() {
   renderRailDmBadge();
+  refreshPalette();
   var list = document.getElementById('dm-list');
   if (!list) return;
   // Presence changes rebuild the list: keyboard focus stays on its row.
@@ -9833,6 +9855,7 @@ function refreshDecisionsBadge() {
         }
       }
       if (decisionsPanelOpen) renderDecisionsPanel();
+      refreshPalette();
       // The page reloads its three views with the badge.
       if (pageNow === 'decisions') loadDecisionsPage();
     }).catch(function() {});
