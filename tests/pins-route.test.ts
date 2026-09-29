@@ -71,8 +71,9 @@ describe("GET /api/pins?conversation=", { timeout: 30_000 }, () => {
     a.send("Kira", "ops one");               // 1
     a.send("Kira", "ops two");               // 2
     a.send("Kira", "for Odo only", { to: ["Odo"] }); // 3, hidden from Rami
-    a.pinMessage(1, true);
-    a.pinMessage(3, true);
+    a.send("Kira", "for Rami", { to: ["Rami"] });     // 4, a DM Rami is party to
+    a.send("Rami", "to Worf", { to: ["Worf"] });       // 5, a DM Rami sent
+    for (const id of [1, 3, 4, 5]) a.pinMessage(id, true);
     const b = S.manager.getRoom(other)!;
     b.send("Worf", "other one");             // 1
     b.send("Worf", "other two");             // 2
@@ -93,11 +94,19 @@ describe("GET /api/pins?conversation=", { timeout: 30_000 }, () => {
     expect((r.body as ChatMessage[])[0].text).toBe("other two");
   });
 
-  it("without the parameter answers for the active room, hidden DMs left out", async () => {
+  it("without the parameter answers for the active room", async () => {
     const r = await get(S.baseUrl, {});
     expect(r.status).toBe(200);
-    expect(pinnedIds(r)).toEqual([1]);
-    expect(pinnedIds(await get(S.baseUrl, { conversation: ops }))).toEqual([1]);
+    expect(pinnedIds(r)).toEqual([1, 4, 5]);
+  });
+
+  it("keeps the DMs the web viewer is party to and leaves out the rest", async () => {
+    const r = await get(S.baseUrl, { conversation: ops });
+    expect(pinnedIds(r)).toEqual([1, 4, 5]);
+    const texts = (r.body as ChatMessage[]).map((m) => m.text);
+    expect(texts).toContain("for Rami");
+    expect(texts).toContain("to Worf");
+    expect(texts).not.toContain("for Odo only");
   });
 
   it("never falls back to the active room for an unknown or empty name", async () => {
