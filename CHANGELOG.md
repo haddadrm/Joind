@@ -11,6 +11,10 @@ Rami chose variant A of the redesign exploration ("A feels most comfortable and 
 - **Fixed alongside:** leaving a page by opening a message did not store the new rail view, so a reload went back to the page; it is stored now.
 - Cache-bust: `?v=27`.
 
+#### Lane 4 gate round 1 (Codex, PASS, one Low fixed)
+- **Low, fixed:** answering or resolving removed the card and focus fell to the page. Focus now moves to the card in its place, else the one before, else the current view (the sidebar view, or the chip on a phone); the card is remembered at the press, since the pressed button is disabled at once.
+- Gate observed: 752 tests in 66 files, tsc clean, no dashes, no `any`.
+
 ### Lane 3b: fidelity to mockup A
 Rami found the build diverging from mockup A, naming the Crew section and the crew avatars and pills. Every visible divergence was listed side by side at 1280 and 400 px (`docs/design/2026-09-29-redesign/FIDELITY-A.md`), then fixed or kept with a reason.
 - **Crew is a page**, as in A: member cards (you first), terminal cards with Invite or Dismiss and Scan, session template cards with Start, plus the roster and launcher buttons. The Crew sidebar lists members with a one-word state, and terminals and templates as compact rows. Choosing a room or a DM, or jumping to a message, leaves the page.

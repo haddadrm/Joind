@@ -4066,6 +4066,7 @@ function decisionCard(d, closed) {
     resolve.textContent = 'Resolve';
     resolve.title = 'Close this ask without choosing';
     resolve.addEventListener('click', function() {
+      rememberDecisionFocus(resolve);
       resolve.disabled = true;
       resolveAsk(d.messageId, d.conversationId);
     });
@@ -4075,7 +4076,15 @@ function decisionCard(d, closed) {
   return card;
 }
 
+function rememberDecisionFocus(el) {
+  var card = el.closest('.decision-card');
+  var body = document.getElementById('page-decisions-body');
+  if (!card || !body) return;
+  decisionsPage.focusAfter = { key: card.getAttribute('data-key'), index: Array.prototype.indexOf.call(body.querySelectorAll('.decision-card'), card) };
+}
+
 function chooseDecision(d, value, btn) {
+  rememberDecisionFocus(btn);
   btn.disabled = true;
   fetch('/api/message/' + d.messageId + '/choose', {
     method: 'POST',
@@ -4107,8 +4116,16 @@ function renderDecisionsPage() {
   if (pageNow !== 'decisions') return;
   var body = document.getElementById('page-decisions-body');
   if (!body) return;
-  var keep = body.contains(document.activeElement) && document.activeElement.closest('.decision-card')
-    ? document.activeElement.closest('.decision-card').getAttribute('data-key') : null;
+  var keepCard = body.contains(document.activeElement) ? document.activeElement.closest('.decision-card') : null;
+  var keep = keepCard ? keepCard.getAttribute('data-key') : null;
+  var keepIndex = keepCard ? Array.prototype.indexOf.call(body.querySelectorAll('.decision-card'), keepCard) : -1;
+  // A pressed choice or Resolve is disabled at once, which can drop focus
+  // before this render: the card it was on is remembered at the press.
+  if (!keep && decisionsPage.focusAfter && (!document.activeElement || document.activeElement === document.body)) {
+    keep = decisionsPage.focusAfter.key;
+    keepIndex = decisionsPage.focusAfter.index;
+  }
+  decisionsPage.focusAfter = null;
   body.textContent = '';
   var view = decisionsPage.view;
   var list = decisionsPage.lists[view];
@@ -4141,9 +4158,17 @@ function renderDecisionsPage() {
   (list || []).forEach(function(d) { wrap.appendChild(decisionCard(d, view === 'closed')); });
   body.appendChild(wrap);
   if (keep) {
+    // Focus stays with its card; when the card has gone (answered or
+    // resolved), it moves to the card now in its place, else the one
+    // before, else the current view control.
+    var cards = wrap.querySelectorAll('.decision-card');
     var again = null;
-    wrap.querySelectorAll('.decision-card').forEach(function(c) { if (c.getAttribute('data-key') === keep) again = c; });
+    cards.forEach(function(c) { if (c.getAttribute('data-key') === keep) again = c; });
+    if (!again && cards.length > 0) again = cards[Math.min(Math.max(keepIndex, 0), cards.length - 1)];
     var target = again ? again.querySelector('button:not([disabled])') : null;
+    if (!target) {
+      target = isMobileView() ? chips.querySelector('.fchip.on') : document.querySelector('#decision-views .decision-view.active');
+    }
     if (target) target.focus();
   }
 }
