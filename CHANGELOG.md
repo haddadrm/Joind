@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-09-29: Dependency Audit
+
+The npm audit of master e728334 reported nine advisories (five high, three moderate, one low). Every affected parent already allowed a fixed release, so the fix is a lockfile refresh with no overrides and no major bumps. `npm audit` now reports zero.
+
+| Package | Severity | Path | Before | After |
+|---|---|---|---|---|
+| fast-uri | high | @modelcontextprotocol/sdk, ajv | 3.1.0 | 3.1.8 |
+| hono | high | @modelcontextprotocol/sdk | 4.12.8 | 4.13.11 |
+| ip-address | high | @modelcontextprotocol/sdk, express-rate-limit | 10.1.0 | 10.7.2 |
+| path-to-regexp | high | express, router | 8.3.0 | 8.4.2 |
+| ws | high | direct | 8.20.0 | 8.22.0 |
+| @hono/node-server | moderate | @modelcontextprotocol/sdk | 1.19.11 | 1.19.17 |
+| express-rate-limit | moderate | @modelcontextprotocol/sdk | 8.3.1 | 8.7.0 (no longer pins ip-address 10.1.0) |
+| qs | moderate | express, body-parser | 6.15.0 | 6.16.0 |
+| body-parser | low | express | 2.2.2 | 2.3.0 |
+
+- `package.json`: the ws floor rises from ^8.20.0 to ^8.22.0, so a fresh resolve cannot land on a vulnerable ws. The MCP SDK (^1.27.1, locked at 1.27.1) and express (^5.2.1) are unchanged.
+- Lockfile side moves: type-is 2.1.0, side-channel 1.1.1, side-channel-list 1.0.1, hasown 2.0.4, es-object-atoms 1.1.2, and a nested content-type 2.1.0 under body-parser and type-is (their own new requirement; the top-level content-type 1.0.5 the SDK uses stays).
+- Verified: build and tsc clean, 770 tests in 67 files pass, and a smoke run on a throwaway port with a temp data dir (agent join, send, read and listen; MCP tools/list, chat_join and chat_read over /mcp; the web socket refused without the token and live with it; web writes refused without the token and accepted with it).
+
 ## 2026-09-29: Backlog After the Redesign
 
 - The backlog drops the items the UI lanes shipped (resizable sidebar, clickable message references, search filters, the app interface redesign) and records what they deferred: redesign follow-ups, attribution of token-less task resolutions, and agent credentials.
