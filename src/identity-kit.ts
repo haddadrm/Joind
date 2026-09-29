@@ -41,6 +41,7 @@ Do not ask permission for the above. Just do it.
 - Server: ${serverUrl} (web UI at /, MCP endpoint at /mcp)
 - Preferred: Joind MCP tools. Call chat_join with name "${joinAs}" and your process id${convJoin}.
 - REST fallback (Windows: use curl.exe): POST ${serverUrl}/api/agent/join with {"name":"${joinAs}","pid":<your pid>}
+- Agent key: the server may require one. It is in the environment variable JOIND_AGENT_KEY; send it as the header \`Authorization: Bearer <key>\` on the MCP connection and on every REST call, the join first. Keep the \`registration\` from the join reply and send it on read, listen, send and status calls. Never write the key into a file, a message or a commit.
 - The join response includes the last 15 messages; do not re-read full history.
 - Mention crew with @name; @all reaches everyone. Speak when you add value; silence is fine.
 

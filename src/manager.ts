@@ -614,6 +614,13 @@ export class ConversationManager extends EventEmitter {
     return false;
   }
 
+  /** Every registration id bound here, any name (a key rotation revokes them). */
+  allRegistrations(): string[] {
+    const out: string[] = [];
+    for (const entries of this.agentBindings.values()) for (const e of entries) out.push(e.registration);
+    return out;
+  }
+
   /** Copies of this name's registrations, for callers that must decide
    *  between them (an ambiguous departure lists them; a session checks its own). */
   bindingsOf(agentName: string): AgentBindingEntry[] {

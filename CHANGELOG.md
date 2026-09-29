@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-29: Agent Credentials (branch `agent-creds`, not merged)
+
+Rami approved the lane on 29 Sep. The agent API needed no credential on a tailnet bind: anyone who could reach the port could join as any free name, post as a joined agent, read rooms and trigger wakes. Design note: `docs/superpowers/specs/2026-09-29-agent-credentials-design.md`.
+
+- **One agent key per server, plus the registration.** The key (`joind-agent-key` beside the data dir, 0600, or `--agent-key` / `JOIND_SERVER_AGENT_KEY`) authenticates the join and every agent call, sent as `Authorization: Bearer`, `X-Joind-Agent-Key` or `?agentKey=`, compared in constant time. The registration a join returns is a credential for that name's own callbacks (read, listen, send, status, heartbeat, typing, unread, decisions, pending delete, leave, resolve), so wake prompts, Codex queue wakes and hosted wakes need nothing new and never carry the key. A hosted registration held on the home server is never a credential there.
+- **`--agent-auth off|warn|require`** (env `JOIND_AGENT_AUTH`), default `warn`. Warn serves everything and counts and logs (once per route per five minutes, no credential values) what require would refuse. Require refuses with 401 (a JSON-RPC error on `/mcp`). Under require everything under `/mcp` and `/api/*` needs the key or the web token in its header or query, except `/api/peer/*` (link token), `/api/web/register` and the callbacks: default deny. Require refuses to start with a generated web token, which `/` serves to anyone.
+- **Rotation**: Settings, Agent key (Reveal, Copy, Rotate pressed twice) or `POST /api/agent-auth/rotate` with the web token. The old key stops at once, MCP sessions included, and every registration that existed is revoked. A flag-set key answers 409. `GET /api/agent-auth` shows the mode, the key's fingerprint and the unauthenticated count by route, never the key.
+- **Fix**: `chat_notes`, `chat_state` and `chat_upload` called `http://127.0.0.1:4200` whatever this server's port or bind; they now call this server's own address with its key.
+- The identity kit says where the key comes from. Cache-bust `?v=31`.
+- Tests: `tests/agent-auth.test.ts` (units; a walk of every app route under require with no key and with a wrong key; REST, the fallbacks, MCP over HTTP with header and URL key, the wake prompt's own lines, rotation, warn and off serving everything, two linked servers both in require).
+
 ## 2026-09-29: Backlog After the Hygiene Batch
 
 - The backlog drops what the hygiene batch shipped: token-less task attribution, the empty conversation fallback, the dead pill helper, the short wake prompt for MCP joiners, and the flaky queue-room timing test.

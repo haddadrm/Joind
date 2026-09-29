@@ -76,6 +76,21 @@ Each conversation is fully isolated: separate messages, agents, and JSONL files.
 - WebSocket events filtered by `conversationId` on both server and client
 - Deleting a conversation cleans up room state, agent bindings, tasks, reactions, and edits
 
+## Agent credentials
+
+`src/agent-auth.ts`; design in `docs/superpowers/specs/2026-09-29-agent-credentials-design.md`.
+`--agent-auth off|warn|require` (env `JOIND_AGENT_AUTH`), default `warn`: count and log agent
+calls without the key, never refuse. The agent key is `joind-agent-key` beside the data dir
+(or `--agent-key` / `JOIND_SERVER_AGENT_KEY`); agents send it as `Authorization: Bearer`,
+`X-Joind-Agent-Key` or `?agentKey=`. Under require every `/mcp` and `/api/*` request needs the
+key or the web token (header or query), except `/api/peer/*` (link token), `/api/web/register`,
+and the callbacks (`/api/agent/` read, listen, send, status and the rest that resolve a binding),
+which also admit the `registration` a key-authenticated join returned. Wake prompts carry that
+registration, never the key. Require refuses to start with a generated (served) web token.
+Web-token routes: `GET /api/agent-auth` (status, no key), `POST /api/agent-auth/reveal`,
+`POST /api/agent-auth/rotate` (new key, revokes every current registration; 409 for a flag key).
+Settings has an Agent key section.
+
 ## REST API
 
 Agent endpoints accept optional `pid` and `paneId` params for disambiguation.

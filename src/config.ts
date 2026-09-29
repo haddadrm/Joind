@@ -13,6 +13,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { homedir } from "os";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { ensureDir } from "./persist.js";
+import { parseAgentAuthMode, MIN_AGENT_KEY_LENGTH, type AgentAuthMode } from "./agent-auth.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DATA_DIR = join(__dirname, "..", "data");
@@ -40,6 +41,11 @@ export interface JoindConfig {
   webTokenUserSet: boolean;
   /** Linked peer servers (JOIND_LINKS JSON, then repeatable --link name=url=token). */
   links: LinkConfig[];
+  /** Agent credentials: off, warn (default) or require (--agent-auth / JOIND_AGENT_AUTH). */
+  agentAuth?: AgentAuthMode;
+  /** The agent key when set by --agent-key / JOIND_SERVER_AGENT_KEY; otherwise
+   *  the server reads or mints joind-agent-key beside the data dir. */
+  agentKey?: string;
 }
 
 /** One linked peer: its server name (its own instance name), its base URL,
@@ -160,7 +166,16 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): JoindConfig 
   const links = parseLinks(argv, process.env.JOIND_LINKS);
   if (links.some((l) => l.name === instance)) throw new Error(`A link cannot carry this server's own name (${instance})`);
 
-  return { port, host, dataDir, instance, crewHome, humanNames, presenceGraceMs, logFile, webToken, webTokenUserSet, links };
+  const agentAuth = parseAgentAuthMode(getFlag(argv, "agent-auth") ?? process.env.JOIND_AGENT_AUTH);
+  // A server-side name, not the JOIND_AGENT_KEY clients read, so a client's
+  // env on the same machine never silently becomes the server's key.
+  const agentKeyRaw = getFlag(argv, "agent-key") ?? process.env.JOIND_SERVER_AGENT_KEY;
+  const agentKey = agentKeyRaw != null && agentKeyRaw.trim() !== "" ? agentKeyRaw.trim() : undefined;
+  if (agentKey !== undefined && (agentKey.length < MIN_AGENT_KEY_LENGTH || /\s/.test(agentKey))) {
+    throw new Error(`--agent-key must be at least ${MIN_AGENT_KEY_LENGTH} characters with no spaces`);
+  }
+
+  return { port, host, dataDir, instance, crewHome, humanNames, presenceGraceMs, logFile, webToken, webTokenUserSet, links, agentAuth, ...(agentKey !== undefined ? { agentKey } : {}) };
 }
 
 /** Secrets live beside the data dir, not in it (the /data mount is scoped, but depth is safer). */

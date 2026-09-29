@@ -420,6 +420,13 @@ const registrationArg = z.string().optional().describe(
   "The registration id your join returned. Pass it when your name may be registered more than once, and after an MCP reconnect."
 );
 
+/** How a tool reaches this server's own REST routes. */
+export interface SelfCall {
+  baseUrl(): string;
+  /** Headers every self-call carries (the agent key). */
+  headers(): Record<string, string>;
+}
+
 export function registerTools(
   server: McpServer,
   manager: ConversationManager,
@@ -429,7 +436,12 @@ export function registerTools(
   cursorStore?: CursorStore,
   editStore?: EditStore,
   remote?: RemoteRooms,
+  selfCall?: SelfCall,
 ): void {
+  // The REST routes some tools call back into: this server's own address,
+  // with its agent key (never a fixed port: that reached another server).
+  const selfBase = (): string => selfCall?.baseUrl() ?? "http://127.0.0.1:4200";
+  const selfHeaders = (extra: Record<string, string> = {}): Record<string, string> => ({ ...(selfCall?.headers() ?? {}), ...extra });
   /** In a remote room, what only its home server can do is said, not faked. */
   const remoteOnly = (target: SessionRoute, what: string) =>
     target.room instanceof MirrorRoom
@@ -1093,19 +1105,19 @@ export function registerTools(
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
-      const baseUrl = "http://127.0.0.1:4200";
+      const baseUrl = selfBase();
       if (notes !== undefined) {
         // Write
         const resp = await fetch(`${baseUrl}/api/agent/scratchpad`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: selfHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ sender, notes, conversation: target.convId }),
         });
         if (!resp.ok) return { content: [{ type: "text" as const, text: "Failed to save notes" }] };
         return { content: [{ type: "text" as const, text: "Notes saved" }] };
       }
       // Read
-      const resp = await fetch(`${baseUrl}/api/agent/scratchpad?sender=${encodeURIComponent(sender)}&conversation=${target.convId}`);
+      const resp = await fetch(`${baseUrl}/api/agent/scratchpad?sender=${encodeURIComponent(sender)}&conversation=${encodeURIComponent(target.convId)}`, { headers: selfHeaders() });
       const data = await resp.json() as { notes: string };
       return { content: [{ type: "text" as const, text: data.notes || "(empty scratchpad)" }] };
     }
@@ -1129,19 +1141,19 @@ export function registerTools(
       if (!target) {
         return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
       }
-      const baseUrl = "http://127.0.0.1:4200";
+      const baseUrl = selfBase();
       if (key) {
         // Write
         const resp = await fetch(`${baseUrl}/api/state`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: selfHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ conversation: target.convId, key, value: value || "" }),
         });
         const data = await resp.json();
         return { content: [{ type: "text" as const, text: `State updated:\n${JSON.stringify(data, null, 2)}` }] };
       }
       // Read all
-      const resp = await fetch(`${baseUrl}/api/state?conversation=${target.convId}`);
+      const resp = await fetch(`${baseUrl}/api/state?conversation=${encodeURIComponent(target.convId)}`, { headers: selfHeaders() });
       const data = await resp.json();
       const entries = Object.entries(data as Record<string, string>);
       if (entries.length === 0) {
@@ -1267,9 +1279,9 @@ export function registerTools(
       };
       const contentType = mimeMap[ext] || "text/plain";
       try {
-        const resp = await fetch("http://127.0.0.1:4200/api/upload", {
+        const resp = await fetch(`${selfBase()}/api/upload`, {
           method: "POST",
-          headers: { "Content-Type": contentType },
+          headers: selfHeaders({ "Content-Type": contentType }),
           body: content,
         });
         const data = await resp.json() as { url: string; filename: string };

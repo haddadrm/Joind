@@ -3050,6 +3050,158 @@ function buildTokenSection() {
   return sec;
 }
 
+// Agent key (server side: src/agent-auth.ts). The status never carries the
+// key; Reveal asks for it explicitly and it is shown only in this dialog.
+function buildAgentKeySection() {
+  var sec = settingsSection('agent-key', 'Agent key');
+  var body = document.createElement('div');
+  body.className = 'agent-key-body';
+  var loading = document.createElement('span');
+  loading.className = 'setting-hint';
+  loading.textContent = 'Loading';
+  body.appendChild(loading);
+  sec.appendChild(body);
+  fetch('/api/agent-auth').then(function(r) { return r.ok ? r.json() : null; }).then(function(st) {
+    renderAgentKeyInto(body, st);
+  }).catch(function() { renderAgentKeyInto(body, null); });
+  return sec;
+}
+
+function agentKeyModeHint(mode) {
+  if (mode === 'require') return 'Require: agent calls without the key are refused';
+  if (mode === 'warn') return 'Warn: agent calls without the key are served, counted and logged';
+  return 'Off: agent calls are not checked';
+}
+
+function renderAgentKeyInto(body, st) {
+  while (body.firstChild) body.removeChild(body.firstChild);
+  if (!st) {
+    var none = document.createElement('span');
+    none.className = 'setting-hint';
+    none.textContent = 'Not available (this server predates agent keys, or the web token is missing)';
+    body.appendChild(none);
+    return;
+  }
+  var mode = document.createElement('span');
+  mode.className = 'setting-mono';
+  mode.id = 'settings-agent-auth-mode';
+  mode.textContent = st.mode;
+  body.appendChild(settingsRow('Mode', agentKeyModeHint(st.mode) + '. Set with --agent-auth at start.', mode).row);
+
+  var fp = document.createElement('span');
+  fp.className = 'setting-mono';
+  fp.textContent = st.fingerprint;
+  var keyHint = st.keySource === 'flag' ? 'Fingerprint of the key set by flag or env' : 'Fingerprint of the key in joind-agent-key';
+  body.appendChild(settingsRow('Key', keyHint, fp).row);
+
+  var count = document.createElement('span');
+  count.className = 'setting-mono';
+  count.id = 'settings-agent-auth-count';
+  count.textContent = String(st.unauthenticated || 0);
+  var countHint = st.mode === 'require' ? 'Refused since the server started' : st.mode === 'warn' ? 'Served without the key since the server started; require would refuse them' : 'Not counted while off';
+  body.appendChild(settingsRow('Without the key', countHint, count).row);
+  (st.routes || []).slice(0, 5).forEach(function(r) {
+    var line = document.createElement('span');
+    line.className = 'setting-hint';
+    var total = (r.missing || 0) + (r.bad || 0) + (r.badRegistration || 0);
+    line.textContent = total + ', last ' + new Date(r.lastAt).toLocaleString() + (r.lastName ? ', as ' + r.lastName : '') + (r.lastFrom ? ', from ' + r.lastFrom : '');
+    body.appendChild(settingsRow(r.route, '', line).row);
+  });
+  if (st.webTokenServed) {
+    var served = document.createElement('span');
+    served.className = 'setting-hint';
+    served.textContent = 'The web token is served to the page: require will not start, and the key is not shown or rotated here. Set JOIND_WEB_TOKEN first.';
+    body.appendChild(settingsRow('Before require', '', served).row);
+  }
+
+  var revealWrap = document.createElement('div');
+  revealWrap.className = 'setting-control';
+  var reveal = document.createElement('button');
+  reveal.type = 'button';
+  reveal.className = 'btn btn-sm';
+  reveal.id = 'settings-agent-key-reveal';
+  reveal.textContent = 'Reveal';
+  var shown = document.createElement('input');
+  shown.type = 'text';
+  shown.readOnly = true;
+  shown.className = 'setting-input';
+  shown.id = 'settings-agent-key-value';
+  shown.setAttribute('aria-label', 'Agent key');
+  shown.hidden = true;
+  var copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'btn btn-sm';
+  copy.textContent = 'Copy';
+  copy.hidden = true;
+  var status = document.createElement('span');
+  status.className = 'setting-hint';
+  status.setAttribute('role', 'status');
+  reveal.addEventListener('click', function() {
+    if (!shown.hidden) { shown.value = ''; shown.hidden = true; copy.hidden = true; reveal.textContent = 'Reveal'; return; }
+    fetch('/api/agent-auth/reveal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function(r) { return r.json().catch(function() { return null; }).then(function(d) { return r.ok ? d : { error: (d && d.error) || 'Could not read the key' }; }); })
+      .then(function(d) {
+        if (!d || !d.key) { status.textContent = (d && d.error) || 'Could not read the key'; return; }
+        shown.value = d.key;
+        shown.hidden = false;
+        copy.hidden = false;
+        reveal.textContent = 'Hide';
+        shown.select();
+      })
+      .catch(function() { status.textContent = 'Could not read the key'; });
+  });
+  copy.addEventListener('click', function() {
+    if (!shown.value) return;
+    var done = function() { status.textContent = 'Copied'; };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(shown.value).then(done, function() { shown.select(); status.textContent = 'Press Ctrl+C to copy'; });
+    } else { shown.select(); status.textContent = 'Press Ctrl+C to copy'; }
+  });
+  revealWrap.appendChild(reveal);
+  revealWrap.appendChild(shown);
+  revealWrap.appendChild(copy);
+  revealWrap.appendChild(status);
+  body.appendChild(settingsRow('Show the key', 'Put it in JOIND_AGENT_KEY on each machine; MCP clients send it as Authorization: Bearer', revealWrap).row);
+
+  var rotate = document.createElement('button');
+  rotate.type = 'button';
+  rotate.className = 'btn btn-sm btn-danger-outline';
+  rotate.id = 'settings-agent-key-rotate';
+  rotate.textContent = 'Rotate';
+  var rotateStatus = document.createElement('span');
+  rotateStatus.className = 'setting-hint';
+  rotateStatus.setAttribute('role', 'status');
+  if (st.keySource === 'flag') {
+    rotate.disabled = true;
+    rotateStatus.textContent = 'Set by flag or env: change it there';
+  }
+  rotate.addEventListener('click', function() {
+    if (rotate.getAttribute('data-confirm') !== 'yes') {
+      rotate.setAttribute('data-confirm', 'yes');
+      rotate.textContent = 'Press again to rotate';
+      rotateStatus.textContent = 'The old key and every current join stop working at once';
+      return;
+    }
+    rotate.disabled = true;
+    fetch('/api/agent-auth/rotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function(r) { return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; }); })
+      .then(function(x) {
+        if (!x.ok) { rotateStatus.textContent = (x.d && x.d.error) || 'Could not rotate'; rotate.disabled = false; return; }
+        return fetch('/api/agent-auth').then(function(r) { return r.ok ? r.json() : null; }).then(function(next) {
+          renderAgentKeyInto(body, next);
+          var again = document.getElementById('settings-agent-key-rotate');
+          if (again) again.focus();
+        });
+      })
+      .catch(function() { rotateStatus.textContent = 'Could not rotate'; rotate.disabled = false; });
+  });
+  var rotateWrap = document.createElement('div');
+  rotateWrap.className = 'setting-control';
+  rotateWrap.appendChild(rotate);
+  rotateWrap.appendChild(rotateStatus);
+  body.appendChild(settingsRow('Rotate', 'Mints a new key; every member rejoins with it', rotateWrap).row);
+}
+
 function buildViewSection() {
   var sec = settingsSection('view', 'View');
   var clear = document.createElement('button');
@@ -3105,7 +3257,7 @@ function openSettingsModal(section, opener) {
 
   var body = document.createElement('div');
   body.className = 'settings-body';
-  [buildProfileSection(), buildAppearanceSection(), buildSoundsSection(), buildAgentsSection(), buildRolesSection(), buildSnippetsSection(), buildTokenSection(), buildViewSection()]
+  [buildProfileSection(), buildAppearanceSection(), buildSoundsSection(), buildAgentsSection(), buildRolesSection(), buildSnippetsSection(), buildTokenSection(), buildAgentKeySection(), buildViewSection()]
     .forEach(function(s) { body.appendChild(s); });
 
   var foot = document.createElement('div');

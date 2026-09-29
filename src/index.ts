@@ -40,6 +40,7 @@ import { EditStore } from "./edits.js";
 import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, processTreeOnce } from "./terminals.js";
 import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from "./crew.js";
 import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webNamePath, validWebName, canRegister, type JoindConfig } from "./config.js";
+import { AgentAuth, AgentKeyRotateError, agentKeyPath, classifyRoute, loadOrCreateAgentKey, newAgentKey, routeLabel, type Credential } from "./agent-auth.js";
 import { LinkRegistry, type LinkClientOptions } from "./link.js";
 import { PeerHub } from "./peer.js";
 import { MirrorRoom, type MirrorNotice } from "./mirror.js";
@@ -93,6 +94,26 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   const HOST = CONFIG.host;
   const DATA_DIR = CONFIG.dataDir;
   const INSTANCE_NAME = CONFIG.instance;
+  const AGENT_AUTH_MODE = CONFIG.agentAuth ?? "warn";
+  // Under require the web token also admits agent routes (the page reacts,
+  // pins, tags, uploads), so a token served to every requester of / would
+  // open them to anyone who loads the page. Refuse before touching anything.
+  if (AGENT_AUTH_MODE === "require" && !CONFIG.webTokenUserSet) {
+    throw new Error("--agent-auth require needs a user-set web token (--web-token or JOIND_WEB_TOKEN): a generated token is served to every requester of /");
+  }
+  // A key file that cannot be read or written never stops a server in off
+  // or warn (nothing depends on the key there): it runs on a key held in
+  // memory for this run, and says so. Require needs a real key.
+  let fileKey: { key: string; path?: string } | undefined;
+  if (CONFIG.agentKey === undefined) {
+    try {
+      fileKey = { key: loadOrCreateAgentKey(DATA_DIR), path: agentKeyPath(DATA_DIR) };
+    } catch (err) {
+      if (AGENT_AUTH_MODE === "require") throw new Error(`--agent-auth require: cannot read or write ${agentKeyPath(DATA_DIR)} (${(err as Error).message})`);
+      console.log(`  [agent-auth] cannot read or write ${agentKeyPath(DATA_DIR)} (${(err as Error).message}); using a key held in memory for this run`);
+      fileKey = { key: newAgentKey() };
+    }
+  }
   initCrewStore(DATA_DIR);
   const releaseLock = acquireLock(CONFIG);
 
@@ -260,6 +281,73 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   const app = express();
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+
+  // --- Agent credentials (src/agent-auth.ts) ---
+  // Mounted before every route: under require nothing under /mcp or /api
+  // is served without a credential except the self-authenticating routes
+  // and the callbacks (which admit a credentialed registration, checked in
+  // the route once the body is parsed).
+  const agentAuth = new AgentAuth({
+    mode: AGENT_AUTH_MODE,
+    key: CONFIG.agentKey ?? fileKey!.key,
+    keyUserSet: CONFIG.agentKey !== undefined,
+    ...(fileKey?.path ? { keyPath: fileKey.path } : {}),
+    webTokenServed: !CONFIG.webTokenUserSet,
+  });
+  app.use((req, res, next) => {
+    if (agentAuth.mode === "off") { next(); return; }
+    const cls = classifyRoute(req.method, req.path);
+    if (cls === "outside" || cls === "exempt") { next(); return; }
+    const cred: Credential = agentAuth.credentialOf(req, webAuthorized);
+    res.locals.agentCred = cred;
+    if (cred === "key" || cred === "web") { next(); return; }
+    // A callback with no credential is decided in the route, by its registration.
+    if (cls === "callback" && cred === "none") { next(); return; }
+    agentAuth.note(routeLabel(req.method, req.path), cred === "bad" ? "bad" : "missing", req.socket.remoteAddress);
+    if (!agentAuth.enforcing) { res.locals.agentNoted = true; next(); return; }
+    refuseAgent(req, res, cred === "bad" ? "bad" : "missing");
+  });
+
+  /** The 401 for an agent call without a valid credential. */
+  function refuseAgent(req: express.Request, res: express.Response, why: "bad" | "missing" | "badRegistration"): void {
+    const message = why === "bad"
+      ? "Wrong agent key. Check JOIND_AGENT_KEY (the key may have been rotated)."
+      : why === "badRegistration"
+        ? "This registration is not a credential here (it left, was revoked by a key rotation, or belongs to another name). Join again with the agent key."
+        : "Agent credential required: send Authorization: Bearer <agent key> (or X-Joind-Agent-Key), or the registration from your join on a callback.";
+    res.setHeader("Cache-Control", "no-store");
+    const p = req.path.toLowerCase();
+    if (p === "/mcp" || p.startsWith("/mcp/")) {
+      // MCP clients read JSON-RPC errors.
+      res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message }, id: null });
+      return;
+    }
+    res.setHeader("WWW-Authenticate", 'Bearer realm="joind-agent"');
+    res.status(401).json({ error: message });
+  }
+
+  /**
+   * A callback route's admission once its body is parsed: the key or the web
+   * token (seen by the gate), else a registration of this exact name that a
+   * join on this server issued and no rotation revoked. False after a 401.
+   */
+  function callbackAdmitted(res: express.Response, name: string, registration: string | undefined): boolean {
+    if (agentAuth.mode === "off") return true;
+    const cred = res.locals.agentCred as Credential | undefined;
+    if (cred === "key" || cred === "web") return true;
+    // Already counted by the gate (warn only: require refused it there).
+    if (res.locals.agentNoted === true) return true;
+    // Hosted registrations (a member whose terminal is on a linked peer) are
+    // routing ids for the link, never credentials on this server.
+    const own = manager.bindingsOf(name).filter((e) => !e.host).map((e) => e.registration);
+    if (cred !== "bad" && agentAuth.registrationAdmits(registration, own)) return true;
+    const req = res.req;
+    const why = cred === "bad" ? "bad" : registration ? "badRegistration" : "missing";
+    agentAuth.note(routeLabel(req.method, req.path), why, req.socket.remoteAddress, name);
+    if (!agentAuth.enforcing) return true;
+    refuseAgent(req, res, why);
+    return false;
+  }
 
   // Load session templates
   loadTemplates();
@@ -569,7 +657,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   function createMcpServer(): McpServer {
     const server = new McpServer({ name: "joind", version: "0.2.0" });
-    registerTools(server, manager, taskStore, (name) => agentRoles[name], reactionStore, cursorStore, editStore, linkRegistry);
+    registerTools(server, manager, taskStore, (name) => agentRoles[name], reactionStore, cursorStore, editStore, linkRegistry, {
+      // This server's own address and key: the tools that call back into
+      // the REST routes (notes, state, upload) must reach THIS server.
+      baseUrl: () => manager.injectBaseUrl ?? injectBaseUrlFor(HOST, PORT),
+      headers: () => ({ "X-Joind-Agent-Key": agentAuth.currentKey() }),
+    });
     return server;
   }
 
@@ -759,6 +852,35 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       }
     }
     res.json({ ok: true, name: valid });
+  });
+
+  // --- Agent key (Settings, Agent key): web token only ---
+  // The status never carries the key; reveal is an explicit POST.
+  app.get("/api/agent-auth", (req, res) => {
+    if (!requireWebToken(req, res)) return;
+    res.setHeader("Cache-Control", "no-store");
+    res.json(agentAuth.status());
+  });
+  // While the web token is generated, / serves it to anyone, so the web
+  // token proves nothing: the key is not revealed and not rotated then.
+  const SERVED_TOKEN_REFUSAL = "The web token is served to every requester of /, so it cannot guard the agent key. Set JOIND_WEB_TOKEN (or --web-token) and restart; until then the key is in joind-agent-key beside the data dir.";
+  app.post("/api/agent-auth/reveal", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
+    res.setHeader("Cache-Control", "no-store");
+    if (!CONFIG.webTokenUserSet) { res.status(409).json({ error: SERVED_TOKEN_REFUSAL }); return; }
+    res.json({ key: agentAuth.currentKey(), fingerprint: agentAuth.fingerprint() });
+  });
+  app.post("/api/agent-auth/rotate", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
+    res.setHeader("Cache-Control", "no-store");
+    if (!CONFIG.webTokenUserSet) { res.status(409).json({ error: SERVED_TOKEN_REFUSAL }); return; }
+    try {
+      const out = agentAuth.rotate(manager.allRegistrations());
+      res.json({ ok: true, ...out });
+    } catch (err) {
+      if (err instanceof AgentKeyRotateError) { res.status(409).json({ error: err.message }); return; }
+      res.status(500).json({ error: "could not write the new key; the old key stays in force" });
+    }
   });
 
   // --- Prompt snippets (composer plus-menu): per viewer, web token only ---
@@ -2038,6 +2160,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // (MCP chat_join, /api/agent/join, or the UI invite /api/join). A local HTTP
     // client claiming an unbound name gets nothing.
     const convId = manager.getAgentBinding(name, pid, paneId, orcaTerminal, weztermGui, registration);
+    // Agent credentials before anything is said (the lookup above is pure):
+    // a caller without one hears nothing about bindings (src/agent-auth.ts).
+    if (!callbackAdmitted(res, name, registration)) return null;
     if (convId) {
       const room = manager.getRoom(convId);
       if (room) {
@@ -2324,6 +2449,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const { name, pid, paneId } = req.body as { name?: string; pid?: number; paneId?: number };
     if (!name) { res.status(400).json({ error: "name required" }); return; }
     const registration = registrationOf(req);
+    if (!callbackAdmitted(res, name, registration)) return;
     const convId = manager.getAgentBinding(name, pid, paneId, orcaOf(req), weztermGuiOf(req), registration);
     if (!convId && registration != null) {
       // A named registration that does not exist is not a reason to remove another.
@@ -2830,6 +2956,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!CONFIG.webTokenUserSet) {
       console.log(`  [web] Generated web token is served to any requester of /; on a multi-user or non-loopback host, set JOIND_WEB_TOKEN or --web-token to keep it out of the page.`);
     }
+    console.log(`  [agent-auth] mode ${agentAuth.mode}; agent key ${CONFIG.agentKey !== undefined ? "set by flag" : "from joind-agent-key"} (fingerprint ${agentAuth.fingerprint()})`);
     if (CONFIG.links.length > 0) {
       console.log(`  [link] ${INSTANCE_NAME} linked to ${CONFIG.links.map((l) => `${l.name} (${l.url})`).join(", ")}`);
     }
