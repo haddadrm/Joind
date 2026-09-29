@@ -605,7 +605,7 @@ function formatAge(ms) {
 }
 
 // Ages drift while nothing else re-renders; keep them honest once a minute.
-setInterval(function() { if (activeConversation) renderPills(); }, 60000);
+var membersTick = setInterval(function() { if (activeConversation && !signedOut) renderPills(); }, 60000);
 
 // --- Members: the toolbar button and the right side panel (redesign lane 2) ---
 // The header no longer carries a pill per agent. The members button shows
@@ -2982,10 +2982,11 @@ function startAutoScan() {
 }
 
 function autoScanTerminals() {
-  if (autoScanRunning) return;
+  if (autoScanRunning || signedOut) return;
   autoScanRunning = true;
   fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
     autoScanRunning = false;
+    if (signedOut) return;
     // Only re-render if something changed (compare by pid+paneId+tabTitle fingerprint)
     var oldFp = lastScanResults.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
     var newFp = t.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
@@ -3692,6 +3693,11 @@ function signOut() {
   closeCrewPanel();
   closeLaunchDialog();
   closeMobileDrawer();
+  // Background polls stop; their callbacks also check signedOut, so a
+  // reply already in flight cannot touch the page.
+  clearInterval(sessionStatusInterval);
+  clearInterval(membersTick);
+  if (autoScanInterval) { clearInterval(autoScanInterval); autoScanInterval = null; }
   document.querySelectorAll('.session-modal-overlay, .notify-panel-overlay, .crew-panel-overlay, .launch-dialog-overlay').forEach(function(el) { el.remove(); });
   if (ws) { try { ws.close(); } catch (e) { /* already closed */ } }
   showSignedOut(served);
@@ -5154,7 +5160,9 @@ function startSessionUI(template) {
 }
 
 function refreshSessionStatus() {
+  if (signedOut) return;
   fetch('/api/sessions').then(function(r) { return r.json(); }).then(function(sessions) {
+    if (signedOut) return;
     var el = document.getElementById('session-status');
     el.textContent = '';
     if (sessions.length === 0) {
@@ -5187,8 +5195,8 @@ function refreshSessionStatus() {
   });
 }
 
-// Poll session status while active
-setInterval(refreshSessionStatus, 3000);
+// Poll session status while active (stopped on sign out)
+var sessionStatusInterval = setInterval(refreshSessionStatus, 3000);
 
 // --- Task System ---
 var tasks = [];
