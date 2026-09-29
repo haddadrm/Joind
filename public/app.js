@@ -242,6 +242,7 @@ function revertRename() {
     pill.title = 'You: ' + prev;
     pill.setAttribute('aria-label', 'Your menu, ' + prev);
   }
+  syncUserMenuName(prev);
 }
 
 function connect() {
@@ -530,7 +531,11 @@ function connect() {
       case 'web-rename-ok':
         // Server re-registered the name and rebound this socket; nothing else needed.
         renameAttempt = null;
-        if (event.data && event.data.name) wsName = event.data.name;
+        // The server replies { type, name } (top level); older code read
+        // event.data.name, never found it, and kept the old name, so a later
+        // rename back to it was skipped and the server kept the other name.
+        if (typeof event.name === 'string' && event.name) wsName = event.name;
+        else if (event.data && event.data.name) wsName = event.data.name;
         break;
       case 'web-rename-error':
         revertRename();
@@ -3516,6 +3521,7 @@ function setupYouPill() {
     }
     pill.title = 'You: ' + name;
     pill.setAttribute('aria-label', 'Your menu, ' + name);
+    syncUserMenuName(name);
     localStorage.setItem('joind-sender-name', name);
     // Renames flow only through the authenticated socket (web-rename); HTTP
     // register is first-boot only and would 409 here. If no OPEN socket can
@@ -3550,6 +3556,18 @@ function setupYouPill() {
   });
 
   syncName();
+}
+
+// An open user menu follows a rename (or a refused one) in place.
+function syncUserMenuName(name) {
+  if (!openPopover || !openPopover.classList.contains('user-menu')) return;
+  var nm = openPopover.querySelector('.user-menu-name');
+  if (nm) nm.textContent = name;
+  var av = openPopover.querySelector('.user-menu-head .you-avatar');
+  if (av) {
+    av.textContent = (name || '?').charAt(0).toUpperCase();
+    av.style.background = getSenderColor(name);
+  }
 }
 
 // A colour for your name, as the old profile popover set it.
