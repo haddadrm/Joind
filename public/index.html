@@ -4,12 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
   <title>Joind</title>
-  <link rel="stylesheet" href="style.css?v=24">
+  <!-- The chosen theme before first paint (Settings or the user menu store it). -->
+  <script>try { if (localStorage.getItem('joind-theme') === 'light') document.documentElement.setAttribute('data-theme', 'light'); } catch (e) { /* storage unavailable: dark */ }</script>
+  <link rel="stylesheet" href="style.css?v=25">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <!-- Vendored and pinned (no CDN): marked renders Markdown, DOMPurify sanitizes it (public/sanitize.js). -->
   <script src="vendor/marked-17.0.5.umd.js"></script>
   <script src="vendor/purify-3.4.16.min.js"></script>
-  <script src="sanitize.js?v=24"></script>
+  <script src="sanitize.js?v=25"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
@@ -45,7 +47,7 @@
         <span class="rail-ico" aria-hidden="true"><i data-lucide="bell" width="18" height="18"></i></span><span class="rail-label">Activity</span>
         <span id="notify-badge" class="rail-badge notify-badge" hidden aria-live="polite">0</span>
       </button>
-      <div class="rail-item rail-you you-pill" id="you-pill" title="Your profile" role="button" tabindex="0" aria-label="Your profile" aria-haspopup="dialog">
+      <div class="rail-item rail-you you-pill" id="you-pill" title="You" role="button" tabindex="0" aria-label="Your menu" aria-haspopup="menu" aria-expanded="false">
         <span class="you-avatar" id="you-avatar" aria-hidden="true">?</span><span class="rail-label you-name" id="you-name-display">human</span>
       </div>
     </nav>
@@ -128,21 +130,6 @@
         </div>
       </div>
 
-      <!-- Preferences: sound, settings and the turn limit -->
-      <div class="ws-footer side-prefs">
-        <div class="turn-guard-row" id="turn-guard-row">
-          <label class="turn-guard-label" title="Limit consecutive agent turns before requiring human input">
-            <span class="turn-guard-text">Turn limit</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="turn-guard-toggle" onchange="toggleTurnGuard(this.checked)" />
-              <span class="toggle-slider"></span>
-            </label>
-          </label>
-          <input type="number" class="turn-guard-spinner" id="turn-guard-limit" min="1" max="100" value="20" disabled onchange="setTurnGuardLimit(this.value)" title="Max agent turns" aria-label="Max agent turns" />
-          <button class="btn btn-action" type="button" id="mute-btn" onclick="toggleMute()" title="Toggle sound" aria-label="Toggle sound" aria-pressed="false"><i data-lucide="volume-2" width="16" height="16" aria-hidden="true"></i></button>
-          <button class="btn btn-action" type="button" onclick="openSoundSettings(event)" title="Settings" aria-label="Open settings"><i data-lucide="settings" width="16" height="16" aria-hidden="true"></i></button>
-        </div>
-      </div>
       <div class="sidebar-seam" id="sidebar-seam" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuemin="180" aria-valuemax="480" tabindex="0" title="Drag to resize, or far left to collapse; arrow keys when focused"></div>
     </aside>
 
@@ -289,8 +276,8 @@
     </div>
   </div>
 
-  <script src="ui-helpers.js?v=24"></script>
-  <script src="app.js?v=24"></script>
+  <script src="ui-helpers.js?v=25"></script>
+  <script src="app.js?v=25"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();

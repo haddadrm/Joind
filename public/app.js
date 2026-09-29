@@ -238,6 +238,7 @@ function revertRename() {
 }
 
 function connect() {
+  if (signedOut) return; // a reconnect timer that fires after sign out
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   // Always claim the last server-accepted name; renames flow through
   // web-rename on the open socket, never through a fresh ?name=.
@@ -516,6 +517,9 @@ function connect() {
         break;
       case 'roles-updated':
         availableRoles = event.data;
+        // An open Settings modal shows the new roles, unless someone is typing in its form.
+        var rolesSec = document.getElementById('settings-roles');
+        if (rolesSec && !rolesSec.contains(document.activeElement)) renderRolesInto(rolesSec);
         break;
       case 'web-rename-ok':
         // Server re-registered the name and rebound this socket; nothing else needed.
@@ -567,6 +571,7 @@ function connect() {
   };
   ws.onclose = function(e) {
     dot.classList.add('disconnected');
+    if (signedOut) return; // signed out: no reconnect
     // Repeated auth rejections with a user-supplied token: drop it and ask
     // again (covers typos and stale sessionStorage tokens). Injected-token
     // mode keeps the plain reconnect loop.
@@ -1027,7 +1032,7 @@ document.addEventListener('keydown', function(e) {
     // Escape belongs to whatever else is on top or being typed in: a modal
     // or overlay, the phone drawer, the mention menu, or a text field
     // outside the panel (the search box, the composer).
-    if (document.querySelector('.session-modal-overlay, .crew-panel-overlay, .launch-dialog-overlay, .notify-panel-overlay, .sidebar-backdrop.visible')) return;
+    if (document.querySelector('.session-modal-overlay, .crew-panel-overlay, .launch-dialog-overlay, .notify-panel-overlay, .settings-overlay, .signed-out-overlay, .sidebar-backdrop.visible')) return;
     var mention = document.getElementById('mention-menu');
     if (mention && !mention.classList.contains('hidden')) return;
     if (active && active !== document.body && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))) return;
@@ -2332,284 +2337,481 @@ function openImportDialog() {
   input.click();
 }
 
-// --- Global sound setting (popover, not prompt) ---
-function openSoundSettings(evt) {
-  openSettings(evt, 'sounds');
+// --- The Settings modal (redesign lane 3) ---
+// One place for preferences, reached from your menu: your name and colour,
+// the theme, sounds (on or off, the sound, per agent), the turn limit,
+// roles, the web token with sign out, and Clear view. It replaces the
+// settings cog, the sound toggle and the turn limit that sat in the
+// sidebar. A dialog: focus stays inside while it is open (Tab wraps),
+// Escape or Done closes it and focus returns to what opened it.
+var settingsOverlay = null;
+var settingsOpener = null;
+
+// Kept under the old names for anything that still calls them.
+function openSoundSettings() { openSettingsModal('sounds'); }
+function openSettings(evt, section) { if (evt && evt.stopPropagation) evt.stopPropagation(); openSettingsModal(section === 'roles' ? 'roles' : section === 'sounds' ? 'sounds' : null); }
+
+function settingsSection(id, title) {
+  var sec = document.createElement('section');
+  sec.className = 'settings-section';
+  sec.id = 'settings-' + id;
+  sec.setAttribute('aria-labelledby', 'settings-' + id + '-title');
+  var h = document.createElement('h3');
+  h.className = 'settings-section-title';
+  h.id = 'settings-' + id + '-title';
+  h.textContent = title;
+  sec.appendChild(h);
+  return sec;
 }
 
-function openSettings(evt, defaultTab) {
-  if (evt) evt.stopPropagation();
-  closePopover();
-  var anchor = evt ? (evt.currentTarget || evt.target) : null;
-  var pop = document.createElement('div');
-  pop.className = 'pill-popover settings-popover';
-  pop.style.width = '320px';
-  pop.style.height = '440px';
-  pop.style.display = 'flex';
-  pop.style.flexDirection = 'column';
-  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+// One row: name and hint on the left, the control on the right. The
+// control is labelled by the row's name.
+function settingsRow(name, hint, control, controlId) {
+  var row = document.createElement('div');
+  row.className = 'setting-row';
+  var text = document.createElement('div');
+  text.className = 'setting-text';
+  var n = document.createElement(controlId ? 'label' : 'span');
+  n.className = 'setting-name';
+  n.textContent = name;
+  if (controlId) n.htmlFor = controlId;
+  text.appendChild(n);
+  if (hint) {
+    var h = document.createElement('span');
+    h.className = 'setting-hint';
+    h.textContent = hint;
+    text.appendChild(h);
+  }
+  row.appendChild(text);
+  var wrap = document.createElement('div');
+  wrap.className = 'setting-control';
+  if (control) wrap.appendChild(control);
+  row.appendChild(wrap);
+  return { row: row, control: wrap, hint: text };
+}
 
-  // Tab bar
-  var tabBar = document.createElement('div');
-  tabBar.className = 'settings-tab-bar';
-  var soundsTab = document.createElement('button');
-  soundsTab.className = 'settings-tab' + (defaultTab !== 'roles' ? ' active' : '');
-  soundsTab.textContent = 'Sounds';
-  var rolesTab = document.createElement('button');
-  rolesTab.className = 'settings-tab' + (defaultTab === 'roles' ? ' active' : '');
-  rolesTab.textContent = 'Roles';
-  tabBar.appendChild(soundsTab);
-  tabBar.appendChild(rolesTab);
-  pop.appendChild(tabBar);
+function settingsSwitch(id, checked, onChange) {
+  var label = document.createElement('label');
+  label.className = 'toggle-switch';
+  var input = document.createElement('input');
+  input.type = 'checkbox';
+  input.id = id;
+  input.checked = !!checked;
+  input.addEventListener('change', function() { onChange(input.checked); });
+  var slider = document.createElement('span');
+  slider.className = 'toggle-slider';
+  label.appendChild(input);
+  label.appendChild(slider);
+  return label;
+}
 
-  // Panels
-  var soundsPanel = document.createElement('div');
-  soundsPanel.className = 'settings-panel';
-  if (defaultTab === 'roles') soundsPanel.style.display = 'none';
-  var rolesPanel = document.createElement('div');
-  rolesPanel.className = 'settings-panel';
-  if (defaultTab !== 'roles') rolesPanel.style.display = 'none';
-
-  soundsTab.addEventListener('click', function() {
-    soundsTab.classList.add('active'); rolesTab.classList.remove('active');
-    soundsPanel.style.display = ''; rolesPanel.style.display = 'none';
-  });
-  rolesTab.addEventListener('click', function() {
-    rolesTab.classList.add('active'); soundsTab.classList.remove('active');
-    rolesPanel.style.display = ''; soundsPanel.style.display = 'none';
-  });
-
-  // === Sounds panel content ===
-
-  // Global sound
-  var globalRow = document.createElement('div');
-  globalRow.className = 'pop-row';
-  var globalLabel = document.createElement('label');
-  globalLabel.textContent = 'Global';
-  var globalSelect = document.createElement('select');
-  globalSelect.className = 'pop-select';
+function soundSelect(id, value, withGlobal, onChange) {
+  var sel = document.createElement('select');
+  sel.className = 'setting-select';
+  if (id) sel.id = id;
+  if (withGlobal) {
+    var def = document.createElement('option');
+    def.value = '';
+    def.textContent = '(global)';
+    sel.appendChild(def);
+  }
   SOUNDS.forEach(function(s) {
     var opt = document.createElement('option');
-    opt.value = s; opt.textContent = s;
-    if (soundSettings._global === s) opt.selected = true;
-    globalSelect.appendChild(opt);
+    opt.value = s;
+    opt.textContent = s;
+    sel.appendChild(opt);
   });
-  globalSelect.addEventListener('change', function() {
-    soundSettings._global = globalSelect.value;
-    saveSoundSettings();
-    var wasMuted = isMuted; isMuted = false;
-    playSound('_preview');
-    isMuted = wasMuted;
-  });
-  globalRow.appendChild(globalLabel);
-  globalRow.appendChild(globalSelect);
-  soundsPanel.appendChild(globalRow);
+  sel.value = value || '';
+  sel.addEventListener('change', function() { onChange(sel.value); });
+  return sel;
+}
 
-  // Mute toggle
-  var muteRow = document.createElement('div');
-  muteRow.className = 'pop-row';
-  var muteLabel = document.createElement('label');
-  muteLabel.textContent = 'Mute';
-  var muteCheck = document.createElement('input');
-  muteCheck.type = 'checkbox';
-  muteCheck.checked = isMuted;
-  muteCheck.style.accentColor = 'var(--accent)';
-  muteCheck.addEventListener('change', function() {
-    isMuted = muteCheck.checked;
+function previewSound() {
+  var wasMuted = isMuted;
+  isMuted = false;
+  playSound('_preview');
+  isMuted = wasMuted;
+}
+
+function buildProfileSection() {
+  var sec = settingsSection('profile', 'Profile');
+  var nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.id = 'settings-name';
+  nameInput.className = 'setting-input';
+  nameInput.value = myName();
+  nameInput.maxLength = 64;
+  nameInput.spellcheck = false;
+  function applyName() {
+    var v = nameInput.value.trim();
+    if (!v || v === myName()) { nameInput.value = myName(); return; }
+    if (setMyName) setMyName(v);
+  }
+  nameInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); applyName(); } });
+  nameInput.addEventListener('change', applyName);
+  sec.appendChild(settingsRow('Display name', 'How the crew sees you in this room', nameInput, 'settings-name').row);
+
+  var colors = document.createElement('div');
+  colors.className = 'settings-colors';
+  colors.setAttribute('role', 'group');
+  colors.setAttribute('aria-label', 'Your colour');
+  var mine = getSenderColor(myName());
+  YOU_COLORS.forEach(function(c) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'settings-color';
+    b.style.background = c;
+    b.title = c;
+    b.setAttribute('aria-label', 'Colour ' + c);
+    b.setAttribute('aria-pressed', mine === c ? 'true' : 'false');
+    b.addEventListener('click', function() {
+      setMyColor(c);
+      colors.querySelectorAll('.settings-color').forEach(function(o) { o.setAttribute('aria-pressed', o === b ? 'true' : 'false'); });
+    });
+    colors.appendChild(b);
+  });
+  sec.appendChild(settingsRow('Colour', 'Your name and avatar', colors).row);
+  return sec;
+}
+
+function buildAppearanceSection() {
+  var sec = settingsSection('appearance', 'Appearance');
+  var seg = document.createElement('div');
+  seg.className = 'seg';
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', 'Theme');
+  [['dark', 'Dark'], ['light', 'Light']].forEach(function(t) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = t[1];
+    b.setAttribute('data-theme-choice', t[0]);
+    b.setAttribute('aria-pressed', currentTheme() === t[0] ? 'true' : 'false');
+    b.addEventListener('click', function() { setTheme(t[0]); });
+    seg.appendChild(b);
+  });
+  sec.appendChild(settingsRow('Theme', 'Kept for this browser', seg).row);
+  return sec;
+}
+
+function buildSoundsSection() {
+  var sec = settingsSection('sounds', 'Sounds');
+  sec.appendChild(settingsRow('Play sounds', 'Chimes on new messages and mentions', settingsSwitch('settings-sound-on', !isMuted, function(on) {
+    isMuted = !on;
     localStorage.setItem('joind-muted', JSON.stringify(isMuted));
     updateMuteBtn();
+  }), 'settings-sound-on').row);
+  var global = soundSelect('settings-sound', soundSettings._global, false, function(v) {
+    soundSettings._global = v;
+    saveSoundSettings();
+    previewSound();
   });
-  muteRow.appendChild(muteLabel);
-  muteRow.appendChild(muteCheck);
-  soundsPanel.appendChild(muteRow);
-
-  // Preview button
-  var previewBtn = document.createElement('button');
-  previewBtn.className = 'btn btn-sm';
-  previewBtn.textContent = 'Preview';
-  previewBtn.style.margin = '6px 12px 8px';
-  previewBtn.style.width = 'calc(100% - 24px)';
-  previewBtn.addEventListener('click', function() {
-    var wasMuted = isMuted;
-    isMuted = false;
-    playSound('_preview');
-    isMuted = wasMuted;
-  });
-  soundsPanel.appendChild(previewBtn);
-
-  // Per-agent section
+  var preview = document.createElement('button');
+  preview.type = 'button';
+  preview.className = 'btn btn-sm';
+  preview.textContent = 'Preview';
+  preview.addEventListener('click', previewSound);
+  var both = document.createElement('div');
+  both.className = 'setting-control';
+  both.appendChild(global);
+  both.appendChild(preview);
+  sec.appendChild(settingsRow('Sound', 'The default for every agent', both, 'settings-sound').row);
   if (agents.length > 0) {
-    var agentDivider = document.createElement('div');
-    agentDivider.style.borderTop = '1px solid var(--border)';
-    agentDivider.style.margin = '0';
-    soundsPanel.appendChild(agentDivider);
-
-    var agentHdr = document.createElement('div');
-    agentHdr.className = 'pop-row';
-    agentHdr.style.paddingTop = '8px';
-    agentHdr.style.paddingBottom = '2px';
-    var agentHdrLabel = document.createElement('span');
-    agentHdrLabel.style.fontSize = 'var(--fs-meta)';
-    agentHdrLabel.style.textTransform = 'uppercase';
-    agentHdrLabel.style.letterSpacing = '1px';
-    agentHdrLabel.style.color = 'var(--text-muted)';
-    agentHdrLabel.style.fontWeight = '600';
-    agentHdrLabel.textContent = 'Per Agent';
-    agentHdr.appendChild(agentHdrLabel);
-    soundsPanel.appendChild(agentHdr);
-
-    agents.forEach(function(a) {
-      var row = document.createElement('div');
-      row.className = 'pop-row';
+    var hint = settingsRow('Per agent', 'Overrides for the agents in this room', null);
+    sec.appendChild(hint.row);
+    var grid = document.createElement('div');
+    grid.className = 'settings-agent-sounds';
+    agents.forEach(function(a, i) {
+      var id = 'settings-agent-sound-' + i;
       var lbl = document.createElement('label');
+      lbl.className = 'settings-agent-name';
+      lbl.htmlFor = id;
       lbl.textContent = a.name;
       lbl.title = a.name;
-      lbl.style.width = '60px';
-      lbl.style.overflow = 'hidden';
-      lbl.style.textOverflow = 'ellipsis';
-      lbl.style.whiteSpace = 'nowrap';
       lbl.style.color = getSenderColor(a.name);
-      var sel = document.createElement('select');
-      sel.className = 'pop-select';
-      // "default" option uses global setting
-      var defOpt = document.createElement('option');
-      defOpt.value = '';
-      defOpt.textContent = '(global)';
-      if (!soundSettings[a.name]) defOpt.selected = true;
-      sel.appendChild(defOpt);
-      SOUNDS.forEach(function(s) {
-        var opt = document.createElement('option');
-        opt.value = s; opt.textContent = s;
-        if (soundSettings[a.name] === s) opt.selected = true;
-        sel.appendChild(opt);
-      });
-      sel.addEventListener('change', function() {
-        if (sel.value === '') {
-          delete soundSettings[a.name];
-        } else {
-          soundSettings[a.name] = sel.value;
-        }
+      var sel = soundSelect(id, soundSettings[a.name] || '', true, function(v) {
+        if (v === '') delete soundSettings[a.name];
+        else soundSettings[a.name] = v;
         saveSoundSettings();
       });
-      row.appendChild(lbl);
-      row.appendChild(sel);
-      soundsPanel.appendChild(row);
+      grid.appendChild(lbl);
+      grid.appendChild(sel);
     });
+    sec.appendChild(grid);
   }
+  return sec;
+}
 
-  // Local-actions footer (demoted from the header toolbar)
-  var actionsDivider = document.createElement('div');
-  actionsDivider.className = 'pop-divider';
-  actionsDivider.textContent = 'View';
-  soundsPanel.appendChild(actionsDivider);
+function buildAgentsSection() {
+  var sec = settingsSection('turns', 'Agents');
+  var sw = settingsSwitch('turn-guard-toggle', turnGuardState.enabled, function(on) { toggleTurnGuard(on); });
+  var num = document.createElement('input');
+  num.type = 'number';
+  num.id = 'turn-guard-limit';
+  num.className = 'setting-input narrow';
+  num.min = '1';
+  num.max = '100';
+  num.value = String(turnGuardState.limit);
+  num.disabled = !turnGuardState.enabled;
+  num.setAttribute('aria-label', 'Max agent turns');
+  num.addEventListener('change', function() { setTurnGuardLimit(num.value); });
+  var both = document.createElement('div');
+  both.className = 'setting-control';
+  both.appendChild(sw);
+  both.appendChild(num);
+  sec.appendChild(settingsRow('Turn limit', 'Consecutive agent turns before a human must answer', both, 'turn-guard-toggle').row);
+  return sec;
+}
 
-  var clearViewBtn = document.createElement('button');
-  clearViewBtn.type = 'button';
-  clearViewBtn.className = 'btn btn-sm';
-  clearViewBtn.textContent = 'Clear view';
-  clearViewBtn.title = 'Hides messages from the page until you reload — does not delete anything';
-  clearViewBtn.addEventListener('click', function() {
-    clearChat();
-    closePopover();
-  });
-  soundsPanel.appendChild(clearViewBtn);
-
-  pop.appendChild(soundsPanel);
-
-  // === Roles panel content ===
-  // Presets section
-  var presetsLabel = document.createElement('div');
-  presetsLabel.className = 'role-subsection-label';
-  presetsLabel.textContent = 'Presets';
-  rolesPanel.appendChild(presetsLabel);
-
-  var presetList = document.createElement('div');
-  presetList.className = 'role-list';
+function renderRolesInto(sec) {
+  while (sec.children.length > 1) sec.removeChild(sec.lastChild);
+  var presetRow = settingsRow('Presets', 'Built in', null);
+  sec.appendChild(presetRow.row);
+  var presets = document.createElement('div');
+  presets.className = 'settings-roles';
   (availableRoles.preset || []).forEach(function(r) {
-    var item = document.createElement('div');
-    item.className = 'role-item preset';
-    item.textContent = r.emoji + ' ' + r.label;
-    presetList.appendChild(item);
+    var chip = document.createElement('span');
+    chip.className = 'settings-role';
+    chip.textContent = (r.emoji || '') + ' ' + r.label;
+    presets.appendChild(chip);
   });
-  rolesPanel.appendChild(presetList);
-
-  // Custom section
-  var customLabel = document.createElement('div');
-  customLabel.className = 'role-subsection-label';
-  customLabel.style.marginTop = '10px';
-  customLabel.textContent = 'Custom';
-  rolesPanel.appendChild(customLabel);
-
-  var customList = document.createElement('div');
-  customList.className = 'role-list';
+  sec.appendChild(presets);
+  sec.appendChild(settingsRow('Custom', 'Yours, shared by this Joind', null).row);
+  var custom = document.createElement('div');
+  custom.className = 'settings-roles';
   (availableRoles.custom || []).forEach(function(r) {
-    var item = document.createElement('div');
-    item.className = 'role-item custom';
+    var chip = document.createElement('span');
+    chip.className = 'settings-role';
     var label = document.createElement('span');
-    label.textContent = r.emoji + ' ' + r.label;
-    var delBtn = document.createElement('button');
-    delBtn.className = 'role-delete-btn';
-    delBtn.textContent = '\u00D7';
-    delBtn.title = 'Delete custom role';
-    delBtn.addEventListener('click', function() {
-      fetch('/api/roles/' + encodeURIComponent(r.label), { method: 'DELETE' }).then(function() {
-        item.remove();
+    label.textContent = (r.emoji || '') + ' ' + r.label;
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '×';
+    del.title = 'Delete custom role';
+    del.setAttribute('aria-label', 'Delete role ' + r.label);
+    del.addEventListener('click', function() {
+      fetch('/api/roles/' + encodeURIComponent(r.label), { method: 'DELETE' }).then(function(resp) {
+        if (!resp.ok) return;
+        availableRoles.custom = (availableRoles.custom || []).filter(function(x) { return x.label !== r.label; });
+        renderRolesInto(sec);
+        var add = document.getElementById('settings-role-label');
+        if (add) add.focus();
       });
     });
-    item.appendChild(label);
-    item.appendChild(delBtn);
-    customList.appendChild(item);
+    chip.appendChild(label);
+    chip.appendChild(del);
+    custom.appendChild(chip);
   });
-  rolesPanel.appendChild(customList);
-
-  // Add new role form
-  var addForm = document.createElement('div');
-  addForm.className = 'role-add-form';
-  addForm.style.marginTop = '8px';
-  var emojiInput = document.createElement('input');
-  emojiInput.type = 'text';
-  emojiInput.className = 'role-emoji-input';
-  emojiInput.placeholder = 'emoji';
-  emojiInput.maxLength = 4;
-  var labelInput = document.createElement('input');
-  labelInput.type = 'text';
-  labelInput.className = 'role-label-input';
-  labelInput.placeholder = 'role name';
-  var addBtn = document.createElement('button');
-  addBtn.className = 'btn btn-sm';
-  addBtn.textContent = '+';
-  addBtn.addEventListener('click', function() {
-    var em = emojiInput.value.trim();
-    var lb = labelInput.value.trim();
-    if (!em || !lb) return;
-    fetch('/api/roles', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ emoji: em, label: lb })
-    }).then(function(resp) {
-      if (resp.ok) { emojiInput.value = ''; labelInput.value = ''; closePopover(); openSettings(null, 'roles'); }
-    });
-  });
-  addForm.appendChild(emojiInput);
-  addForm.appendChild(labelInput);
-  addForm.appendChild(addBtn);
-  rolesPanel.appendChild(addForm);
-
-  pop.appendChild(rolesPanel);
-
-  // Position: center on desktop, bottom-sheet on mobile (CSS handles mobile)
-  document.body.appendChild(pop);
-  if (!isMobileView()) {
-    var popRect = pop.getBoundingClientRect();
-    pop.style.top = Math.max(8, (window.innerHeight - popRect.height) / 2) + 'px';
-    pop.style.left = Math.max(8, (window.innerWidth - popRect.width) / 2) + 'px';
-  } else {
-    // Mobile: CSS makes it a bottom sheet — clear any fixed dimensions
-    pop.style.width = '';
-    pop.style.height = '';
+  if (!custom.firstChild) {
+    var none = document.createElement('span');
+    none.className = 'setting-hint';
+    none.textContent = 'None yet';
+    custom.appendChild(none);
   }
+  sec.appendChild(custom);
+  var emoji = document.createElement('input');
+  emoji.type = 'text';
+  emoji.className = 'setting-input narrow';
+  emoji.placeholder = 'emoji';
+  emoji.maxLength = 4;
+  emoji.setAttribute('aria-label', 'Role emoji');
+  var label = document.createElement('input');
+  label.type = 'text';
+  label.id = 'settings-role-label';
+  label.className = 'setting-input';
+  label.placeholder = 'role name';
+  var add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'btn btn-sm';
+  add.textContent = 'Add';
+  var status = document.createElement('span');
+  status.className = 'setting-hint';
+  status.setAttribute('role', 'status');
+  function submit() {
+    var em = emoji.value.trim();
+    var lb = label.value.trim();
+    if (!em || !lb) return;
+    status.textContent = '';
+    fetch('/api/roles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emoji: em, label: lb }) })
+      .then(function(resp) {
+        return resp.json().catch(function() { return {}; }).then(function(d) {
+          if (!resp.ok) { status.textContent = resp.status === 409 ? 'That role already exists' : (d && d.error) || 'Could not add the role'; return; }
+          // The server cleans the label (lower case, hyphens): keep its role.
+          var role = d && d.role && d.role.label ? d.role : { emoji: em, label: lb };
+          if (!(availableRoles.custom || []).some(function(x) { return x.label === role.label; })) {
+            availableRoles.custom = (availableRoles.custom || []).concat([role]);
+          }
+          renderRolesInto(sec);
+          var again = document.getElementById('settings-role-label');
+          if (again) again.focus();
+        });
+      })
+      .catch(function() { status.textContent = 'Could not add the role'; });
+  }
+  add.addEventListener('click', submit);
+  label.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  var form = document.createElement('div');
+  form.className = 'setting-control';
+  form.appendChild(emoji);
+  form.appendChild(label);
+  form.appendChild(add);
+  form.appendChild(status);
+  sec.appendChild(settingsRow('Add a role', '', form, 'settings-role-label').row);
+}
 
-  openPopover = pop;
+function buildRolesSection() {
+  var sec = settingsSection('roles', 'Roles');
+  renderRolesInto(sec);
+  return sec;
+}
+
+function buildTokenSection() {
+  var sec = settingsSection('token', 'Web token');
+  var src = tokenSource();
+  var hint = src === 'served' ? 'Served by this Joind to the page; it gates direct messages'
+    : src === 'tab' ? 'Entered for this tab session only; it gates direct messages'
+    : 'Not set: direct messages stay closed';
+  var value = document.createElement('span');
+  value.className = 'setting-mono';
+  value.textContent = maskedToken();
+  var both = document.createElement('div');
+  both.className = 'setting-control';
+  both.appendChild(value);
+  if (src !== 'served') {
+    var change = document.createElement('button');
+    change.type = 'button';
+    change.className = 'btn btn-sm';
+    change.id = 'settings-token-change';
+    change.textContent = src === 'tab' ? 'Change' : 'Enter token';
+    change.addEventListener('click', function() {
+      closeSettingsModal(false);
+      promptWebToken(function() { location.reload(); });
+    });
+    both.appendChild(change);
+  }
+  sec.appendChild(settingsRow('Token', hint, both).row);
+  var out = document.createElement('button');
+  out.type = 'button';
+  out.className = 'btn btn-sm btn-danger-outline';
+  out.id = 'settings-sign-out';
+  out.textContent = 'Sign out';
+  out.addEventListener('click', function() {
+    if (out.getAttribute('data-confirm') === 'yes') { signOut(); return; }
+    out.setAttribute('data-confirm', 'yes');
+    out.textContent = 'Press again to sign out';
+  });
+  sec.appendChild(settingsRow('Sign out', 'Clears the token from this tab and closes the connection', out).row);
+  return sec;
+}
+
+function buildViewSection() {
+  var sec = settingsSection('view', 'View');
+  var clear = document.createElement('button');
+  clear.type = 'button';
+  clear.className = 'btn btn-sm';
+  clear.textContent = 'Clear view';
+  clear.addEventListener('click', function() { clearChat(); closeSettingsModal(true); });
+  sec.appendChild(settingsRow('Clear view', 'Hides the messages on this page until you reload; nothing is deleted', clear).row);
+  return sec;
+}
+
+function settingsFocusables() {
+  if (!settingsOverlay) return [];
+  return Array.prototype.slice.call(settingsOverlay.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+    .filter(function(el) { return !el.disabled && el.offsetParent !== null; });
+}
+
+function openSettingsModal(section, opener) {
+  closePopover();
+  if (settingsOverlay) closeSettingsModal(false);
+  var from = opener || document.activeElement;
+  settingsOpener = from && from !== document.body ? from : document.getElementById('you-pill');
+  var overlay = document.createElement('div');
+  overlay.className = 'settings-overlay';
+  overlay.id = 'settings-overlay';
+  overlay.addEventListener('mousedown', function(e) { if (e.target === overlay) closeSettingsModal(true); });
+  overlay.addEventListener('click', function(e) { e.stopPropagation(); });
+  var modal = document.createElement('div');
+  modal.className = 'settings-modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'settings-title');
+
+  var head = document.createElement('div');
+  head.className = 'settings-head';
+  var title = document.createElement('h2');
+  title.className = 'settings-title';
+  title.id = 'settings-title';
+  title.textContent = 'Settings';
+  var x = document.createElement('button');
+  x.type = 'button';
+  x.className = 'tbtn';
+  x.setAttribute('aria-label', 'Close settings');
+  x.title = 'Close';
+  var xi = document.createElement('i');
+  xi.setAttribute('data-lucide', 'x');
+  xi.setAttribute('width', '16');
+  xi.setAttribute('height', '16');
+  x.appendChild(xi);
+  x.addEventListener('click', function() { closeSettingsModal(true); });
+  head.appendChild(title);
+  head.appendChild(x);
+
+  var body = document.createElement('div');
+  body.className = 'settings-body';
+  [buildProfileSection(), buildAppearanceSection(), buildSoundsSection(), buildAgentsSection(), buildRolesSection(), buildTokenSection(), buildViewSection()]
+    .forEach(function(s) { body.appendChild(s); });
+
+  var foot = document.createElement('div');
+  foot.className = 'settings-foot';
+  var done = document.createElement('button');
+  done.type = 'button';
+  done.className = 'btn btn-primary';
+  done.textContent = 'Done';
+  done.addEventListener('click', function() { closeSettingsModal(true); });
+  foot.appendChild(done);
+
+  modal.appendChild(head);
+  modal.appendChild(body);
+  modal.appendChild(foot);
+  overlay.appendChild(modal);
+
+  overlay.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSettingsModal(true);
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    var f = settingsFocusables();
+    if (f.length === 0) return;
+    var first = f[0];
+    var last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+
+  document.body.appendChild(overlay);
+  settingsOverlay = overlay;
+  if (window.lucide) lucide.createIcons({ root: overlay });
+  var target = section ? document.getElementById('settings-' + section) : null;
+  if (target) {
+    target.scrollIntoView({ block: 'start' });
+    target.classList.add('flash');
+    var firstControl = target.querySelector('button, input, select');
+    (firstControl || done).focus();
+  } else {
+    document.getElementById('settings-name').focus();
+  }
+}
+
+function closeSettingsModal(returnFocus) {
+  if (!settingsOverlay) return;
+  settingsOverlay.remove();
+  settingsOverlay = null;
+  var back = settingsOpener;
+  settingsOpener = null;
+  if (returnFocus && back && back.isConnected && back.offsetParent !== null) back.focus();
 }
 
 // --- @Mention autocomplete ---
@@ -3226,6 +3428,17 @@ function formatDay(ts) {
 }
 
 // --- "You" pill ---
+// Your avatar at the rail foot opens your menu: Settings, Theme, Web token
+// and Sign out (redesign lane 3). The name and colour that the old profile
+// popover edited live in the Settings modal now.
+var setMyName = null;   // set by setupYouPill: rename through the one path
+var YOU_COLORS = [
+  '#da7756','#e74c3c','#f39c12','#f1c40f','#2ecc71','#1abc9c',
+  '#4ecdc4','#3498db','#4285f4','#9b59b6','#7c3aed','#e91e63',
+  '#ff6b6b','#ff9ff3','#feca57','#48dbfb','#0abde3','#10ac84',
+  '#c8d6e5','#8395a7','#576574','#222f3e'
+];
+
 function setupYouPill() {
   var pill = document.getElementById('you-pill');
   var display = document.getElementById('you-name-display');
@@ -3246,7 +3459,7 @@ function setupYouPill() {
       avatar.style.background = getSenderColor(name);
     }
     pill.title = 'You: ' + name;
-    pill.setAttribute('aria-label', 'Your profile, ' + name);
+    pill.setAttribute('aria-label', 'Your menu, ' + name);
     localStorage.setItem('joind-sender-name', name);
     // Renames flow only through the authenticated socket (web-rename); HTTP
     // register is first-boot only and would 409 here. If no OPEN socket can
@@ -3261,134 +3474,238 @@ function setupYouPill() {
   }
   senderInput.addEventListener('input', syncName);
   senderInput.addEventListener('change', syncName);
+  setMyName = function(name) {
+    senderInput.value = String(name || '').trim() || 'human';
+    syncName();
+  };
 
-  // Keyboard activation (role="button" needs Enter/Space)
+  // Keyboard activation (role="button" needs Enter/Space); ArrowUp opens
+  // the menu too, as it opens upward from the rail foot.
   pill.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowUp') {
       e.preventDefault();
-      pill.click();
+      e.stopPropagation();
+      openUserMenu();
     }
   });
-
-  // Click pill → popover with name, color, sound
   pill.addEventListener('click', function(e) {
     e.stopPropagation();
-    closePopover();
-
-    var pop = document.createElement('div');
-    pop.className = 'pill-popover';
-    pop.addEventListener('click', function(ev) { ev.stopPropagation(); });
-
-    var currentName = senderInput.value || 'human';
-    var color = getSenderColor(currentName);
-
-    // Header
-    var hdr = document.createElement('div');
-    hdr.className = 'pop-header';
-    var hdrTitle = document.createElement('span');
-    hdrTitle.textContent = 'Your Profile';
-    hdrTitle.style.color = color;
-    hdrTitle.style.fontWeight = '700';
-    hdr.appendChild(hdrTitle);
-    pop.appendChild(hdr);
-
-    // Name
-    var nameRow = document.createElement('div');
-    nameRow.className = 'pop-row';
-    var nameLabel = document.createElement('label');
-    nameLabel.textContent = 'Name';
-    var nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.value = currentName;
-    nameInput.className = 'pop-input';
-    nameInput.addEventListener('keydown', function(ev) {
-      if (ev.key === 'Enter') {
-        senderInput.value = nameInput.value.trim() || 'human';
-        syncName();
-        closePopover();
-      }
-    });
-    nameRow.appendChild(nameLabel);
-    nameRow.appendChild(nameInput);
-    pop.appendChild(nameRow);
-
-    // Color picker
-    var colorRow = document.createElement('div');
-    colorRow.className = 'pop-row';
-    var colorLabel = document.createElement('label');
-    colorLabel.textContent = 'Color';
-    colorRow.appendChild(colorLabel);
-    var colorDots = document.createElement('div');
-    colorDots.className = 'pop-colors';
-    var COLORS = [
-      '#da7756','#e74c3c','#f39c12','#f1c40f','#2ecc71','#1abc9c',
-      '#4ecdc4','#3498db','#4285f4','#9b59b6','#7c3aed','#e91e63',
-      '#ff6b6b','#ff9ff3','#feca57','#48dbfb','#0abde3','#10ac84',
-      '#c8d6e5','#8395a7','#576574','#222f3e'
-    ];
-    COLORS.forEach(function(c) {
-      var dot = document.createElement('span');
-      dot.className = 'pop-color-dot' + (color === c ? ' active' : '');
-      dot.style.background = c;
-      dot.addEventListener('click', function() {
-        var name = (nameInput.value.trim() || 'human').toLowerCase();
-        SENDER_COLORS[name] = c;
-        localStorage.setItem('joind-colors', JSON.stringify(SENDER_COLORS));
-        recolorMessages(name, c);
-        syncName();
-        closePopover();
-      });
-      colorDots.appendChild(dot);
-    });
-    colorRow.appendChild(colorDots);
-    pop.appendChild(colorRow);
-
-    // Sound
-    var soundRow = document.createElement('div');
-    soundRow.className = 'pop-row';
-    var soundLabel = document.createElement('label');
-    soundLabel.textContent = 'Sound';
-    var soundSelect = document.createElement('select');
-    soundSelect.className = 'pop-select';
-    SOUNDS.forEach(function(s) {
-      var opt = document.createElement('option');
-      opt.value = s; opt.textContent = s;
-      if (soundSettings._global === s) opt.selected = true;
-      soundSelect.appendChild(opt);
-    });
-    soundSelect.addEventListener('change', function() {
-      soundSettings._global = soundSelect.value;
-      saveSoundSettings();
-      var wasMuted = isMuted; isMuted = false;
-      playSound('_preview');
-      isMuted = wasMuted;
-    });
-    soundRow.appendChild(soundLabel);
-    soundRow.appendChild(soundSelect);
-    pop.appendChild(soundRow);
-
-    // Position — clamp to viewport
-    document.body.appendChild(pop);
-    var rect = pill.getBoundingClientRect();
-    var popRect = pop.getBoundingClientRect();
-    // Beside the rail, level with the pill's foot (a phone shows a sheet).
-    var ptop = rect.bottom - popRect.height;
-    var pleft = rect.right + 8;
-    if (pleft + popRect.width > window.innerWidth - 8) {
-      pleft = window.innerWidth - popRect.width - 8;
-    }
-    if (!isMobileView()) {
-      pop.style.top = Math.max(8, Math.min(window.innerHeight - popRect.height - 8, ptop)) + 'px';
-      pop.style.left = Math.max(8, pleft) + 'px';
-    }
-
-    openPopover = pop;
-    popoverAnchor = pill;
-    nameInput.focus();
-    nameInput.select();
+    openUserMenu();
   });
 
   syncName();
+}
+
+// A colour for your name, as the old profile popover set it.
+function setMyColor(c) {
+  var name = (myName() || 'human').toLowerCase();
+  SENDER_COLORS[name] = c;
+  try { localStorage.setItem('joind-colors', JSON.stringify(SENDER_COLORS)); } catch (e) { /* storage unavailable */ }
+  recolorMessages(name, c);
+  if (setMyName) setMyName(myName());
+}
+
+// --- Theme ---
+var THEME_KEY = 'joind-theme';
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+function setTheme(t) {
+  var theme = t === 'light' ? 'light' : 'dark';
+  if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
+  try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* storage unavailable: this page only */ }
+  document.querySelectorAll('[data-theme-choice]').forEach(function(b) {
+    b.setAttribute('aria-pressed', b.getAttribute('data-theme-choice') === theme ? 'true' : 'false');
+  });
+}
+function toggleTheme() { setTheme(currentTheme() === 'light' ? 'dark' : 'light'); }
+
+// --- Web token: where it comes from, masked ---
+function tokenSource() {
+  if (window.__JOIND_TOKEN) return 'served';
+  var stored = '';
+  try { stored = sessionStorage.getItem('joind-web-token') || ''; } catch (e) { /* storage unavailable */ }
+  return stored ? 'tab' : 'none';
+}
+function maskedToken() {
+  var t = webToken();
+  if (!t) return 'not set';
+  return '•••••• ' + t.slice(-4);
+}
+
+// --- The menu ---
+function menuIcon(name) {
+  var span = document.createElement('span');
+  span.className = 'menu-ico';
+  span.setAttribute('aria-hidden', 'true');
+  var i = document.createElement('i');
+  i.setAttribute('data-lucide', name);
+  i.setAttribute('width', '16');
+  i.setAttribute('height', '16');
+  span.appendChild(i);
+  return span;
+}
+
+function openUserMenu() {
+  var pill = document.getElementById('you-pill');
+  if (!pill) return;
+  if (openPopover && openPopover.classList.contains('user-menu')) { closePopover(); pill.focus(); return; }
+  closePopover();
+  var pop = document.createElement('div');
+  pop.className = 'pill-popover user-menu';
+  pop.setAttribute('role', 'menu');
+  pop.setAttribute('aria-label', 'Your menu');
+  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+
+  var head = document.createElement('div');
+  head.className = 'user-menu-head';
+  var av = document.createElement('span');
+  av.className = 'you-avatar';
+  av.setAttribute('aria-hidden', 'true');
+  av.textContent = (myName() || '?').charAt(0).toUpperCase();
+  av.style.background = getSenderColor(myName());
+  var who = document.createElement('div');
+  who.className = 'user-menu-who';
+  var nm = document.createElement('span');
+  nm.className = 'user-menu-name';
+  nm.textContent = myName();
+  var sub = document.createElement('span');
+  sub.className = 'user-menu-sub';
+  var inst = document.getElementById('instance-name');
+  sub.textContent = (inst ? inst.textContent : 'Joind') + ', this browser';
+  who.appendChild(nm);
+  who.appendChild(sub);
+  head.appendChild(av);
+  head.appendChild(who);
+  pop.appendChild(head);
+
+  var items = [];
+  function addItem(icon, label, hint, fn, cls) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'menu-item' + (cls ? ' ' + cls : '');
+    b.setAttribute('role', 'menuitem');
+    b.appendChild(menuIcon(icon));
+    var t = document.createElement('span');
+    t.textContent = label;
+    b.appendChild(t);
+    if (hint) {
+      var h = document.createElement('span');
+      h.className = 'menu-hint';
+      h.textContent = hint;
+      b.appendChild(h);
+    }
+    b.addEventListener('click', function(e) { e.stopPropagation(); fn(b); });
+    pop.appendChild(b);
+    items.push(b);
+    return b;
+  }
+  addItem('settings', 'Settings', '', function() { closePopover(); openSettingsModal(null, pill); });
+  addItem(currentTheme() === 'light' ? 'moon' : 'sun', currentTheme() === 'light' ? 'Dark theme' : 'Light theme', '', function() {
+    toggleTheme();
+    closePopover();
+    pill.focus();
+  });
+  var src = tokenSource();
+  addItem('key-round', 'Web token', src === 'served' ? 'served' : src === 'tab' ? 'this tab' : 'not set', function() {
+    closePopover();
+    openSettingsModal('token', pill);
+  });
+  var sep = document.createElement('div');
+  sep.className = 'menu-sep';
+  sep.setAttribute('role', 'separator');
+  pop.appendChild(sep);
+  // Sign out asks once, in place: the first press turns the item into the
+  // confirmation, the second signs out.
+  addItem('log-out', 'Sign out', '', function(b) {
+    if (b.getAttribute('data-confirm') === 'yes') { signOut(); return; }
+    b.setAttribute('data-confirm', 'yes');
+    b.lastChild.textContent = 'Press again to sign out';
+    b.setAttribute('aria-label', 'Press again to sign out of this tab; the web token is cleared');
+  }, 'danger');
+
+  pop.addEventListener('keydown', function(e) {
+    var at = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      var next = e.key === 'ArrowDown' ? (at + 1) % items.length : (at - 1 + items.length) % items.length;
+      items[next].focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      items[e.key === 'Home' ? 0 : items.length - 1].focus();
+    } else if (e.key === 'Tab') {
+      closePopover();
+    }
+  });
+
+  document.body.appendChild(pop);
+  if (window.lucide) lucide.createIcons({ root: pop });
+  if (!isMobileView()) {
+    var rect = pill.getBoundingClientRect();
+    var pr = pop.getBoundingClientRect();
+    var left = rect.right + 8;
+    if (left + pr.width > window.innerWidth - 8) left = window.innerWidth - pr.width - 8;
+    var top = Math.min(window.innerHeight - pr.height - 8, rect.bottom - pr.height);
+    pop.style.left = Math.max(8, left) + 'px';
+    pop.style.top = Math.max(8, top) + 'px';
+  }
+  openPopover = pop;
+  popoverAnchor = pill;
+  pill.setAttribute('aria-expanded', 'true');
+  popoverOnClose = function() { pill.setAttribute('aria-expanded', 'false'); };
+  items[0].focus();
+}
+
+// --- Sign out: clear this tab's web token and stop the socket ---
+var signedOut = false;
+function signOut() {
+  var served = !!window.__JOIND_TOKEN;
+  signedOut = true;
+  try { sessionStorage.removeItem('joind-web-token'); } catch (e) { /* storage unavailable */ }
+  window.__JOIND_TOKEN = '';
+  closePopover();
+  closeSettingsModal(false);
+  closeSidePanel(false);
+  if (ws) { try { ws.close(); } catch (e) { /* already closed */ } }
+  showSignedOut(served);
+}
+
+function showSignedOut(served) {
+  var old = document.getElementById('signed-out');
+  if (old) old.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'signed-out-overlay';
+  overlay.id = 'signed-out';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-labelledby', 'signed-out-title');
+  var box = document.createElement('div');
+  box.className = 'signed-out-box';
+  var title = document.createElement('h2');
+  title.className = 'signed-out-title';
+  title.id = 'signed-out-title';
+  title.textContent = 'Signed out';
+  var text = document.createElement('p');
+  text.className = 'signed-out-text';
+  text.textContent = served
+    ? 'The web token is cleared from this tab and the connection is closed. This Joind serves its token to the page, so signing in again reloads it.'
+    : 'The web token is cleared from this tab and the connection is closed. Enter the token again to sign in.';
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-primary';
+  btn.textContent = 'Sign in';
+  btn.addEventListener('click', function() {
+    if (served) { location.reload(); return; }
+    overlay.remove();
+    promptWebToken(function() { location.reload(); });
+  });
+  box.appendChild(title);
+  box.appendChild(text);
+  box.appendChild(btn);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  btn.focus();
 }
 
 // --- Conversations ---
