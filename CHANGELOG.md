@@ -13,6 +13,10 @@ Rami chose variant A of the redesign exploration ("A feels most comfortable and 
 - **Guard test.** `tests/type-scale.test.ts` checks the six steps, the spacing and height tokens, that `style.css` and `app.js` carry no hard-coded font size, that controls take the ui step, and that message ids are meta mono.
 - Cache-bust: `style.css?v=23`, `sanitize.js?v=23`, `ui-helpers.js?v=23`, `app.js?v=23`.
 
+#### Lane 1 gate round 1 (Codex, PASS, one Low fixed)
+- **Low, fixed:** the guard test caught only single-quoted inline sizes. It now also catches double quotes and template strings, `cssText`, `setProperty("font-size", ...)` and the `font` shorthand in `app.js`, and the `font` shorthand in `style.css`, with a test that proves each pattern catches its form and passes a token.
+- Gate observed: 716 tests in 62 files, tsc clean, no dashes, no `any`.
+
 ## 2026-09-29: UI Polish From First Use
 
 Three fixes from Rami's first day with the UI lane, on branch `ui-refs-search`.

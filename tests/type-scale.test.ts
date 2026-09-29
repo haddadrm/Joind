@@ -21,6 +21,21 @@ const STEPS: ReadonlyArray<readonly [string, number, number]> = [
   ["display", 20, 28],
 ];
 
+// Every way app.js could set a size inline: a style property in any
+// quotes, cssText or a template string, setProperty, and the font
+// shorthand inside a string.
+const JS_SIZE_FORMS: ReadonlyArray<RegExp> = [
+  /fontSize\s*=\s*['"`][^'"`]*\d(px|rem|em|pt)/,
+  /font-size\s*:\s*[\d.]+(px|rem|em|pt)/,
+  /setProperty\(\s*['"`]font-size['"`]\s*,\s*['"`][\d.]+/,
+  /\bfont\s*[:=]\s*['"`][^;'"`]*\b[\d.]+(px|rem|pt)\b/,
+];
+const CSS_SHORTHAND_SIZE = /\bfont\s*:\s*[^;{}]*\b[\d.]+(px|rem|em|pt)\b/;
+
+function allMatches(src: string, re: RegExp): string[] {
+  return src.match(new RegExp(re.source, "g")) ?? [];
+}
+
 describe("type scale tokens", () => {
   it("defines the six steps with their line heights", () => {
     for (const [name, fs, lh] of STEPS) {
@@ -44,9 +59,31 @@ describe("type scale tokens", () => {
     for (const u of used) expect(STEPS.map((s) => s[0])).toContain(u);
   });
 
-  it("app.js sets no pixel font size inline", () => {
-    expect(js.match(/fontSize\s*=\s*'[\d.]+px'/g) ?? []).toEqual([]);
-    expect(js.match(/font-size:\s*[\d.]+px/g) ?? []).toEqual([]);
+  it("style.css sets no size through the font shorthand", () => {
+    expect(allMatches(css, CSS_SHORTHAND_SIZE)).toEqual([]);
+  });
+
+  it("app.js sets no fixed font size inline, in any form", () => {
+    for (const re of JS_SIZE_FORMS) expect(allMatches(js, re)).toEqual([]);
+  });
+
+  it("the patterns catch every form they claim to", () => {
+    const bad = [
+      "el.style.fontSize = '12px';",
+      "el.style.fontSize = \"12px\";",
+      "el.style.fontSize = `13px`;",
+      "el.style.cssText = 'padding:0;font-size: 11px;';",
+      "el.style.setProperty('font-size', '12px');",
+      "el.style.font = '600 12px Inter';",
+    ];
+    for (const s of bad) expect(JS_SIZE_FORMS.some((re) => re.test(s))).toBe(true);
+    const ok = [
+      "el.style.fontSize = 'var(--fs-ui)';",
+      "el.style.cssText = 'font-size:var(--fs-meta);';",
+    ];
+    for (const s of ok) expect(JS_SIZE_FORMS.some((re) => re.test(s))).toBe(false);
+    expect(CSS_SHORTHAND_SIZE.test(".x { font: 600 12px/16px Inter; }")).toBe(true);
+    expect(CSS_SHORTHAND_SIZE.test(".x { font: inherit; }")).toBe(false);
   });
 
   it("form controls take the ui step, not the browser default", () => {
