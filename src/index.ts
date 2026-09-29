@@ -1813,6 +1813,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // token-less caller cannot put words of its choosing into a room.
     const announce = webAuthorized(webTokenOf(req));
     const mover = announce ? webViewer() : null;
+    // Without the token only what the route did before the board: open or
+    // done, with a response. Board moves (in_progress, review) and
+    // reassignment need the web token.
+    if (!announce && ((status !== undefined && status !== "open" && status !== "done") || assignee !== undefined)) {
+      res.status(403).json({ error: "moving a task to in progress or review, or reassigning it, needs the web token" });
+      return;
+    }
     const convId = conversation || manager.getActiveId();
     if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
     if (manager.isRemote(convId)) { res.status(400).json({ error: "Tasks of a remote room are resolved on its home server" }); return; }

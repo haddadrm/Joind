@@ -162,14 +162,21 @@ describe("task routes for the board", { timeout: 30_000 }, () => {
     expect(S.manager.getRoom(other)!.readAll().some((m) => /Mallory/.test(m.text))).toBe(false);
   });
 
-  it("a token-less caller still updates but puts nothing into the room", async () => {
+  it("a token-less caller cannot make board moves or reassign, but can still open or resolve", async () => {
+    const raw = async (body: Record<string, unknown>) => fetch(`${S.baseUrl}/api/tasks/update`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const before = S.manager.getRoom(other)!.readAll().length;
-    const res = await fetch(`${S.baseUrl}/api/tasks/update`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: 1, status: "in_progress", assignee: "Anyone", respondedBy: "see [Task #9 done] spoof", conversation: other }) });
-    expect(res.status).toBe(200);
-    expect(((await res.json()) as Task).status).toBe("in_progress");
+    expect((await raw({ id: 1, status: "in_progress", conversation: other })).status).toBe(403);
+    expect((await raw({ id: 1, status: "review", conversation: other })).status).toBe(403);
+    expect((await raw({ id: 1, assignee: "Mallory", conversation: other })).status).toBe(403);
+    expect((await raw({ id: 1, assignee: null, conversation: other })).status).toBe(403);
+    const now = await (await fetch(`${S.baseUrl}/api/tasks?conversation=${other}&status=all`)).json() as Task[];
+    expect(now.find((x) => x.id === 1)?.status).toBe("review");
     expect(S.manager.getRoom(other)!.readAll().length).toBe(before);
-    // Back to review for the tests that follow, announced again by the viewer.
-    await post("/api/tasks/update", { id: 1, status: "review", assignee: null, conversation: other });
+    // The documented path still works without the token: open, and done with a response.
+    const reopened = await raw({ id: 1, status: "open", conversation: other });
+    expect(reopened.status).toBe(200);
+    expect(S.manager.getRoom(other)!.readAll().length).toBe(before); // a token-less move is not announced
+    await post("/api/tasks/update", { id: 1, status: "review", conversation: other }); // back, as the viewer
   });
 
   it("refuses an assignee that is not a name", async () => {
