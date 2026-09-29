@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-29: Backlog After the Composer
+
+- The backlog notes the flaky queue-room timing test seen under load, and that only Folder attach remains of the composer item.
+
 ## 2026-09-29: Composer Plus-Menu
 
 Rami approved the composer menu as suggested (after Orca's attach menu), with Folder deferred. Built on branch `composer`.
