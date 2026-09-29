@@ -12,6 +12,24 @@ import { join } from "path";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { ensureDir } from "./persist.js";
 
+/**
+ * Task states (redesign lane 5, the board): open, in_progress, review, done.
+ * Files written before the board hold only open and done, which keep their
+ * meaning; an unknown state read from a file is treated as open. Every state
+ * but done counts as open for the badge and for the "open" list filter.
+ */
+export const TASK_STATUSES = ["open", "in_progress", "review", "done"] as const;
+export type TaskStatus = typeof TASK_STATUSES[number];
+
+export function isTaskStatus(v: unknown): v is TaskStatus {
+  return typeof v === "string" && (TASK_STATUSES as readonly string[]).includes(v);
+}
+
+/** Not done: open, in progress or in review. */
+export function isActiveStatus(s: TaskStatus): boolean {
+  return s !== "done";
+}
+
 export interface Task {
   id: number;
   conversationId: string;
@@ -19,7 +37,7 @@ export interface Task {
   description?: string;
   creator: string;
   assignee?: string;
-  status: "open" | "done";
+  status: TaskStatus;
   priority: "normal" | "urgent";
   anchorMessageId?: number;
   response?: string;
@@ -63,6 +81,7 @@ export class TaskStore extends EventEmitter {
         if (!trimmed) continue;
         try {
           const task = JSON.parse(trimmed) as Task;
+          if (!isTaskStatus(task.status)) task.status = "open";
           loaded.push(task);
           if (task.id > maxId) maxId = task.id;
         } catch { /* skip malformed */ }
@@ -108,10 +127,11 @@ export class TaskStore extends EventEmitter {
   }
 
   update(convId: string, taskId: number, opts: {
-    status?: "open" | "done";
+    status?: TaskStatus;
     response?: string;
     respondedBy?: string;
-    assignee?: string;
+    /** A name assigns; null or an empty string clears the assignee. */
+    assignee?: string | null;
     priority?: "normal" | "urgent";
   }): Task | null {
     const tasks = this.ensureLoaded(convId);
@@ -119,10 +139,15 @@ export class TaskStore extends EventEmitter {
     if (!task) return null;
 
     const now = Date.now();
-    if (opts.status !== undefined) task.status = opts.status;
+    if (opts.status !== undefined) {
+      if (!isTaskStatus(opts.status)) return null;
+      // Reopened from done: it is no longer resolved.
+      if (opts.status !== "done" && task.status === "done") task.resolvedAt = undefined;
+      task.status = opts.status;
+    }
     if (opts.response !== undefined) task.response = opts.response;
     if (opts.respondedBy !== undefined) task.respondedBy = opts.respondedBy;
-    if (opts.assignee !== undefined) task.assignee = opts.assignee;
+    if (opts.assignee !== undefined) task.assignee = opts.assignee ? opts.assignee : undefined;
     if (opts.priority !== undefined) task.priority = opts.priority;
     task.updatedAt = now;
     if (task.status === "done" && !task.resolvedAt) task.resolvedAt = now;
@@ -135,7 +160,11 @@ export class TaskStore extends EventEmitter {
   list(convId: string, filter?: { status?: string; assignee?: string }): Task[] {
     const tasks = this.ensureLoaded(convId);
     let result = tasks;
-    if (filter?.status && filter.status !== "all") {
+    // "open" means not done (as before the board, when open was the only
+    // state before done); "all" means every task; any other state is exact.
+    if (filter?.status === "open") {
+      result = result.filter((t) => isActiveStatus(t.status));
+    } else if (filter?.status && filter.status !== "all") {
       result = result.filter((t) => t.status === filter.status);
     }
     if (filter?.assignee) {
@@ -151,12 +180,12 @@ export class TaskStore extends EventEmitter {
 
   countOpen(convId: string): number {
     const tasks = this.ensureLoaded(convId);
-    return tasks.filter((t) => t.status === "open").length;
+    return tasks.filter((t) => isActiveStatus(t.status)).length;
   }
 
   hasUrgent(convId: string): boolean {
     const tasks = this.ensureLoaded(convId);
-    return tasks.some((t) => t.status === "open" && t.priority === "urgent");
+    return tasks.some((t) => isActiveStatus(t.status) && t.priority === "urgent");
   }
 
   deleteForConversation(convId: string): void {

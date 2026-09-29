@@ -31,7 +31,7 @@ import { ConversationManager, newRegistrationId, isTerminalLess } from "./manage
 import { visibleToViewer, type ChatMessage, type ChatRoom } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
 import { parseCodexHome, parseCodexThread } from "./codex-queue.js";
-import { TaskStore } from "./tasks.js";
+import { TaskStore, TASK_STATUSES, isTaskStatus, type Task } from "./tasks.js";
 import { ReactionStore } from "./reactions.js";
 import { CursorStore } from "./cursors.js";
 import { EditStore } from "./edits.js";
@@ -1732,6 +1732,24 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // --- Task management ---
 
   app.get("/api/tasks", (req, res) => {
+    // scope=all: every local room's tasks for the board, each with its room
+    // name. Behind the web token (it reads every room). Remote rooms' tasks
+    // live on their home servers and are not proxied yet.
+    if (req.query.scope === "all") {
+      if (!webAuthorized(webTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
+      const statusAll = (req.query.status as string) || "all";
+      const assigneeAll = req.query.assignee as string | undefined;
+      const out: Array<Task & { conversationName: string }> = [];
+      for (const meta of manager.listAllRoomMetas()) {
+        if (manager.isRemote(meta.id)) continue;
+        for (const t of taskStore.list(meta.id, { status: statusAll, assignee: assigneeAll })) {
+          out.push({ ...t, conversationName: meta.name });
+        }
+      }
+      out.sort((a, b) => b.updatedAt - a.updatedAt);
+      res.json(out);
+      return;
+    }
     const convId = (req.query.conversation as string) || manager.getActiveId();
     if (!convId) { res.json([]); return; }
     const status = (req.query.status as string) || "open";
@@ -1773,24 +1791,45 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   app.post("/api/tasks/update", express.json(), (req, res) => {
     const { id, status, response, respondedBy, assignee, priority, conversation } = req.body as {
-      id?: number; status?: "open" | "done"; response?: string;
-      respondedBy?: string; assignee?: string; priority?: "normal" | "urgent";
+      id?: number; status?: unknown; response?: string;
+      respondedBy?: string; assignee?: string | null; priority?: "normal" | "urgent";
       conversation?: string;
     };
     if (id == null) { res.status(400).json({ error: "id required" }); return; }
+    // The board moves cards between open, in_progress, review and done.
+    if (status !== undefined && !isTaskStatus(status)) {
+      res.status(400).json({ error: "status must be one of " + TASK_STATUSES.join(", ") });
+      return;
+    }
+    if (assignee !== undefined && assignee !== null && typeof assignee !== "string") {
+      res.status(400).json({ error: "assignee must be a name, or null or empty to clear" });
+      return;
+    }
     const convId = conversation || manager.getActiveId();
     if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
     if (manager.isRemote(convId)) { res.status(400).json({ error: "Tasks of a remote room are resolved on its home server" }); return; }
 
+    const before = taskStore.get(convId, id);
+    const prevStatus = before?.status;
+    const prevAssignee = before?.assignee;
     const task = taskStore.update(convId, id, { status, response, respondedBy, assignee, priority });
     if (!task) { res.status(404).json({ error: "Task not found" }); return; }
 
     // Post system message if task was resolved
+    const room = manager.getRoom(convId);
     if (status === "done" && response) {
-      const room = manager.getRoom(convId);
       if (room) {
         room.send("system", `[Task #${task.id} done] ${respondedBy ?? "someone"} responded: ${response.slice(0, 200)}`);
       }
+    } else if (room && status !== undefined && status !== prevStatus) {
+      // A move on the board: the room hears it, as agents read the room.
+      const label = status === "in_progress" ? "in progress" : status === "review" ? "in review" : status;
+      room.send("system", `[Task #${task.id} ${label}] ${task.title}${respondedBy ? ` (moved by ${respondedBy})` : ""}`);
+    }
+    if (room && assignee !== undefined && (task.assignee ?? null) !== (prevAssignee ?? null)) {
+      room.send("system", task.assignee
+        ? `[Task #${task.id} for ${task.assignee}] ${task.title}`
+        : `[Task #${task.id} unassigned] ${task.title}`);
     }
 
     res.json(task);

@@ -34,7 +34,8 @@ describe("railView", () => {
     expect(ui.railView("dms")).toBe("dms");
     expect(ui.railView("crew")).toBe("crew");
     expect(ui.railView("decisions")).toBe("decisions");
-    for (const v of ["tasks", "search", "Decisions", "", null, undefined, 3, "ROOMS", "rooms "]) {
+    expect(ui.railView("tasks")).toBe("tasks");
+    for (const v of ["board", "search", "Decisions", "", null, undefined, 3, "ROOMS", "rooms "]) {
       expect(ui.railView(v)).toBe("rooms");
     }
   });
@@ -137,5 +138,43 @@ describe("mentionsName (lane 3b)", () => {
     expect(m("@axb hi", "a.b")).toBe(false);
     expect(m(null, "Rami")).toBe(false);
     expect(m("@Rami", "")).toBe(false);
+  });
+});
+
+interface BoardTask { id: number; conversationId: string; status: string; priority?: string; assignee?: string; updatedAt?: number }
+interface BoardHelpers {
+  boardColumns(): Array<[string, string]>;
+  filterBoardTasks(tasks: BoardTask[], f: { view?: string; room?: string; who?: string[]; me?: string }): BoardTask[];
+  groupByStatus(tasks: BoardTask[]): Record<string, BoardTask[]>;
+}
+describe("board helpers (lane 5)", () => {
+  const b = ui as unknown as BoardHelpers;
+  const tasks: BoardTask[] = [
+    { id: 1, conversationId: "a", status: "open", assignee: "Rami", updatedAt: 10 },
+    { id: 2, conversationId: "a", status: "in_progress", priority: "urgent", assignee: "Kira", updatedAt: 5 },
+    { id: 3, conversationId: "b", status: "review", updatedAt: 7 },
+    { id: 4, conversationId: "b", status: "done", priority: "urgent", assignee: "Rami", updatedAt: 9 },
+    { id: 5, conversationId: "b", status: "blocked", updatedAt: 1 },
+    { id: 6, conversationId: "a", status: "open", priority: "urgent", updatedAt: 2 },
+  ];
+  it("names the four columns in order", () => {
+    expect(b.boardColumns()).toEqual([["open", "Open"], ["in_progress", "In progress"], ["review", "In review"], ["done", "Done"]]);
+  });
+  it("filters by view, room and assignee", () => {
+    const ids = (f: Parameters<BoardHelpers["filterBoardTasks"]>[1]) => b.filterBoardTasks(tasks, f).map((t) => t.id);
+    expect(ids({ view: "all" })).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(ids({ view: "mine", me: "Rami" })).toEqual([1, 4]);
+    expect(ids({ view: "urgent" })).toEqual([2, 6]);
+    expect(ids({ view: "all", room: "b" })).toEqual([3, 4, 5]);
+    expect(ids({ view: "all", who: ["Kira", ""] })).toEqual([2, 3, 5, 6]);
+    expect(ids({ view: "urgent", room: "a", who: ["Kira"] })).toEqual([2]);
+  });
+  it("groups by state, unknown to Open, urgent first then the newest", () => {
+    const g = b.groupByStatus(tasks);
+    expect(g.open.map((t) => t.id)).toEqual([6, 1, 5]);
+    expect(g.in_progress.map((t) => t.id)).toEqual([2]);
+    expect(g.review.map((t) => t.id)).toEqual([3]);
+    expect(g.done.map((t) => t.id)).toEqual([4]);
+    expect(b.groupByStatus([])).toEqual({ open: [], in_progress: [], review: [], done: [] });
   });
 });

@@ -6,12 +6,12 @@
   <title>Joind</title>
   <!-- The chosen theme before first paint (Settings or the user menu store it). -->
   <script>try { if (localStorage.getItem('joind-theme') === 'light') document.documentElement.setAttribute('data-theme', 'light'); } catch (e) { /* storage unavailable: dark */ }</script>
-  <link rel="stylesheet" href="style.css?v=27">
+  <link rel="stylesheet" href="style.css?v=28">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x2B22;</text></svg>">
   <!-- Vendored and pinned (no CDN): marked renders Markdown, DOMPurify sanitizes it (public/sanitize.js). -->
   <script src="vendor/marked-17.0.5.umd.js"></script>
   <script src="vendor/purify-3.4.16.min.js"></script>
-  <script src="sanitize.js?v=27"></script>
+  <script src="sanitize.js?v=28"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
@@ -33,7 +33,7 @@
         <span class="rail-ico" aria-hidden="true"><i data-lucide="scale" width="18" height="18"></i></span><span class="rail-label">Decisions</span>
         <span id="decisions-badge" class="rail-badge notify-badge warn" hidden aria-live="polite">0</span>
       </button>
-      <button class="rail-item task-badge" type="button" id="task-badge" onclick="toggleTaskPanel()" title="Tasks" aria-label="Tasks" aria-expanded="false" aria-controls="task-panel">
+      <button class="rail-item task-badge" type="button" id="task-badge" data-rail-view="tasks" title="Tasks" aria-label="Tasks">
         <span class="rail-ico" aria-hidden="true"><i data-lucide="kanban" width="18" height="18"></i></span><span class="rail-label">Tasks</span>
         <span class="rail-badge task-badge-count" id="task-badge-count" aria-live="polite" hidden></span>
       </button>
@@ -101,6 +101,24 @@
           </div>
           <div class="section-body">
             <ul class="crew-side-list" id="decision-views"></ul>
+          </div>
+        </div>
+
+        <!-- Tasks view: the board's views and rooms -->
+        <div class="sidebar-section" data-views="tasks">
+          <div class="section-header" data-sec="task-views" onclick="toggleSection(this)">
+            <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> Views</h2>
+          </div>
+          <div class="section-body">
+            <ul class="crew-side-list" id="task-views"></ul>
+          </div>
+        </div>
+        <div class="sidebar-section" data-views="tasks">
+          <div class="section-header" data-sec="task-rooms" onclick="toggleSection(this)">
+            <h2><span class="section-arrow"><i data-lucide="chevron-down" width="12" height="12"></i></span> By room</h2>
+          </div>
+          <div class="section-body">
+            <ul class="crew-side-list" id="task-rooms"></ul>
           </div>
         </div>
 
@@ -179,6 +197,12 @@
           <div id="search-chips" class="search-chips" aria-label="Active search filters" hidden></div>
           <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
         </div>
+
+        <!-- Tasks page: the board across local rooms -->
+        <section class="page" id="page-tasks" aria-labelledby="page-tasks-title" hidden>
+          <h2 class="sr-only" id="page-tasks-title">Tasks</h2>
+          <div class="page-body" id="page-tasks-body"></div>
+        </section>
 
         <!-- Decisions page: asks with choices, across rooms -->
         <section class="page" id="page-decisions" aria-labelledby="page-decisions-title" hidden>
@@ -300,8 +324,8 @@
     </div>
   </div>
 
-  <script src="ui-helpers.js?v=27"></script>
-  <script src="app.js?v=27"></script>
+  <script src="ui-helpers.js?v=28"></script>
+  <script src="app.js?v=28"></script>
   <script>
     if (window.lucide) {
       lucide.createIcons();

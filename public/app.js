@@ -506,6 +506,7 @@ function connect() {
         }
         break;
       case 'task-created':
+        scheduleBoardReload(); // the board spans every room
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         tasks.push(event.data);
         renderTaskBadge();
@@ -513,6 +514,7 @@ function connect() {
         if (event.data.priority === 'urgent') playSound('alert-tone');
         break;
       case 'task-updated':
+        scheduleBoardReload();
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) break;
         tasks = tasks.map(function(t) { return t.id === event.data.id ? event.data : t; });
         renderTaskBadge();
@@ -3366,7 +3368,7 @@ function toggleSection(header) {
 // browser. At phone width the rail is the bottom tab bar and a view opens
 // the sidebar drawer.
 var RAIL_VIEW_KEY = 'joind-rail-view';
-var RAIL_TITLES = { rooms: 'Rooms', dms: 'Direct messages', crew: 'Crew', decisions: 'Decisions' };
+var RAIL_TITLES = { rooms: 'Rooms', dms: 'Direct messages', crew: 'Crew', decisions: 'Decisions', tasks: 'Tasks' };
 var railViewNow = 'rooms';
 
 function readRailView() {
@@ -3409,7 +3411,7 @@ function setRailView(view, fromUser) {
   if (fromUser) {
     try { localStorage.setItem(RAIL_VIEW_KEY, v); } catch (e) { /* storage unavailable: the view holds for this page */ }
     // Decisions carries its views on the page, so a phone opens no drawer.
-    if (isMobileView() && v !== 'decisions') {
+    if (isMobileView() && v !== 'decisions' && v !== 'tasks') {
       openMobileDrawer();
     } else if (sb && sb.classList.contains('hidden')) {
       setSidebarHidden(false);
@@ -3631,10 +3633,11 @@ function decorateRoomRow(li, conv, remote) {
 
 // --- Pages: Crew takes the content column, as in A ---
 var pageNow = null; // 'crew', 'decisions' or null (the conversation)
-var PAGES = ['crew', 'decisions'];
+var PAGES = ['crew', 'decisions', 'tasks'];
 function renderPage(page) {
   if (page === 'crew') renderCrewPage();
   else if (page === 'decisions') { renderDecisionsPage(); loadDecisionsPage(); }
+  else if (page === 'tasks') { renderBoardSide(); renderBoard(); loadBoard(); }
 }
 function showPage(p) {
   var page = PAGES.indexOf(p) >= 0 ? p : null;
@@ -4208,6 +4211,445 @@ function prepareSectionHeader(header) {
 }
 function initSections() {
   document.querySelectorAll('.section-header').forEach(prepareSectionHeader);
+}
+
+// --- The task board (redesign lane 5) ---
+// Every local room's tasks from GET /api/tasks?scope=all, in four columns:
+// Open, In progress, In review, Done. A card moves by drag and drop, or
+// from its menu (the keyboard route: Enter on a card, or its menu button):
+// move to another column, assign, unassign, open its room. Filters: the
+// sidebar views (all, assigned to me, urgent), a room, assignees. Remote
+// rooms' tasks live on their home servers and are not on the board yet.
+var board = { tasks: null, view: 'all', room: 'all', who: [], seq: 0, reload: 0, adding: null };
+// A value inside an attribute selector.
+function cssEsc(v) {
+  return window.CSS && CSS.escape ? CSS.escape(String(v)) : String(v).replace(/[^a-zA-Z0-9_:-]/g, '');
+}
+var BOARD_VIEWS = [['all', 'All tasks'], ['mine', 'Assigned to me'], ['urgent', 'Urgent']];
+
+function loadBoard() {
+  var seq = ++board.seq;
+  fetch('/api/tasks?scope=all&status=all&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { if (!r.ok) throw new Error('tasks ' + r.status); return r.json(); })
+    .then(function(list) {
+      if (seq !== board.seq) return;
+      board.tasks = Array.isArray(list) ? list : [];
+      renderBoardSide();
+      renderBoard();
+    })
+    .catch(function() {
+      if (seq !== board.seq) return;
+      board.tasks = board.tasks || [];
+      renderBoardSide();
+      renderBoard();
+    });
+}
+
+// Task events arrive for every room: one reload per burst.
+function scheduleBoardReload() {
+  if (pageNow !== 'tasks') return;
+  if (board.reload) clearTimeout(board.reload);
+  board.reload = setTimeout(function() { board.reload = 0; loadBoard(); }, 250);
+}
+
+function boardFilter(extra) {
+  var f = { view: board.view, room: board.room, who: board.who, me: myName() };
+  if (extra) Object.keys(extra).forEach(function(k) { f[k] = extra[k]; });
+  return f;
+}
+
+function boardRooms() {
+  var seen = {};
+  var out = [];
+  conversationList.forEach(function(c) {
+    if (!seen[c.id]) { seen[c.id] = true; out.push({ id: c.id, name: c.name }); }
+  });
+  (board.tasks || []).forEach(function(t) {
+    if (!seen[t.conversationId]) { seen[t.conversationId] = true; out.push({ id: t.conversationId, name: t.conversationName || t.conversationId }); }
+  });
+  return out;
+}
+
+function sideRow(label, count, active, onClick, glyph, key) {
+  var li = document.createElement('li');
+  var row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'side-row decision-view' + (active ? ' active' : '');
+  row.setAttribute('data-key', key);
+  if (active) row.setAttribute('aria-current', 'true');
+  var ico = document.createElement('span');
+  ico.className = 'side-row-ico';
+  ico.setAttribute('aria-hidden', 'true');
+  ico.textContent = glyph;
+  var name = document.createElement('span');
+  name.className = 'side-row-name';
+  name.textContent = label;
+  var c = document.createElement('span');
+  c.className = 'conv-count';
+  c.textContent = count > 0 ? String(count) : '';
+  row.appendChild(ico);
+  row.appendChild(name);
+  row.appendChild(c);
+  row.addEventListener('click', onClick);
+  li.appendChild(row);
+  return li;
+}
+
+// The sidebar: views with counts, then rooms with their open counts.
+function renderBoardSide() {
+  var views = document.getElementById('task-views');
+  var rooms = document.getElementById('task-rooms');
+  if (!views || !rooms) return;
+  var keep = (views.contains(document.activeElement) || rooms.contains(document.activeElement)) ? document.activeElement.getAttribute('data-key') : null;
+  var all = board.tasks || [];
+  views.textContent = '';
+  BOARD_VIEWS.forEach(function(v) {
+    var n = window.joindUi ? window.joindUi.filterBoardTasks(all, { view: v[0], room: 'all', who: [], me: myName() }).length : 0;
+    views.appendChild(sideRow(v[1], n, board.view === v[0], function() { board.view = v[0]; renderBoardSide(); renderBoard(); }, v[0] === 'urgent' ? '!' : '▦', 'v:' + v[0]));
+  });
+  rooms.textContent = '';
+  rooms.appendChild(sideRow('All rooms', all.filter(function(t) { return t.status !== 'done'; }).length, board.room === 'all', function() { board.room = 'all'; renderBoardSide(); renderBoard(); }, '#', 'r:all'));
+  boardRooms().forEach(function(r) {
+    var n = all.filter(function(t) { return t.conversationId === r.id && t.status !== 'done'; }).length;
+    rooms.appendChild(sideRow(r.name, n, board.room === r.id, function() { board.room = r.id; renderBoardSide(); renderBoard(); }, '#', 'r:' + r.id));
+  });
+  if (keep) {
+    var again = document.querySelector('#task-views [data-key="' + cssEsc(keep) + '"], #task-rooms [data-key="' + cssEsc(keep) + '"]');
+    if (again) again.focus();
+  }
+}
+
+function boardCardTag(text, cls) {
+  var s = document.createElement('span');
+  s.className = 'tag' + (cls ? ' ' + cls : '');
+  s.textContent = text;
+  return s;
+}
+
+function boardCard(t, now) {
+  var card = document.createElement('article');
+  card.className = 'board-card' + (t.priority === 'urgent' && t.status !== 'done' ? ' urgent' : '');
+  card.draggable = true;
+  card.tabIndex = 0;
+  card.setAttribute('data-key', t.conversationId + ':' + t.id);
+  card.setAttribute('aria-label', 'Task ' + t.id + ': ' + t.title + (t.assignee ? ', for ' + t.assignee : '') + '. Enter for actions.');
+  var top = document.createElement('div');
+  top.className = 'bc-top';
+  var id = document.createElement('span');
+  id.className = 'bc-id';
+  id.textContent = 'T' + t.id;
+  var title = document.createElement('span');
+  title.className = 'bc-title';
+  title.textContent = t.title;
+  var menu = document.createElement('button');
+  menu.type = 'button';
+  menu.className = 'bc-menu';
+  menu.setAttribute('aria-label', 'Actions for task ' + t.id);
+  menu.setAttribute('aria-haspopup', 'menu');
+  menu.tabIndex = -1;
+  menu.textContent = '⋯';
+  top.appendChild(id);
+  top.appendChild(title);
+  top.appendChild(menu);
+  card.appendChild(top);
+  var tags = document.createElement('div');
+  tags.className = 'bc-tags';
+  if (t.priority === 'urgent' && t.status !== 'done') tags.appendChild(boardCardTag('urgent', 'urgent'));
+  tags.appendChild(boardCardTag('#' + (t.conversationName || t.conversationId)));
+  if (t.anchorMessageId) tags.appendChild(boardCardTag('from #' + t.anchorMessageId, 'mono'));
+  var age = document.createElement('span');
+  age.className = 'bc-age';
+  age.textContent = shortPillAge(Math.max(0, now - (t.updatedAt || t.createdAt || now)));
+  age.title = 'Updated ' + new Date(t.updatedAt || t.createdAt || now).toLocaleString();
+  var spacer = document.createElement('span');
+  spacer.className = 'bc-spacer';
+  tags.appendChild(spacer);
+  tags.appendChild(age);
+  if (t.assignee) {
+    var av = memberAvatar(t.assignee, 'sm');
+    av.title = 'For ' + t.assignee;
+    tags.appendChild(av);
+  }
+  card.appendChild(tags);
+  card.addEventListener('dragstart', function(e) {
+    e.dataTransfer.setData('text/plain', card.getAttribute('data-key'));
+    e.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', function() { card.classList.remove('dragging'); });
+  card.addEventListener('keydown', function(e) {
+    if (e.target !== card) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCardMenu(t, card); }
+  });
+  menu.addEventListener('click', function(e) { e.stopPropagation(); openCardMenu(t, card); });
+  card.addEventListener('dblclick', function() { openTaskInRoom(t); });
+  return card;
+}
+
+function findBoardTask(key) {
+  var parts = String(key || '').split(':');
+  var id = Number(parts.pop());
+  var conv = parts.join(':');
+  var list = board.tasks || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === id && list[i].conversationId === conv) return list[i];
+  }
+  return null;
+}
+
+// Optimistic, then the server; a refusal puts the card back.
+function updateBoardTask(t, fields, focusKey) {
+  var prev = { status: t.status, assignee: t.assignee };
+  Object.keys(fields).forEach(function(k) { t[k] = fields[k] === null ? undefined : fields[k]; });
+  board.focusKey = focusKey || (t.conversationId + ':' + t.id);
+  renderBoard();
+  renderBoardSide();
+  var body = { id: t.id, conversation: t.conversationId, respondedBy: myName() };
+  Object.keys(fields).forEach(function(k) { body[k] = fields[k]; });
+  fetch('/api/tasks/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function(r) { if (!r.ok) throw new Error('update ' + r.status); })
+    .catch(function() {
+      t.status = prev.status;
+      t.assignee = prev.assignee;
+      renderBoard();
+      renderBoardSide();
+      showRefNotice('Could not update task ' + t.id + '; it is back where it was.');
+    });
+}
+
+function openTaskInRoom(t) {
+  selectConversation(t.conversationId, function() {
+    if (!taskPanelOpen) toggleTaskPanel();
+  });
+}
+
+// The card menu: the keyboard route for everything a drag does, and more.
+function openCardMenu(t, card) {
+  closePopover();
+  var pop = document.createElement('div');
+  pop.className = 'pill-popover conv-more-menu board-menu';
+  pop.setAttribute('role', 'menu');
+  pop.setAttribute('aria-label', 'Task ' + t.id + ' actions');
+  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+  var items = [];
+  function add(label, fn) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'menu-item';
+    b.setAttribute('role', 'menuitem');
+    b.textContent = label;
+    b.addEventListener('click', function() { closePopover(); fn(); });
+    pop.appendChild(b);
+    items.push(b);
+  }
+  function sep() { var s = document.createElement('div'); s.className = 'menu-sep'; s.setAttribute('role', 'separator'); pop.appendChild(s); }
+  var cols = window.joindUi ? window.joindUi.boardColumns() : [];
+  cols.forEach(function(c) {
+    if (c[0] !== t.status) add('Move to ' + c[1], function() { updateBoardTask(t, { status: c[0] }); });
+  });
+  sep();
+  var names = [];
+  agents.forEach(function(a) { if (names.indexOf(a.name) < 0) names.push(a.name); });
+  crewRoster.forEach(function(c) { var n = c.joinAs || c.name; if (n && names.indexOf(n) < 0) names.push(n); });
+  (board.tasks || []).forEach(function(x) { if (x.assignee && names.indexOf(x.assignee) < 0) names.push(x.assignee); });
+  if (names.indexOf(myName()) < 0) names.unshift(myName());
+  names.filter(function(n) { return n !== t.assignee; }).slice(0, 12).forEach(function(n) {
+    add('Assign to ' + n, function() { updateBoardTask(t, { assignee: n }); });
+  });
+  if (t.assignee) add('Unassign', function() { updateBoardTask(t, { assignee: null }); });
+  sep();
+  add('Open in #' + (t.conversationName || 'room'), function() { openTaskInRoom(t); });
+  pop.addEventListener('keydown', function(e) {
+    var at = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[e.key === 'ArrowDown' ? (at + 1) % items.length : (at - 1 + items.length) % items.length].focus();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      closePopover();
+      if (card.isConnected) card.focus();
+    }
+  });
+  document.body.appendChild(pop);
+  if (!isMobileView()) {
+    var r = card.getBoundingClientRect();
+    var pr = pop.getBoundingClientRect();
+    pop.style.top = Math.max(8, Math.min(window.innerHeight - pr.height - 8, r.top)) + 'px';
+    pop.style.left = Math.max(8, Math.min(window.innerWidth - pr.width - 8, r.right + 6)) + 'px';
+  }
+  openPopover = pop;
+  popoverAnchor = card;
+  if (items[0]) items[0].focus();
+}
+
+// A new card from a column's +: the room filter's room, else the room on
+// screen; created open, then moved to the column.
+function boardAddForm(colKey, colEl) {
+  var roomId = board.room !== 'all' ? board.room : (activeConversation && !isRemoteConversation(activeConversation.id) ? activeConversation.id : null);
+  var form = document.createElement('div');
+  form.className = 'bc-add';
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'setting-input';
+  input.maxLength = 200;
+  var roomName = roomId ? ((boardRooms().filter(function(r) { return r.id === roomId; })[0] || {}).name || roomId) : '';
+  input.placeholder = roomId ? 'New task in #' + roomName : 'Pick a room first';
+  input.disabled = !roomId;
+  input.setAttribute('aria-label', input.placeholder);
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); board.adding = null; renderBoard(); return; }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    var title = input.value.trim();
+    if (!title || !roomId) return;
+    input.disabled = true;
+    fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: title, creator: myName(), conversation: roomId }) })
+      .then(function(r) { if (!r.ok) throw new Error('create ' + r.status); return r.json(); })
+      .then(function(task) {
+        board.adding = null;
+        if (colKey !== 'open' && task && task.id) {
+          return fetch('/api/tasks/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: task.id, status: colKey, conversation: roomId, respondedBy: myName() }) });
+        }
+      })
+      .then(function() { loadBoard(); })
+      .catch(function() { input.disabled = false; showRefNotice('Could not create the task.'); });
+  });
+  form.appendChild(input);
+  colEl.appendChild(form);
+  setTimeout(function() { if (!input.disabled) input.focus(); }, 0);
+}
+
+function renderBoard() {
+  if (pageNow !== 'tasks') return;
+  var body = document.getElementById('page-tasks-body');
+  if (!body || !window.joindUi) return;
+  var ae = document.activeElement;
+  var keep = board.focusKey || (body.contains(ae) && ae.closest('.board-card') ? ae.closest('.board-card').getAttribute('data-key') : null);
+  var keepFilter = body.contains(ae) ? ae.getAttribute('data-fkey') : null;
+  board.focusKey = null;
+  var scroll = body.querySelector('.board') ? body.querySelector('.board').scrollLeft : 0;
+  body.textContent = '';
+  var all = board.tasks || [];
+  var shown = window.joindUi.filterBoardTasks(all, boardFilter());
+  var head = document.createElement('div');
+  head.className = 'page-head';
+  var sub = document.createElement('span');
+  sub.className = 'page-sub';
+  sub.textContent = !board.tasks ? 'Loading tasks...' : shown.length + ' of ' + all.length + ' tasks. Drag a card to change its status, or press Enter on it.';
+  head.appendChild(sub);
+  body.appendChild(head);
+
+  // Filters: assignees (chips) and the room.
+  var filters = document.createElement('div');
+  filters.className = 'board-filters';
+  var fl = document.createElement('span');
+  fl.className = 'flabel';
+  fl.textContent = 'Assignee';
+  filters.appendChild(fl);
+  var assignees = [];
+  all.forEach(function(t) { if (t.assignee && assignees.indexOf(t.assignee) < 0) assignees.push(t.assignee); });
+  assignees.sort();
+  assignees.concat(['']).forEach(function(n) {
+    var chip = document.createElement('button');
+    chip.type = 'button';
+    var on = board.who.indexOf(n) >= 0;
+    chip.className = 'fchip' + (on ? ' on' : '');
+    chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    chip.setAttribute('data-fkey', 'w:' + n);
+    if (n) chip.appendChild(memberAvatar(n, 'sm'));
+    var label = document.createElement('span');
+    label.className = 'fname';
+    label.textContent = n || 'Unassigned';
+    chip.appendChild(label);
+    chip.addEventListener('click', function() {
+      board.who = on ? board.who.filter(function(x) { return x !== n; }) : board.who.concat([n]);
+      renderBoard();
+    });
+    filters.appendChild(chip);
+  });
+  var sepEl = document.createElement('span');
+  sepEl.className = 'tsep';
+  filters.appendChild(sepEl);
+  var rl = document.createElement('label');
+  rl.className = 'flabel';
+  rl.textContent = 'Room';
+  rl.htmlFor = 'board-room';
+  filters.appendChild(rl);
+  var sel = document.createElement('select');
+  sel.id = 'board-room';
+  sel.className = 'setting-select';
+  sel.setAttribute('data-fkey', 'room');
+  var optAll = document.createElement('option');
+  optAll.value = 'all';
+  optAll.textContent = 'All rooms';
+  sel.appendChild(optAll);
+  boardRooms().forEach(function(r) {
+    var o = document.createElement('option');
+    o.value = r.id;
+    o.textContent = '#' + r.name;
+    sel.appendChild(o);
+  });
+  sel.value = board.room;
+  sel.addEventListener('change', function() { board.room = sel.value; renderBoardSide(); renderBoard(); });
+  filters.appendChild(sel);
+  body.appendChild(filters);
+
+  var groups = window.joindUi.groupByStatus(shown);
+  var wrap = document.createElement('div');
+  wrap.className = 'board';
+  var now = serverNow();
+  window.joindUi.boardColumns().forEach(function(c) {
+    var col = document.createElement('section');
+    col.className = 'board-col';
+    col.setAttribute('data-col', c[0]);
+    col.setAttribute('aria-label', c[1] + ', ' + groups[c[0]].length + ' tasks');
+    var h = document.createElement('div');
+    h.className = 'col-head';
+    var sw = document.createElement('span');
+    sw.className = 'col-sw ' + c[0];
+    sw.setAttribute('aria-hidden', 'true');
+    var name = document.createElement('span');
+    name.textContent = c[1];
+    var n = document.createElement('span');
+    n.className = 'col-n';
+    n.textContent = String(groups[c[0]].length);
+    var addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'col-add';
+    addBtn.setAttribute('aria-label', 'Add a task to ' + c[1]);
+    addBtn.setAttribute('data-fkey', 'add:' + c[0]);
+    addBtn.textContent = '+';
+    addBtn.addEventListener('click', function() { board.adding = c[0]; renderBoard(); });
+    h.appendChild(sw);
+    h.appendChild(name);
+    h.appendChild(n);
+    h.appendChild(addBtn);
+    col.appendChild(h);
+    var list = document.createElement('div');
+    list.className = 'col-body';
+    groups[c[0]].forEach(function(t) { list.appendChild(boardCard(t, now)); });
+    col.appendChild(list);
+    if (board.adding === c[0]) boardAddForm(c[0], col);
+    col.addEventListener('dragover', function(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; col.classList.add('drop'); });
+    col.addEventListener('dragleave', function(e) { if (!col.contains(e.relatedTarget)) col.classList.remove('drop'); });
+    col.addEventListener('drop', function(e) {
+      e.preventDefault();
+      col.classList.remove('drop');
+      var t = findBoardTask(e.dataTransfer.getData('text/plain'));
+      if (t && t.status !== c[0]) updateBoardTask(t, { status: c[0] });
+    });
+    wrap.appendChild(col);
+  });
+  body.appendChild(wrap);
+  wrap.scrollLeft = scroll;
+  if (keep) {
+    var card = null;
+    wrap.querySelectorAll('.board-card').forEach(function(x) { if (x.getAttribute('data-key') === keep) card = x; });
+    if (card) card.focus();
+  } else if (keepFilter) {
+    var f = body.querySelector('[data-fkey="' + cssEsc(keepFilter) + '"]');
+    if (f) f.focus();
+  }
 }
 
 // --- The composer bar: attach, decision, task ---
@@ -5146,6 +5588,9 @@ function syncChannelHeader() {
   } else if (pageNow === 'decisions') {
     title.textContent = 'Decisions';
     topic.textContent = 'Asks with choices, across rooms';
+  } else if (pageNow === 'tasks') {
+    title.textContent = 'Tasks';
+    topic.textContent = 'All local rooms';
   } else if (activeDm) {
     title.textContent = activeDm;
     // As in A: the partner's harness and state under a DM's title.
@@ -6164,8 +6609,9 @@ var initTaskCount = 0;
 var initHasUrgent = false;
 
 function renderTaskBadge() {
-  var openCount = tasks.filter(function(t) { return t.status === 'open'; }).length;
-  var hasUrgent = tasks.some(function(t) { return t.status === 'open' && t.priority === 'urgent'; });
+  // Open means not done: in progress and in review count too (lane 5).
+  var openCount = tasks.filter(function(t) { return t.status !== 'done'; }).length;
+  var hasUrgent = tasks.some(function(t) { return t.status !== 'done' && t.priority === 'urgent'; });
   renderTaskBadgeFromCount(openCount, hasUrgent);
 }
 
@@ -6246,6 +6692,8 @@ function renderTaskPanel() {
 
   var filtered = tasks.filter(function(t) {
     if (taskFilter === 'all') return true;
+    // The Open tab shows every task not done (in progress and in review too).
+    if (taskFilter === 'open') return t.status !== 'done';
     return t.status === taskFilter;
   });
 
@@ -6258,7 +6706,7 @@ function renderTaskPanel() {
   }
 
   filtered.sort(function(a, b) {
-    if (a.status === 'open' && b.status === 'open') {
+    if (a.status !== 'done' && b.status !== 'done') {
       if (a.priority === 'urgent' && b.priority !== 'urgent') return -1;
       if (b.priority === 'urgent' && a.priority !== 'urgent') return 1;
     }
@@ -6274,7 +6722,8 @@ function renderTaskPanel() {
 
 function renderTaskCard(task) {
   var card = document.createElement('div');
-  card.className = 'task-card' + (task.priority === 'urgent' && task.status === 'open' ? ' urgent' : '') + (task.status === 'done' ? ' done' : '');
+  var active = task.status !== 'done'; // open, in progress or in review
+  card.className = 'task-card' + (task.priority === 'urgent' && active ? ' urgent' : '') + (task.status === 'done' ? ' done' : '');
 
   var header = document.createElement('div');
   header.className = 'task-card-header';
@@ -6290,7 +6739,13 @@ function renderTaskCard(task) {
   title.title = task.title;
   header.appendChild(title);
 
-  if (task.priority === 'urgent' && task.status === 'open') {
+  if (task.status === 'in_progress' || task.status === 'review') {
+    var stateTag = document.createElement('span');
+    stateTag.className = 'task-card-state';
+    stateTag.textContent = task.status === 'review' ? 'in review' : 'in progress';
+    header.appendChild(stateTag);
+  }
+  if (task.priority === 'urgent' && active) {
     var pri = document.createElement('span');
     pri.className = 'task-card-priority urgent';
     pri.textContent = 'urgent';
@@ -6323,7 +6778,7 @@ function renderTaskCard(task) {
     card.appendChild(resp);
   }
 
-  if (task.status === 'open') {
+  if (active) {
     var respond = document.createElement('div');
     respond.className = 'task-respond';
 

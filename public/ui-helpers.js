@@ -82,7 +82,7 @@
 
   // The rail views that change what the sidebar shows. Anything else (a
   // stale or hand-edited stored value) falls back to rooms.
-  var RAIL_VIEWS = ['rooms', 'dms', 'crew', 'decisions'];
+  var RAIL_VIEWS = ['rooms', 'dms', 'crew', 'decisions', 'tasks'];
   function railView(value) {
     return RAIL_VIEWS.indexOf(value) >= 0 ? value : 'rooms';
   }
@@ -148,7 +148,48 @@
     return new RegExp('(^|[^\\w@])@' + esc + '(?![\\w-])', 'i').test(String(text == null ? '' : text));
   }
 
+  // --- Redesign lane 5: the task board ---
+
+  var BOARD_COLUMNS = [['open', 'Open'], ['in_progress', 'In progress'], ['review', 'In review'], ['done', 'Done']];
+  function boardColumns() {
+    return BOARD_COLUMNS.map(function(c) { return [c[0], c[1]]; });
+  }
+
+  // The cards a board shows. `f`: { view: 'all' | 'mine' | 'urgent', room:
+  // a conversation id or 'all', who: assignee names to keep (empty keeps
+  // everyone; '' stands for unassigned), me: the viewer's name }.
+  function filterBoardTasks(tasks, f) {
+    var who = (f && f.who) || [];
+    return (tasks || []).filter(function(t) {
+      if (f && f.view === 'mine' && t.assignee !== f.me) return false;
+      if (f && f.view === 'urgent' && !(t.priority === 'urgent' && t.status !== 'done')) return false;
+      if (f && f.room && f.room !== 'all' && t.conversationId !== f.room) return false;
+      if (who.length > 0 && who.indexOf(t.assignee || '') < 0) return false;
+      return true;
+    });
+  }
+
+  // Cards by column: an unknown state goes to Open; urgent first, then the
+  // most recently updated.
+  function groupByStatus(tasks) {
+    var out = { open: [], in_progress: [], review: [], done: [] };
+    (tasks || []).forEach(function(t) {
+      (Object.prototype.hasOwnProperty.call(out, t.status) ? out[t.status] : out.open).push(t);
+    });
+    Object.keys(out).forEach(function(k) {
+      out[k].sort(function(a, b) {
+        var ua = a.priority === 'urgent' && k !== 'done' ? 0 : 1;
+        var ub = b.priority === 'urgent' && k !== 'done' ? 0 : 1;
+        return ua - ub || (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+    });
+    return out;
+  }
+
   return {
+    boardColumns: boardColumns,
+    filterBoardTasks: filterBoardTasks,
+    groupByStatus: groupByStatus,
     mentionsName: mentionsName,
     railView: railView,
     sectionInView: sectionInView,

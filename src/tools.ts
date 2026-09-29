@@ -14,7 +14,7 @@ import { waitForMessage, clampListenTimeout } from "./listen.js";
 import { visibleToViewer } from "./room.js";
 import { MirrorRoom, type WriteResult } from "./mirror.js";
 import type { RemoteRegistered, RemoteRooms } from "./peer-types.js";
-import type { TaskStore } from "./tasks.js";
+import { TASK_STATUSES, type TaskStore } from "./tasks.js";
 import type { ReactionStore } from "./reactions.js";
 import type { CursorStore } from "./cursors.js";
 import type { EditStore } from "./edits.js";
@@ -1377,21 +1377,51 @@ export function registerTools(
         title: "Check tasks and responses",
         description:
           "List tasks in the conversation, or resolve a specific task. " +
-          "Provide id + response to mark a task as done with your answer.",
+          "Provide id + response to mark a task as done with your answer. " +
+          "Provide id + setStatus to move it on the board (open, in_progress, review, done), " +
+          "or id + assignee to reassign it (an empty string clears the assignee).",
         inputSchema: z.object({
           sender: z.string().optional().describe("Your name (for routing)"),
-          status: z.enum(["open", "done", "all"]).optional().describe("Filter (default: open)"),
-          id: z.number().optional().describe("Get or resolve a specific task"),
-          response: z.string().optional().describe("Response text — resolves the task as done"),
+          status: z.enum(["open", "in_progress", "review", "done", "all"]).optional()
+            .describe("Filter (default: open, meaning every task not done; in_progress and review are exact)"),
+          id: z.number().optional().describe("Get, resolve, move or reassign a specific task"),
+          response: z.string().optional().describe("Response text: resolves the task as done"),
+          setStatus: z.enum(TASK_STATUSES).optional().describe("Move the task to this state"),
+          assignee: z.string().optional().describe("Reassign the task to this name; an empty string clears it"),
         }),
       },
-      async ({ sender, status, id, response }, extra) => {
+      async ({ sender, status, id, response, setStatus, assignee }, extra) => {
         const target = getRoom(manager, extra, sender);
         if (!target) {
           return { content: [{ type: "text" as const, text: "Not in a conversation. Call chat_join first." }] };
         }
         const refused = remoteOnly(target, "Tasks");
         if (refused) return refused;
+
+        // Move and/or reassign (no response: a response resolves as done below)
+        if (id != null && response == null && (setStatus !== undefined || assignee !== undefined)) {
+          const before = taskStore.get(target.convId, id);
+          if (!before) {
+            return { content: [{ type: "text" as const, text: `Task #${id} not found` }] };
+          }
+          const prevStatus = before.status;
+          const prevAssignee = before.assignee;
+          const task = taskStore.update(target.convId, id, { status: setStatus, assignee });
+          if (!task) {
+            return { content: [{ type: "text" as const, text: `Task #${id} not found` }] };
+          }
+          const said: string[] = [];
+          if (setStatus !== undefined && setStatus !== prevStatus) {
+            const label = setStatus === "in_progress" ? "in progress" : setStatus === "review" ? "in review" : setStatus;
+            target.room.send("system", `[Task #${task.id} ${label}] ${task.title}${sender ? ` (moved by ${sender})` : ""}`);
+            said.push(`moved to ${label}`);
+          }
+          if (assignee !== undefined && (task.assignee ?? null) !== (prevAssignee ?? null)) {
+            target.room.send("system", task.assignee ? `[Task #${task.id} for ${task.assignee}] ${task.title}` : `[Task #${task.id} unassigned] ${task.title}`);
+            said.push(task.assignee ? `assigned to ${task.assignee}` : "unassigned");
+          }
+          return { content: [{ type: "text" as const, text: `Task #${id} ${said.length ? said.join(", ") : "unchanged"}` }] };
+        }
 
         // Resolve a task
         if (id != null && response != null) {

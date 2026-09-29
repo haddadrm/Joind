@@ -4332,3 +4332,122 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
   .phone-only { display: flex; }
   .page-head { align-items: flex-start; }
 }
+
+/* ================================================================
+   REDESIGN LANE 5: the task board.
+   ================================================================ */
+.board-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-bottom: var(--s4);
+}
+.flabel { font-size: var(--fs-label); line-height: var(--lh-label); font-weight: 600; color: var(--text-muted); }
+.board-filters .fchip { display: inline-flex; align-items: center; gap: 6px; padding: 0 var(--s3) 0 var(--s1); }
+.board-filters .fchip .mav.sm { box-shadow: none; }
+.board-filters .setting-select { min-width: 160px; }
+.board {
+  display: grid;
+  /* All four columns fit at 1280 px beside the rail and the sidebar
+     (A cut the last one off; a drag should reach every column). */
+  grid-template-columns: repeat(4, minmax(200px, 1fr));
+  gap: var(--s3);
+  align-items: start;
+  overflow-x: auto;
+  padding-bottom: var(--s2);
+  scroll-snap-type: x mandatory;
+}
+.board-col {
+  min-width: 0;
+  padding: var(--s2);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-lg);
+  scroll-snap-align: start;
+}
+.board-col.drop { border-color: var(--accent); background: var(--accent-soft); }
+.col-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s1) var(--s2);
+  font-size: var(--fs-ui);
+  line-height: var(--lh-ui);
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.col-sw { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+.col-sw.in_progress { background: var(--accent-bright); }
+.col-sw.review { background: var(--warn); }
+.col-sw.done { background: var(--success); }
+.col-n { font-weight: 400; color: var(--text-muted); font-size: var(--fs-label); }
+.col-add {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--fs-title);
+  line-height: 1;
+  cursor: pointer;
+}
+.col-add:hover { background: var(--bg-hover); color: var(--text-bright); }
+.col-body { display: flex; flex-direction: column; gap: var(--s2); min-height: 40px; }
+.board-card {
+  padding: var(--s3);
+  background: var(--bg);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+  cursor: grab;
+}
+.board-card:hover { border-color: var(--border-strong); }
+.board-card:focus-visible { outline: none; box-shadow: var(--ring); }
+.board-card.dragging { opacity: 0.4; }
+.bc-top { display: flex; align-items: flex-start; gap: var(--s2); }
+.bc-id { flex-shrink: 0; padding-top: 2px; font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--text-muted); }
+.bc-title { flex: 1; min-width: 0; font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 600; color: var(--text-bright); overflow-wrap: anywhere; }
+.bc-menu {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+}
+.board-card:hover .bc-menu, .board-card:focus-within .bc-menu { opacity: 1; }
+.bc-tags { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s2); }
+.bc-tags .tag {
+  padding: 0 6px;
+  border-radius: var(--radius-xs);
+  background: var(--white-08);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  overflow-wrap: anywhere;
+}
+.bc-tags .tag.mono { font-family: var(--font-mono); }
+.bc-tags .tag.urgent { background: var(--danger-soft); color: var(--danger); }
+.bc-spacer { flex: 1; }
+.bc-age { font-size: var(--fs-meta); color: var(--text-muted); }
+.bc-add { margin-top: var(--s2); }
+.bc-add .setting-input { width: 100%; }
+.task-card-state {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+@media (max-width: 560px) {
+  .board { grid-template-columns: repeat(4, 86%); }
+  .board-filters .fname { display: none; }
+  .board-filters .fchip:last-of-type .fname { display: inline; }
+}
