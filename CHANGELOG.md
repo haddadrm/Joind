@@ -12,6 +12,10 @@ Three fixes from Rami's first day with the UI lane, on branch `ui-refs-search`.
 - **Pure helpers** in `public/ui-helpers.js` (window.joindUi): the bare-number parse, the drag outcome, presence and its order, the short age, and how many pills fit before the chip. Covered by `tests/ui-helpers.test.ts`.
 - Cache-bust: `style.css?v=22`, `sanitize.js?v=22`, `ui-helpers.js?v=22`, `app.js?v=22`.
 
+### Gate round 1 (Codex, CHANGES REQUESTED, one Medium)
+- **Stale search results stayed actionable during the debounce** (Medium). Between a keystroke and the debounced query, an older go-to fetch or mentions page could land and be clicked under the new text. Every input event now invalidates the search sequence, and the old results are inert (neither clickable nor focusable) and dimmed until the new query renders; a chip removal or Clear does the same. The go-to result fills in only while it is still attached, so paging the mentions (More) before it loads no longer leaves it on "Loading".
+- **Found alongside, fixed:** a pill rebuild (a presence event, the minute tick) dropped keyboard focus from a pill or the chip; focus now returns to the same pill, or to the chip when that pill moved behind it. A rebuild while the +N list is open hands the list to the new chip, so `aria-expanded` stays true and Escape returns focus to the chip on screen.
+
 ## 2026-09-28: Message Links, Search Filters, Resizable Sidebar
 
 The web UI gains three things: `#N` message references become links, search takes filters and pages over the room being viewed, and the left sidebar resizes by drag or keyboard. Branch `ui-refs-search` off `hosted-verdict` 16c5964.

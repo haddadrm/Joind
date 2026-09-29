@@ -1979,6 +1979,8 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
   margin-top: 4px;
 }
 .search-results:empty { display: none; }
+/* Results of an earlier query text, inert until the new answer lands */
+.search-results-stale { opacity: 0.5; }
 .search-result-item {
   display: flex;
   gap: 8px;

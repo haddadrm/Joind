@@ -631,6 +631,10 @@ function shortPillAge(ms) {
 function renderPills() {
   var c = document.getElementById('agent-pills');
   if (!c) return;
+  // A rebuild (presence events, the minute tick) must not drop keyboard
+  // focus: remember the focused pill or chip and focus its successor.
+  var focused = document.activeElement && c.contains(document.activeElement) ? document.activeElement : null;
+  var focusKey = focused ? (focused.classList.contains('pill-more') ? '+' : focused.getAttribute('data-agent')) : null;
   c.textContent = '';
   var nowMs = serverNow();
   var infos = agents.map(function(a) { return pillInfo(a, nowMs); });
@@ -639,6 +643,20 @@ function renderPills() {
   pillInfos = infos;
   fitPills();
   watchPillStrip(c);
+  if (focusKey !== null) restorePillFocus(c, focusKey);
+}
+
+function restorePillFocus(c, key) {
+  var target = null;
+  if (key !== '+') {
+    var pills = c.querySelectorAll('.agent-pill');
+    for (var i = 0; i < pills.length; i++) {
+      if (pills[i].getAttribute('data-agent') === key) { target = pills[i]; break; }
+    }
+    if (target && target.hidden) target = null;
+  }
+  target = target || c.querySelector('.pill-more') || c.querySelector('.agent-pill:not([hidden])');
+  if (target) target.focus();
 }
 
 function buildPill(x) {
@@ -650,6 +668,7 @@ function buildPill(x) {
   if (typingNames.has(a.name)) pillClass += ' working';
   pill.className = pillClass;
   pill.setAttribute('role', 'listitem');
+  pill.setAttribute('data-agent', a.name || '');
   pill.tabIndex = 0;
   var color = getSenderColor(a.name);
   pill.style.setProperty('--pill-color', color);
@@ -776,6 +795,16 @@ function fitPills() {
     // detail 0: activated from the keyboard, so focus moves into the list.
     showPillOverflow(chip, e.detail === 0);
   });
+  // A refit while the list is open: the new chip owns the open list.
+  if (openPopover && openPopover.classList.contains('pill-overflow')) {
+    chip.setAttribute('aria-expanded', 'true');
+    popoverOnClose = function() { chip.setAttribute('aria-expanded', 'false'); };
+  }
+}
+
+// The chip on screen now (a refit replaces it), for focus and anchoring.
+function currentPillChip() {
+  return document.querySelector('#agent-pills .pill-more');
 }
 
 function watchPillStrip(c) {
@@ -838,7 +867,7 @@ function showPillOverflow(chip, fromKeyboard) {
     row.appendChild(state);
     row.addEventListener('click', function(e) {
       e.stopPropagation();
-      var anchor = chip.isConnected ? chip : document.getElementById('agent-pills');
+      var anchor = currentPillChip() || document.getElementById('agent-pills');
       showPopover(anchor, x.a);
     });
     rows.push(row);
@@ -849,7 +878,8 @@ function showPillOverflow(chip, fromKeyboard) {
     if (e.key === 'Escape') {
       e.preventDefault();
       closePopover();
-      if (chip.isConnected) chip.focus();
+      var current = currentPillChip();
+      if (current) current.focus();
       return;
     }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
@@ -6909,15 +6939,29 @@ function toggleSearch() {
       searchInputWired = true;
       inp.addEventListener('input', function() {
         clearTimeout(searchDebounce);
+        // The shown results answer the old text: drop anything still in
+        // flight for it and make them inert until the new query renders.
+        searchSeq++;
+        setSearchResultsStale(true);
         searchDebounce = setTimeout(doSearch, 300);
       });
       inp.addEventListener('keydown', onSearchInputKeydown);
     }
   }
 }
+// Results left from an earlier query text can be neither clicked nor
+// focused (inert) and are dimmed, until the current query's answer lands.
+function setSearchResultsStale(stale) {
+  var results = document.getElementById('search-results');
+  if (!results) return;
+  results.inert = stale;
+  results.classList.toggle('search-results-stale', stale);
+}
+
 function closeSearch() {
   document.getElementById('search-bar').classList.add('hidden');
   document.getElementById('search-results').textContent = '';
+  setSearchResultsStale(false);
   document.getElementById('search-input').value = '';
   renderSearchChips('');
   searchSeq++;
@@ -7047,7 +7091,8 @@ function bareMessageNumber(q) {
 // The "Go to message #N" result: fetched through the same endpoint as the
 // #N links, so the server's DM visibility applies (fails closed), and a
 // DM this viewer is not party to reads as not found, as the loader does.
-function gotoResultItem(conv, id, seq) {
+// It fills in place when its fetch lands.
+function gotoResultItem(conv, id) {
   var item = document.createElement('div');
   item.className = 'search-result-item search-goto';
   item.setAttribute('role', 'option');
@@ -7068,7 +7113,9 @@ function gotoResultItem(conv, id, seq) {
   fetch('/api/message/' + id + '?conversation=' + encodeURIComponent(conv) + '&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.json().then(function(b) { return { ok: r.ok, body: b }; }); })
     .then(function(res) {
-      if (seq !== searchSeq) return;
+      // Superseded (a new query, a cleared or closed search) once detached;
+      // paging the mentions keeps it.
+      if (!item.isConnected) return;
       var msg = res.body;
       if (!res.ok || !msg || (msg.to && !dmPartnerOf(msg))) { showMissing(refNotFoundText(id, res.ok ? null : msg)); return; }
       var sender = document.createElement('span');
@@ -7089,7 +7136,7 @@ function gotoResultItem(conv, id, seq) {
       item.addEventListener('click', open);
       item.addEventListener('keydown', function(e) { if (e.key === 'Enter') open(); });
     })
-    .catch(function() { if (seq === searchSeq) showMissing('Could not load message #' + id); });
+    .catch(function() { if (item.isConnected) showMissing('Could not load message #' + id); });
   return item;
 }
 
@@ -7112,7 +7159,7 @@ function doSearch(more) {
   var results = document.getElementById('search-results');
   renderSearchChips(q);
   var conv = currentConvId();
-  if (!q || !conv) { searchSeq++; searchState = null; results.textContent = ''; return; }
+  if (!q || !conv) { searchSeq++; searchState = null; results.textContent = ''; setSearchResultsStale(false); return; }
   var before = null;
   if (more === true && searchState && searchState.q === q && searchState.conv === conv) before = searchState.nextBefore;
   var mySeq = ++searchSeq;
@@ -7120,9 +7167,12 @@ function doSearch(more) {
   // text matches below it are the messages citing it (#1234).
   var bareId = bareMessageNumber(q);
   var serverQ = bareId ? '#' + bareId : q;
+  // A new query keeps the old results inert until its answer lands; the
+  // bare-number view is laid out fresh at once.
+  if (!before) setSearchResultsStale(!bareId);
   if (bareId && !before) {
     results.textContent = '';
-    results.appendChild(gotoResultItem(conv, bareId, mySeq));
+    results.appendChild(gotoResultItem(conv, bareId));
     var label = document.createElement('div');
     label.className = 'search-section-label';
     label.textContent = 'Mentions of #' + bareId;
@@ -7134,6 +7184,7 @@ function doSearch(more) {
     .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
     .then(function(res) {
       if (mySeq !== searchSeq) return;
+      setSearchResultsStale(false);
       // The bare-number view was laid out when the query started.
       if (!before && !bareId) results.textContent = '';
       var oldMore = document.getElementById('search-more');
@@ -7172,6 +7223,7 @@ function doSearch(more) {
     .catch(function() {
       if (mySeq !== searchSeq) return;
       results.textContent = 'Search failed';
+      setSearchResultsStale(false);
     });
 }
 
