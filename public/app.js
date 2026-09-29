@@ -589,75 +589,291 @@ function formatAge(ms) {
 // Ages drift while nothing else re-renders; keep them honest once a minute.
 setInterval(function() { if (typeof agents !== 'undefined' && agents.length > 0) renderPills(); }, 60000);
 
+// The strip shows members in presence order (online, then stale, then
+// silent) on one line. When they do not all fit, the role and status text
+// go first (compact), then the tail of the list moves behind a +N chip that
+// opens the full list. A ResizeObserver on the header refits on resize;
+// joins and leaves refit through renderPills. The header's width does not
+// depend on the strip's content, so a refit cannot trigger another.
+var pillStripObserver = null;
+var pillStripWidth = -1;
+var pillFitFrame = 0;
+var pillInfos = [];    // the strip's members, in strip order
+var pillOverflow = []; // the members behind the +N chip, in strip order
+var popoverOnClose = null;
+// The strip's CSS max-width (55%) and room kept for the channel title.
+var PILL_STRIP_SHARE = 0.55;
+var PILL_TITLE_MIN = 96;
+
+function pillInfo(a, nowMs) {
+  var postAge = a.lastPostAt ? Math.max(0, nowMs - a.lastPostAt) : null;
+  var seenAge = a.lastSeen ? Math.max(0, nowMs - a.lastSeen) : null;
+  var quietAge = postAge != null ? postAge : (a.joinedAt ? Math.max(0, nowMs - a.joinedAt) : null);
+  var stale = staleNames.has(a.name);
+  var presence = window.joindUi ? window.joindUi.pillPresence(stale, quietAge) : (stale ? 'stale' : 'online');
+  var quietText = quietAge != null && quietAge > 30 * 60000
+    ? (postAge != null ? 'silent ' : 'no posts ') + formatAge(quietAge)
+    : '';
+  var title = (a.name || '') +
+    (a.role ? ' · ' + a.role : '') +
+    (a.host ? ' · hosted on ' + a.host : '') +
+    (stale ? ' · stale' : '') +
+    (quietText ? ' · ' + quietText : '') +
+    (seenAge != null ? ' · seen ' + formatAge(seenAge) + ' ago' : '') +
+    (postAge != null ? ' · last posted ' + formatAge(postAge) + ' ago' : ' · no posts this session');
+  return { a: a, presence: presence, quietAge: quietAge, quietText: quietText, title: title };
+}
+
+function shortPillAge(ms) {
+  return window.joindUi ? window.joindUi.shortAge(ms) : formatAge(ms);
+}
+
 function renderPills() {
   var c = document.getElementById('agent-pills');
+  if (!c) return;
   c.textContent = '';
-  agents.forEach(function(a) {
-    var pill = document.createElement('div');
-    var pillClass = 'agent-pill';
-    if (staleNames.has(a.name)) pillClass += ' stale';
-    if (typingNames.has(a.name)) pillClass += ' working';
-    pill.className = pillClass;
-    var color = getSenderColor(a.name);
-    pill.style.setProperty('--pill-color', color);
-    pill.style.borderColor = color + '30';
+  var nowMs = serverNow();
+  var infos = agents.map(function(a) { return pillInfo(a, nowMs); });
+  if (window.joindUi) infos = window.joindUi.orderByPresence(infos, function(x) { return x.presence; });
+  infos.forEach(function(x) { c.appendChild(buildPill(x)); });
+  pillInfos = infos;
+  fitPills();
+  watchPillStrip(c);
+}
 
+function buildPill(x) {
+  var a = x.a;
+  var pill = document.createElement('div');
+  var pillClass = 'agent-pill';
+  if (x.presence === 'stale') pillClass += ' stale';
+  if (x.presence === 'silent') pillClass += ' silent';
+  if (typingNames.has(a.name)) pillClass += ' working';
+  pill.className = pillClass;
+  pill.setAttribute('role', 'listitem');
+  pill.tabIndex = 0;
+  var color = getSenderColor(a.name);
+  pill.style.setProperty('--pill-color', color);
+  pill.style.borderColor = color + '30';
+
+  var dot = document.createElement('span');
+  dot.className = 'pill-dot';
+  // Green = online (default CSS), agent color only when stale
+
+  var name = document.createElement('span');
+  name.className = 'pill-name'; name.style.color = color;
+  name.textContent = a.name;
+
+  pill.appendChild(dot); pill.appendChild(name);
+  if (a.role) {
+    var role = document.createElement('span');
+    role.className = 'pill-role';
+    role.textContent = a.role;
+    pill.appendChild(role);
+  }
+  // Linked servers: a hosted member's terminal lives on a peer server; the
+  // room sees who is woken elsewhere. Local members carry no host.
+  if (a.host) {
+    var hostEl = document.createElement('span');
+    hostEl.className = 'pill-host';
+    hostEl.textContent = 'via ' + a.host;
+    pill.appendChild(hostEl);
+  }
+  // Proof-of-life age: presence can look fine while nothing runs (a hung
+  // resident keeps heartbeating). Once an agent has been quiet for 30
+  // minutes the pill carries a short age (9h); the tooltip has the full
+  // text (silent 9h 45m) and both ages. Ages are measured against the
+  // server clock (init carries serverNow) and never go negative. An agent
+  // that has not posted yet is measured from its join, and says so.
+  pill.title = x.title;
+  pill.setAttribute('aria-label', x.title);
+  if (x.quietText) {
+    var ageEl = document.createElement('span');
+    ageEl.className = 'pill-age';
+    ageEl.textContent = shortPillAge(x.quietAge);
+    ageEl.title = x.quietText;
+    pill.appendChild(ageEl);
+  }
+  if (a.status) {
+    var statusEl = document.createElement('span');
+    statusEl.className = 'pill-status';
+    statusEl.textContent = a.status;
+    pill.appendChild(statusEl);
+  }
+
+  pill.addEventListener('click', function(e) {
+    e.stopPropagation();
+    showPopover(pill, a);
+  });
+  pill.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    showPopover(pill, a);
+  });
+  return pill;
+}
+
+// The width the strip may take: its CSS share of the header, less what the
+// toggle and a minimum channel title need.
+function pillStripAvailable(c) {
+  var header = c.parentElement;
+  if (!header) return 0;
+  var cs = getComputedStyle(header);
+  var inner = header.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  var gap = parseFloat(cs.columnGap) || 0;
+  var others = 0;
+  for (var i = 0; i < header.children.length; i++) {
+    var ch = header.children[i];
+    if (ch === c || ch.classList.contains('channel-header-info')) continue;
+    if (ch.offsetWidth > 0) others += ch.offsetWidth + gap;
+  }
+  var own = getComputedStyle(c);
+  var pad = (parseFloat(own.paddingLeft) || 0) + (parseFloat(own.paddingRight) || 0);
+  return Math.floor(Math.min(inner * PILL_STRIP_SHARE, inner - others - gap - PILL_TITLE_MIN) - pad) - 1;
+}
+
+function fitPills() {
+  var c = document.getElementById('agent-pills');
+  if (!c) return;
+  var oldChip = c.querySelector('.pill-more-item');
+  if (oldChip) oldChip.remove();
+  c.classList.remove('pills-compact');
+  var pills = Array.prototype.slice.call(c.querySelectorAll('.agent-pill'));
+  pills.forEach(function(p) { p.hidden = false; });
+  pillOverflow = [];
+  if (pills.length === 0 || !window.joindUi) return;
+  var avail = pillStripAvailable(c);
+  if (avail <= 0) return; // not laid out (hidden header): the next resize refits
+  var gap = parseFloat(getComputedStyle(c).columnGap) || 0;
+  var measure = function() { return pills.map(function(p) { return p.getBoundingClientRect().width; }); };
+  var fit = window.joindUi.pillsThatFit;
+  if (fit(measure(), avail, gap, 0) === pills.length) return;
+  // Short on space: drop the role and status text before any pill.
+  c.classList.add('pills-compact');
+  var widths = measure();
+  if (fit(widths, avail, gap, 0) === pills.length) return;
+  var item = document.createElement('div');
+  item.className = 'pill-more-item';
+  item.setAttribute('role', 'listitem');
+  var chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'pill-more';
+  chip.setAttribute('aria-haspopup', 'dialog');
+  chip.setAttribute('aria-expanded', 'false');
+  // Sized with the widest count it could show, then set to the real one.
+  chip.textContent = '+' + pills.length;
+  item.appendChild(chip);
+  c.appendChild(item);
+  var k = fit(widths, avail, gap, item.getBoundingClientRect().width);
+  for (var i = k; i < pills.length; i++) pills[i].hidden = true;
+  pillOverflow = pillInfos.slice(k);
+  var n = pills.length - k;
+  chip.textContent = '+' + n;
+  chip.title = n + ' more: ' + pillOverflow.map(function(x) { return x.a.name; }).join(', ');
+  chip.setAttribute('aria-label', n + ' more agents');
+  chip.addEventListener('click', function(e) {
+    e.stopPropagation();
+    // detail 0: activated from the keyboard, so focus moves into the list.
+    showPillOverflow(chip, e.detail === 0);
+  });
+}
+
+function watchPillStrip(c) {
+  if (pillStripObserver || typeof ResizeObserver === 'undefined' || !c.parentElement) return;
+  pillStripWidth = c.parentElement.clientWidth;
+  pillStripObserver = new ResizeObserver(function(entries) {
+    var w = Math.round(entries[0].contentRect.width);
+    if (w === pillStripWidth) return;
+    pillStripWidth = w;
+    // One refit per frame, after layout settles.
+    if (pillFitFrame) cancelAnimationFrame(pillFitFrame);
+    pillFitFrame = requestAnimationFrame(function() { pillFitFrame = 0; fitPills(); });
+  });
+  pillStripObserver.observe(c.parentElement);
+}
+
+// The members behind the +N chip: name, role, presence and age, each row
+// opening that member's usual popover. Escape closes it and returns focus
+// to the chip; arrows move between rows; Tab leaves it (no trap).
+function showPillOverflow(chip, fromKeyboard) {
+  var list = pillOverflow.slice();
+  closePopover();
+  if (list.length === 0) return;
+  var pop = document.createElement('div');
+  pop.className = 'pill-popover pill-overflow';
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', 'More agents');
+  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+
+  var hdr = document.createElement('div');
+  hdr.className = 'pop-header';
+  var hdrText = document.createElement('span');
+  hdrText.textContent = list.length + ' more in this room';
+  hdr.appendChild(hdrText);
+  pop.appendChild(hdr);
+
+  var rows = [];
+  list.forEach(function(x) {
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'pill-overflow-row ' + x.presence;
+    row.title = x.title;
     var dot = document.createElement('span');
     dot.className = 'pill-dot';
-    // Green = online (default CSS), agent color only when stale
-
     var name = document.createElement('span');
-    name.className = 'pill-name'; name.style.color = color;
-    name.textContent = a.name;
-
-    pill.appendChild(dot); pill.appendChild(name);
-    if (a.role) {
+    name.className = 'pill-name';
+    name.style.color = getSenderColor(x.a.name);
+    name.textContent = x.a.name;
+    row.appendChild(dot);
+    row.appendChild(name);
+    if (x.a.role) {
       var role = document.createElement('span');
-      role.className = 'pill-role';
-      role.textContent = a.role;
-      pill.appendChild(role);
+      role.className = 'pill-overflow-role';
+      role.textContent = x.a.role;
+      row.appendChild(role);
     }
-    // Linked servers: a hosted member's terminal lives on a peer server; the
-    // room sees who is woken elsewhere. Local members carry no host.
-    if (a.host) {
-      var hostEl = document.createElement('span');
-      hostEl.className = 'pill-host';
-      hostEl.textContent = 'via ' + a.host;
-      pill.appendChild(hostEl);
-    }
-    // Proof-of-life age: presence can look fine while nothing runs (a hung
-    // resident keeps heartbeating). Show how long since the agent last
-    // posted, once it passes 30 minutes; the tooltip carries both ages.
-    // Ages are measured against the server clock (init carries serverNow) and
-    // never go negative. An agent that has not posted yet is measured from
-    // its join, and the chip says so.
-    var nowMs = serverNow();
-    var postAge = a.lastPostAt ? Math.max(0, nowMs - a.lastPostAt) : null;
-    var seenAge = a.lastSeen ? Math.max(0, nowMs - a.lastSeen) : null;
-    var quietAge = postAge != null ? postAge : (a.joinedAt ? Math.max(0, nowMs - a.joinedAt) : null);
-    pill.title = (a.name || '') +
-      (a.host ? ' · hosted on ' + a.host : '') +
-      (seenAge != null ? ' · seen ' + formatAge(seenAge) + ' ago' : '') +
-      (postAge != null ? ' · last posted ' + formatAge(postAge) + ' ago' : ' · no posts this session');
-    if (quietAge != null && quietAge > 30 * 60000) {
-      var ageEl = document.createElement('span');
-      ageEl.className = 'pill-age';
-      ageEl.textContent = (postAge != null ? 'silent ' : 'no posts ') + formatAge(quietAge);
-      pill.appendChild(ageEl);
-    }
-    if (a.status) {
-      var statusEl = document.createElement('span');
-      statusEl.className = 'pill-status';
-      statusEl.textContent = a.status;
-      pill.appendChild(statusEl);
-    }
-
-    pill.addEventListener('click', function(e) {
+    var state = document.createElement('span');
+    state.className = 'pill-overflow-state';
+    state.textContent = x.presence === 'online' ? 'online' : x.presence === 'stale' ? 'stale' : x.quietText;
+    row.appendChild(state);
+    row.addEventListener('click', function(e) {
       e.stopPropagation();
-      showPopover(pill, a);
+      var anchor = chip.isConnected ? chip : document.getElementById('agent-pills');
+      showPopover(anchor, x.a);
     });
-    c.appendChild(pill);
+    rows.push(row);
+    pop.appendChild(row);
   });
+
+  pop.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closePopover();
+      if (chip.isConnected) chip.focus();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    var at = rows.indexOf(document.activeElement);
+    var next = e.key === 'ArrowDown' ? Math.min(rows.length - 1, at + 1) : Math.max(0, at - 1);
+    e.preventDefault();
+    rows[next].focus();
+  });
+
+  document.body.appendChild(pop);
+  if (!isMobileView()) {
+    var rect = chip.getBoundingClientRect();
+    var popRect = pop.getBoundingClientRect();
+    var top = rect.bottom + 6;
+    var left = rect.right - popRect.width;
+    if (left + popRect.width > window.innerWidth - 8) left = window.innerWidth - popRect.width - 8;
+    if (top + popRect.height > window.innerHeight - 8) top = rect.top - popRect.height - 6;
+    pop.style.top = Math.max(8, top) + 'px';
+    pop.style.left = Math.max(8, left) + 'px';
+  }
+  openPopover = pop;
+  chip.setAttribute('aria-expanded', 'true');
+  popoverOnClose = function() { chip.setAttribute('aria-expanded', 'false'); };
+  if (fromKeyboard && rows[0]) rows[0].focus();
 }
 
 function renderTypingBar() {
@@ -870,6 +1086,7 @@ function showPopover(anchor, agent) {
 
 function closePopover() {
   if (openPopover) { openPopover.remove(); openPopover = null; }
+  if (popoverOnClose) { var done = popoverOnClose; popoverOnClose = null; done(); }
 }
 document.addEventListener('click', closePopover);
 
@@ -2421,7 +2638,12 @@ function isMobileView() { return window.innerWidth <= 560; }
 // container's left edge, applied on every pointermove and clamped; saved
 // once on pointerup. Arrow keys on the focused seam step 16 px. Below the
 // mobile breakpoint the sidebar is a drawer and the saved width is not applied.
+// Dragging the seam below SIDEBAR_COLLAPSE_AT (40 px under the minimum)
+// dims the sidebar with a hint, and releasing there collapses it, exactly as
+// the toggle button does; the saved width is untouched, so expanding again
+// restores it.
 var SIDEBAR_MIN = 180;
+var SIDEBAR_COLLAPSE_AT = 140;
 var SIDEBAR_MAX = 480;
 var SIDEBAR_STEP = 16;
 var SIDEBAR_WIDTH_KEY = 'joind-sidebar-width';
@@ -2476,27 +2698,43 @@ function initSidebarResize() {
   setSidebarWidth(readSidebarWidth());
   var dragging = false;
   var lastWidth = null;
+  var willCollapse = false;
   seam.addEventListener('pointerdown', function(e) {
     if (isMobileView() || sb.classList.contains('hidden') || e.button !== 0) return;
     e.preventDefault();
     dragging = true;
     lastWidth = null;
+    willCollapse = false;
     try { seam.setPointerCapture(e.pointerId); } catch (err) { /* capture unsupported: moves still arrive while over the seam */ }
     seam.classList.add('dragging');
     document.body.classList.add('sidebar-resizing');
   });
   seam.addEventListener('pointermove', function(e) {
     if (!dragging) return;
-    var w = clampSidebarWidth(e.clientX - app.getBoundingClientRect().left);
-    lastWidth = w;
-    setSidebarWidth(w);
+    var out = window.joindUi
+      ? window.joindUi.sidebarDragOutcome(e.clientX - app.getBoundingClientRect().left, SIDEBAR_MIN, SIDEBAR_MAX, SIDEBAR_COLLAPSE_AT)
+      : { width: clampSidebarWidth(e.clientX - app.getBoundingClientRect().left), collapse: false };
+    willCollapse = out.collapse;
+    sb.classList.toggle('will-collapse', willCollapse);
+    // Below the threshold the release collapses, so no width is kept from it.
+    lastWidth = willCollapse ? null : out.width;
+    setSidebarWidth(out.width);
   });
+  // Only a release (pointerup) below the threshold collapses; a cancelled
+  // or lost drag there puts the saved width back instead.
   function endDrag(e) {
     if (!dragging) return;
     dragging = false;
     try { seam.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
     seam.classList.remove('dragging');
     document.body.classList.remove('sidebar-resizing');
+    sb.classList.remove('will-collapse');
+    if (willCollapse) {
+      willCollapse = false;
+      setSidebarWidth(readSidebarWidth());
+      if (e.type === 'pointerup') setSidebarHidden(true);
+      return;
+    }
     if (lastWidth !== null) saveSidebarWidth(lastWidth);
   }
   seam.addEventListener('pointerup', endDrag);
@@ -2534,8 +2772,22 @@ function toggleSidebar() {
     }
   } else {
     // Desktop: toggle hidden
-    sb.classList.toggle('hidden');
-    try { localStorage.setItem('joind-sidebar', sb.classList.contains('hidden') ? 'hidden' : 'visible'); } catch (e) { /* storage unavailable */ }
+    setSidebarHidden(!sb.classList.contains('hidden'));
+  }
+}
+
+// Desktop collapse, shared by the toggle button and the drag-to-collapse
+// seam, persisted under the same key. Focus left inside a sidebar that
+// disappears moves to the toggle, which brings it back.
+function setSidebarHidden(hidden) {
+  var sb = document.getElementById('sidebar');
+  if (!sb) return;
+  var hadFocus = hidden && sb.contains(document.activeElement);
+  sb.classList.toggle('hidden', hidden);
+  try { localStorage.setItem('joind-sidebar', hidden ? 'hidden' : 'visible'); } catch (e) { /* storage unavailable */ }
+  if (hadFocus) {
+    var toggle = document.getElementById('sidebar-toggle');
+    if (toggle) toggle.focus();
   }
 }
 
@@ -6645,16 +6897,22 @@ function handleMessageEdited(data) {
 
 // --- Search ---
 var searchDebounce = null;
+var searchInputWired = false;
 function toggleSearch() {
   var bar = document.getElementById('search-bar');
   bar.classList.toggle('hidden');
   if (!bar.classList.contains('hidden')) {
     var inp = document.getElementById('search-input');
     inp.focus();
-    inp.addEventListener('input', function() {
-      clearTimeout(searchDebounce);
-      searchDebounce = setTimeout(doSearch, 300);
-    });
+    // Wired once: every open used to add another input listener.
+    if (!searchInputWired) {
+      searchInputWired = true;
+      inp.addEventListener('input', function() {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(doSearch, 300);
+      });
+      inp.addEventListener('keydown', onSearchInputKeydown);
+    }
   }
 }
 function closeSearch() {
@@ -6781,6 +7039,73 @@ function searchResultItem(msg, conv) {
   return item;
 }
 
+// The message id when the whole query is one message number, else null.
+function bareMessageNumber(q) {
+  return window.joindUi ? window.joindUi.parseBareMessageNumber(q) : null;
+}
+
+// The "Go to message #N" result: fetched through the same endpoint as the
+// #N links, so the server's DM visibility applies (fails closed), and a
+// DM this viewer is not party to reads as not found, as the loader does.
+function gotoResultItem(conv, id, seq) {
+  var item = document.createElement('div');
+  item.className = 'search-result-item search-goto';
+  item.setAttribute('role', 'option');
+  var head = document.createElement('span');
+  head.className = 'search-goto-label';
+  head.textContent = 'Go to message #' + id;
+  var body = document.createElement('span');
+  body.className = 'search-result-text';
+  body.textContent = 'Loading';
+  item.appendChild(head);
+  item.appendChild(body);
+  var showMissing = function(text) {
+    item.classList.add('search-goto-missing');
+    item.removeAttribute('tabindex');
+    head.textContent = text;
+    body.textContent = '';
+  };
+  fetch('/api/message/' + id + '?conversation=' + encodeURIComponent(conv) + '&token=' + encodeURIComponent(webToken()))
+    .then(function(r) { return r.json().then(function(b) { return { ok: r.ok, body: b }; }); })
+    .then(function(res) {
+      if (seq !== searchSeq) return;
+      var msg = res.body;
+      if (!res.ok || !msg || (msg.to && !dmPartnerOf(msg))) { showMissing(refNotFoundText(id, res.ok ? null : msg)); return; }
+      var sender = document.createElement('span');
+      sender.className = 'search-result-sender';
+      sender.style.color = getSenderColor(msg.sender);
+      sender.textContent = msg.sender;
+      item.insertBefore(sender, body);
+      body.textContent = String(msg.text || '').split('\n')[0].slice(0, 120);
+      var time = document.createElement('span');
+      time.className = 'search-result-id';
+      time.textContent = msg.timestamp ? formatDay(msg.timestamp) + ' ' + formatTimeShort(msg.timestamp) : '';
+      item.appendChild(time);
+      item.tabIndex = 0;
+      var open = function() {
+        closeSearch();
+        jumpToMessage(conv, id, msg);
+      };
+      item.addEventListener('click', open);
+      item.addEventListener('keydown', function(e) { if (e.key === 'Enter') open(); });
+    })
+    .catch(function() { if (seq === searchSeq) showMissing('Could not load message #' + id); });
+  return item;
+}
+
+// Enter on a bare message number jumps straight to it (the #N loader shows
+// the not-found notice when it is missing or not visible to this viewer).
+function onSearchInputKeydown(e) {
+  if (e.key !== 'Enter' || e.isComposing) return;
+  var id = bareMessageNumber(this.value);
+  var conv = currentConvId();
+  if (!id || !conv) return;
+  e.preventDefault();
+  clearTimeout(searchDebounce);
+  closeSearch();
+  jumpToMessage(conv, id);
+}
+
 // `more`: fetch the next (older) page of the current query and append it.
 function doSearch(more) {
   var q = document.getElementById('search-input').value.trim();
@@ -6791,13 +7116,26 @@ function doSearch(more) {
   var before = null;
   if (more === true && searchState && searchState.q === q && searchState.conv === conv) before = searchState.nextBefore;
   var mySeq = ++searchSeq;
-  var url = '/api/search?page=1&conversation=' + encodeURIComponent(conv) + '&q=' + encodeURIComponent(q) +
+  // A bare message number (1234 or #1234) goes to that message first; the
+  // text matches below it are the messages citing it (#1234).
+  var bareId = bareMessageNumber(q);
+  var serverQ = bareId ? '#' + bareId : q;
+  if (bareId && !before) {
+    results.textContent = '';
+    results.appendChild(gotoResultItem(conv, bareId, mySeq));
+    var label = document.createElement('div');
+    label.className = 'search-section-label';
+    label.textContent = 'Mentions of #' + bareId;
+    results.appendChild(label);
+  }
+  var url = '/api/search?page=1&conversation=' + encodeURIComponent(conv) + '&q=' + encodeURIComponent(serverQ) +
     '&limit=' + SEARCH_PAGE + (before ? '&before=' + before : '') + '&token=' + encodeURIComponent(webToken());
   fetch(url)
     .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
     .then(function(res) {
       if (mySeq !== searchSeq) return;
-      if (!before) results.textContent = '';
+      // The bare-number view was laid out when the query started.
+      if (!before && !bareId) results.textContent = '';
       var oldMore = document.getElementById('search-more');
       if (oldMore) oldMore.remove();
       var oldNote = document.getElementById('search-coverage');
@@ -6807,7 +7145,7 @@ function doSearch(more) {
       if (!before && list.length === 0) {
         var none = document.createElement('div');
         none.className = 'search-empty';
-        none.textContent = res.ok ? 'No results' : 'Search failed';
+        none.textContent = !res.ok ? 'Search failed' : bareId ? 'No mentions' : 'No results';
         results.appendChild(none);
       }
       list.forEach(function(r) { results.appendChild(searchResultItem(r.message, conv)); });

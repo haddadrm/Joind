@@ -210,6 +210,27 @@ body {
 .sidebar-seam.dragging::after { background: var(--accent); }
 body.sidebar-resizing { cursor: col-resize; user-select: none; }
 body.sidebar-resizing iframe { pointer-events: none; }
+/* Dragged below the collapse threshold: the sidebar dims and says what the
+   release will do. The hint is decoration; the release does the collapse. */
+.sidebar.will-collapse > :not(.sidebar-seam) { opacity: 0.35; }
+.sidebar.will-collapse::after {
+  content: 'Release to collapse';
+  position: absolute;
+  top: 50%;
+  left: 8px;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text-bright);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+  z-index: 21;
+}
 
 /* Workspace header */
 .ws-header {
@@ -807,10 +828,10 @@ body.sidebar-resizing iframe { pointer-events: none; }
 }
 .channel-topic:empty { display: none; }
 
-/* Agent pills (connected agents, right side of header) */
 /* Agent pills (connected agents, right side of header).
-   The container yields width to the channel title and scrolls
-   horizontally when there are more pills than fit. */
+   One line, never scrolled: the strip yields width to the channel title,
+   and renderPills fits what shows (compact text first, then a +N chip).
+   The 55% share is mirrored as PILL_STRIP_SHARE in app.js. */
 .agent-pills {
   display: flex;
   align-items: center;
@@ -818,11 +839,55 @@ body.sidebar-resizing iframe { pointer-events: none; }
   flex: 0 1 auto;
   min-width: 0;
   max-width: 55%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
+  overflow: hidden;
+  padding: 2px;
 }
-.agent-pills::-webkit-scrollbar { display: none; }
+.agent-pill[hidden] { display: none; }
+.pills-compact .pill-role,
+.pills-compact .pill-status { display: none; }
+.agent-pill:focus-visible { outline: none; box-shadow: var(--ring-tight); }
+.pill-more-item { display: flex; flex-shrink: 0; }
+.pill-more {
+  padding: 3px 9px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pill-more:hover,
+.pill-more[aria-expanded="true"] { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text-bright); }
+.pill-more:focus-visible { outline: none; box-shadow: var(--ring-tight); }
+
+/* The +N list: one row per member behind the chip */
+.pill-overflow { width: 260px; max-height: 60vh; overflow-y: auto; }
+.pill-overflow-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 6px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.pill-overflow-row:hover { background: var(--bg-hover); }
+.pill-overflow-row:focus-visible { outline: none; background: var(--bg-hover); box-shadow: var(--ring-tight); }
+.pill-overflow-row.stale .pill-dot,
+.pill-overflow-row.silent .pill-dot { background: var(--text-muted); }
+.pill-overflow-row.stale { opacity: 0.6; }
+.pill-overflow-role { font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pill-overflow-state { margin-left: auto; font-size: 10px; color: var(--text-muted); white-space: nowrap; }
 
 .agent-pill {
   display: flex;
@@ -1964,6 +2029,19 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
 .search-chips-clear { font-size: 11px; }
 .search-empty { padding: 7px 10px; font-size: 12px; color: var(--text-muted); }
 .search-more { margin: 6px 10px; }
+.search-section-label {
+  padding: 8px 10px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.search-goto { border-left: 2px solid var(--accent); }
+.search-goto-label { font-weight: 600; color: var(--accent); white-space: nowrap; }
+.search-goto-missing { border-left-color: var(--border-strong); cursor: default; }
+.search-goto-missing:hover { background: none; }
+.search-goto-missing .search-goto-label { color: var(--text-muted); font-weight: 500; }
 .search-coverage { padding: 6px 10px; font-size: 11px; color: var(--text-muted); font-style: italic; }
 
 /* ================================================================
@@ -3122,15 +3200,15 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
 }
 
 
-/* Proof-of-life age on the presence pill (shown after 30 quiet minutes) */
+/* Proof-of-life age on the presence pill (shown after 30 quiet minutes):
+   a short dimmed age (9h); the tooltip carries the full text. */
 .pill-age {
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 8px;
   font-size: 10px;
   font-weight: 600;
   color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* ================================================================

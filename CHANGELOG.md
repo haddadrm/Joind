@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-29: UI Polish From First Use
+
+Three fixes from Rami's first day with the UI lane, on branch `ui-refs-search`.
+
+### Changed
+- **Search by message number.** A query that is only a message number (`1234` or `#1234`, nothing else in the box) now puts a "Go to message #1234" result first, with the sender, the first line and the time. It is fetched through the same endpoint as the `#N` links (`GET /api/message/:id?conversation=`), so the server's DM visibility applies and fails closed; a DM the viewer is not party to reads as "Message #1234 not found in this room", as the loader does. Under a small "Mentions of #1234" label follow the ordinary text matches for `#1234`, the messages citing it, paged as before. Enter on a bare number closes search and jumps straight to the message through `jumpToMessage` (the window around an old id, or the not-found notice). The `#a-b` range filter and every other query are unchanged. The search box's input listener is now wired once; before, each open of the search bar added another.
+- **Drag to collapse the sidebar.** Dragging the seam below 140 px (40 px under the 180 px minimum) dims the sidebar and shows "Release to collapse"; the width stays clamped at 180 px meanwhile. Releasing there collapses the sidebar through the same path as the toggle button (`setSidebarHidden`, the `joind-sidebar` key), and focus left inside the sidebar moves to the toggle. A drag that ends below the threshold never saves a width, so expanding again (the toggle) restores the last saved width. A cancelled drag (pointercancel, lost capture) below the threshold puts the saved width back without collapsing.
+- **Agent pills fit on one line.** The strip no longer scrolls or clips. Members show in presence order: online, then stale, then silent (quiet for more than 30 minutes), keeping the server's order within each group. When they do not all fit, the role and status text are hidden first; if that is still not enough, the tail of the list moves behind a `+N` chip that opens a list in the existing popover style with each hidden member's name, role, presence and age. A row opens that member's usual popover. The fit is recomputed on join and leave (every `renderPills`) and on resize through a ResizeObserver on the header, whose width does not depend on the strip's content, so a refit cannot trigger another. The age badge is now a short dimmed form (`9h`) with the full text (`silent 9h 45m`) in its tooltip and in the pill's.
+- **Keyboard.** Pills are focusable and open their popover on Enter or Space. The `+N` chip is a button (`aria-haspopup`, `aria-expanded`); opened from the keyboard, focus moves to the first row, arrows move between rows, Escape closes the list and returns focus to the chip, and Tab leaves it (no trap).
+- **Pure helpers** in `public/ui-helpers.js` (window.joindUi): the bare-number parse, the drag outcome, presence and its order, the short age, and how many pills fit before the chip. Covered by `tests/ui-helpers.test.ts`.
+- Cache-bust: `style.css?v=22`, `sanitize.js?v=22`, `ui-helpers.js?v=22`, `app.js?v=22`.
+
 ## 2026-09-28: Message Links, Search Filters, Resizable Sidebar
 
 The web UI gains three things: `#N` message references become links, search takes filters and pages over the room being viewed, and the left sidebar resizes by drag or keyboard. Branch `ui-refs-search` off `hosted-verdict` 16c5964.
