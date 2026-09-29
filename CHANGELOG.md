@@ -4,6 +4,13 @@
 
 Rami chose variant A of the redesign exploration ("A feels most comfortable and well rounded"), with B's command palette and C's members panel to follow. The design note, the three variant pages and the screenshots are in `docs/design/2026-09-29-redesign/`. Built lane by lane on branch `redesign-a`, each lane gated by Codex.
 
+### Lane 4: sidebar sections and the Decisions page
+- **Decisions is a page**, as in A: the rail item is a view whose sidebar lists Waiting on you, Open (everyone's open asks) and Closed, each with its count. A card shows the question, the id, who asked, the room and the state (Waiting on you or on someone, or Closed with the answer and who gave it). Its choices are answered on the page, for any room; the chosen one carries the chooser's avatar. Open in room jumps to the message (a DM opens its thread); Resolve closes an ask without a choice. On a phone the views are chips on the page and no drawer opens. The old decisions overlay is no longer reachable from the rail.
+- **Server:** `GET /api/decisions` takes `state=resolved` and `state=all` besides `open` (anything else is `open`, as before) and returns each ask's `choices` and `choiceResponse`. `POST /api/message/:id/choose` takes an optional `conversation`: the named room answers, an unknown or empty name is a 404 and never the active room in its place, the viewer answers as themselves (the body's `by` is ignored there), and only on a message they can see. Without it, the active room as before. `ChatRoom.resolvedAsks` joins `openAsks`. Covered by `tests/decisions-route.test.ts`.
+- **Sections.** Every section heading is a keyboard toggle (Enter or Space, `aria-expanded`), and the collapsed set is remembered per browser (`joind-collapsed-sections`). Each linked server is its own collapsible `remote: <server>` section (keyed by server) instead of a group inside Rooms. Templates and terminals already live under Crew (lane 3b).
+- **Fixed alongside:** leaving a page by opening a message did not store the new rail view, so a reload went back to the page; it is stored now.
+- Cache-bust: `?v=27`.
+
 ### Lane 3b: fidelity to mockup A
 Rami found the build diverging from mockup A, naming the Crew section and the crew avatars and pills. Every visible divergence was listed side by side at 1280 and 400 px (`docs/design/2026-09-29-redesign/FIDELITY-A.md`), then fixed or kept with a reason.
 - **Crew is a page**, as in A: member cards (you first), terminal cards with Invite or Dismiss and Scan, session template cards with Start, plus the roster and launcher buttons. The Crew sidebar lists members with a one-word state, and terminals and templates as compact rows. Choosing a room or a DM, or jumping to a message, leaves the page.

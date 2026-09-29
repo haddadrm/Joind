@@ -82,7 +82,7 @@
 
   // The rail views that change what the sidebar shows. Anything else (a
   // stale or hand-edited stored value) falls back to rooms.
-  var RAIL_VIEWS = ['rooms', 'dms', 'crew'];
+  var RAIL_VIEWS = ['rooms', 'dms', 'crew', 'decisions'];
   function railView(value) {
     return RAIL_VIEWS.indexOf(value) >= 0 ? value : 'rooms';
   }

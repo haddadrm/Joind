@@ -76,6 +76,6 @@ Every visible divergence is listed. "Fixed to match A" means the build now shows
 
 | Area | Status | Note |
 |---|---|---|
-| Decisions page | Kept for lane 4 | The rail opens the decisions panel until then |
+| Decisions page | Fixed to match A in lane 4 | A rail view: Waiting on you, Open and Closed in the sidebar; cards with the question, who asked, the room, the state, the choices (answered here) and Open in room or Resolve |
 | Tasks board | Kept for lane 5 | The rail opens the task panel until then |
 | Search page (across rooms and DMs, recent searches, filter chips) | Kept on purpose | Search is per room on the server; a cross-room search needs a server route, outside lanes 4 to 6; the command palette (lane 6) covers jumping |

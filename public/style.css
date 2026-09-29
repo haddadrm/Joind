@@ -4241,3 +4241,94 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
   font-size: var(--fs-ui);
   font-weight: 600;
 }
+
+/* ================================================================
+   REDESIGN LANE 4: the Decisions page, sections.
+   ================================================================ */
+.decision-list { display: flex; flex-direction: column; gap: var(--s3); max-width: 760px; }
+.decision-card {
+  padding: var(--s4);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-bright);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-lg);
+}
+.decision-card.closed { border-left-color: var(--border-strong); }
+.decision-q {
+  margin: 0 0 var(--s1);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  font-weight: 700;
+  color: var(--text-bright);
+  overflow-wrap: anywhere;
+}
+.decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  color: var(--text-muted);
+}
+.decision-state { font-weight: 700; color: var(--warn); }
+.decision-card.closed .decision-state { color: var(--text-dim); }
+.decision-choices { display: flex; flex-direction: column; gap: var(--s1); margin-bottom: var(--s3); }
+.decision-choice {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  min-height: 34px;
+  padding: var(--s1) var(--s2);
+  background: var(--bg);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--fs-ui);
+  line-height: var(--lh-ui);
+  text-align: left;
+  cursor: pointer;
+}
+.decision-choice:hover:not([disabled]) { border-color: var(--accent); }
+.decision-choice[disabled] { cursor: default; }
+.decision-choice.chosen { border-color: var(--accent); background: var(--accent-soft); }
+.decision-key {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--white-08);
+  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+}
+.decision-choice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.decision-actions { display: flex; gap: var(--s2); flex-wrap: wrap; }
+.side-row.decision-view.active { background: var(--bg-active); color: var(--text-bright); }
+.side-row .conv-count { margin-left: auto; }
+.fchip {
+  height: 28px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text-dim);
+  font-size: var(--fs-ui);
+  cursor: pointer;
+}
+.fchip.on { border-color: var(--accent); color: var(--text-bright); background: var(--accent-soft); }
+.page-chips { display: flex; gap: var(--s2); flex-wrap: wrap; }
+.phone-only { display: none; }
+/* Section headings are the keyboard toggle; linked servers are sections. */
+.section-header h2[role="button"]:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--radius-xs); }
+.remote-heading.section-header { padding: 4px 12px 2px; }
+.remote-heading h2 { display: flex; align-items: center; gap: 6px; }
+.remote-wrap { margin-bottom: 0; }
+@media (max-width: 560px) {
+  .phone-only { display: flex; }
+  .page-head { align-items: flex-start; }
+}

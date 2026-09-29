@@ -29,11 +29,12 @@ function load(): RailHelpers {
 const ui = load();
 
 describe("railView", () => {
-  it("keeps the three sidebar views and falls back to rooms", () => {
+  it("keeps the sidebar views and falls back to rooms", () => {
     expect(ui.railView("rooms")).toBe("rooms");
     expect(ui.railView("dms")).toBe("dms");
     expect(ui.railView("crew")).toBe("crew");
-    for (const v of ["tasks", "decisions", "search", "", null, undefined, 3, "ROOMS", "rooms "]) {
+    expect(ui.railView("decisions")).toBe("decisions");
+    for (const v of ["tasks", "search", "Decisions", "", null, undefined, 3, "ROOMS", "rooms "]) {
       expect(ui.railView(v)).toBe("rooms");
     }
   });

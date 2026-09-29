@@ -691,6 +691,15 @@ export class ChatRoom extends EventEmitter {
   }
 
   /** Open asks, optionally only those addressed to one name. */
+  /** Resolved asks, optionally only those that were for `forName`. */
+  resolvedAsks(forName?: string): ChatMessage[] {
+    return this.messages.filter(
+      (m) =>
+        m.ask?.state === "resolved" &&
+        (!forName || m.ask.for.toLowerCase() === forName.toLowerCase())
+    );
+  }
+
   openAsks(forName?: string): ChatMessage[] {
     return this.messages.filter(
       (m) =>

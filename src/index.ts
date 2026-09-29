@@ -1316,14 +1316,19 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // MCP tool instead). DM visibility applies to the message bodies.
   app.get("/api/decisions", (req, res) => {
     if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
-    const state = (req.query.state as string | undefined) ?? "open";
+    // open (default), resolved, or all: the decisions page lists all three.
+    const stateRaw = (req.query.state as string | undefined) ?? "open";
+    const state = stateRaw === "resolved" || stateRaw === "all" ? stateRaw : "open";
     const viewer = webViewer();
     const forName = (req.query.for as string | undefined) ?? viewer;
     const out: unknown[] = [];
     for (const meta of manager.listAllRoomMetas()) {
       const room = manager.getRoom(meta.id);
       if (!room) continue;
-      for (const m of state === "open" ? room.openAsks(forName) : []) {
+      const asks = state === "open" ? room.openAsks(forName)
+        : state === "resolved" ? room.resolvedAsks(forName)
+        : room.openAsks(forName).concat(room.resolvedAsks(forName));
+      for (const m of asks) {
         if (!visibleToViewer(m, viewer)) continue;
         out.push({
           conversationId: meta.id,
@@ -1334,6 +1339,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
           ask: m.ask,
           to: m.to,
           timestamp: m.timestamp,
+          // The page shows the choices and the answer.
+          choices: m.choices,
+          choiceResponse: m.choiceResponse,
         });
       }
     }
@@ -1422,9 +1430,25 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   app.post("/api/message/:id/choose", express.json(), (req, res) => {
     // The token first: without it, nothing about the active room is revealed.
     if (!requireWebToken(req, res)) return;
-    const room = activeRoom(res);
-    if (!room) return;
-    const { value, by } = req.body as { value?: string; by?: string };
+    const { value, by: byRaw, conversation } = req.body as { value?: string; by?: string; conversation?: unknown };
+    // A named room (the decisions page answers across rooms) is used as
+    // named, never the active room in its place; the viewer answers as
+    // themselves and only on a message they can see. Without it, the active
+    // room as before.
+    let room: ChatRoom | null | undefined;
+    let by = byRaw;
+    if (conversation !== undefined) {
+      room = typeof conversation === "string" && conversation ? manager.getRoom(conversation) : undefined;
+      if (!room) { res.status(404).json({ error: "Conversation not found" }); return; }
+      const viewer = webViewer();
+      if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
+      by = viewer;
+      const orig = room.getMessageById(Number(req.params.id));
+      if (!orig || !visibleToViewer(orig, viewer)) { res.status(404).json({ error: "Message not found" }); return; }
+    } else {
+      room = activeRoom(res);
+      if (!room) return;
+    }
     const messageId = Number(req.params.id);
     if (!Number.isInteger(messageId) || messageId < 1) { res.status(400).json({ error: "Invalid message id" }); return; }
     if (!value || !by) { res.status(400).json({ error: "value and by required" }); return; }

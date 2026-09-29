@@ -3354,9 +3354,9 @@ function closeMobileDrawer() {
 }
 
 function toggleSection(header) {
-  header.classList.toggle('collapsed');
-  var body = header.nextElementSibling;
-  if (body) body.classList.toggle('collapsed');
+  var collapsed = !header.classList.contains('collapsed');
+  setSectionCollapsed(header, collapsed);
+  saveCollapsed(header.getAttribute('data-sec'), collapsed);
 }
 
 // --- The rail (redesign lane 2) ---
@@ -3366,7 +3366,7 @@ function toggleSection(header) {
 // browser. At phone width the rail is the bottom tab bar and a view opens
 // the sidebar drawer.
 var RAIL_VIEW_KEY = 'joind-rail-view';
-var RAIL_TITLES = { rooms: 'Rooms', dms: 'Direct messages', crew: 'Crew' };
+var RAIL_TITLES = { rooms: 'Rooms', dms: 'Direct messages', crew: 'Crew', decisions: 'Decisions' };
 var railViewNow = 'rooms';
 
 function readRailView() {
@@ -3400,7 +3400,7 @@ function setRailView(view, fromUser) {
     act.setAttribute('aria-label', label || 'New');
   }
   // Crew is a page in the content column; Rooms and DMs show the conversation.
-  showPage(v === 'crew' ? 'crew' : null);
+  showPage(PAGES.indexOf(v) >= 0 ? v : null);
   document.querySelectorAll('.rail-item[data-rail-view]').forEach(function(btn) {
     var on = btn.getAttribute('data-rail-view') === v;
     btn.classList.toggle('active', on);
@@ -3408,7 +3408,8 @@ function setRailView(view, fromUser) {
   });
   if (fromUser) {
     try { localStorage.setItem(RAIL_VIEW_KEY, v); } catch (e) { /* storage unavailable: the view holds for this page */ }
-    if (isMobileView()) {
+    // Decisions carries its views on the page, so a phone opens no drawer.
+    if (isMobileView() && v !== 'decisions') {
       openMobileDrawer();
     } else if (sb && sb.classList.contains('hidden')) {
       setSidebarHidden(false);
@@ -3629,21 +3630,28 @@ function decorateRoomRow(li, conv, remote) {
 }
 
 // --- Pages: Crew takes the content column, as in A ---
-var pageNow = null; // 'crew' or null (the conversation)
+var pageNow = null; // 'crew', 'decisions' or null (the conversation)
+var PAGES = ['crew', 'decisions'];
+function renderPage(page) {
+  if (page === 'crew') renderCrewPage();
+  else if (page === 'decisions') { renderDecisionsPage(); loadDecisionsPage(); }
+}
 function showPage(p) {
-  var page = p === 'crew' ? 'crew' : null;
-  if (page === pageNow) { if (page) renderCrewPage(); return; }
+  var page = PAGES.indexOf(p) >= 0 ? p : null;
+  if (page === pageNow) { if (page) renderPage(page); return; }
   pageNow = page;
-  var crew = document.getElementById('page-crew');
+  PAGES.forEach(function(name) {
+    var el = document.getElementById('page-' + name);
+    if (el) el.hidden = page !== name;
+  });
   var chat = document.querySelector('.chat-area');
-  if (crew) crew.hidden = page !== 'crew';
   if (chat) chat.hidden = !!page;
   document.body.classList.toggle('on-page', !!page);
   if (page) {
     var bar = document.getElementById('search-bar');
     if (bar && !bar.classList.contains('hidden')) closeSearch();
     if (sidePanelTab) closeSidePanel(false);
-    renderCrewPage();
+    renderPage(page);
   }
   syncChannelHeader();
 }
@@ -3652,6 +3660,8 @@ function showPage(p) {
 function leavePageFor(view) {
   if (!pageNow) return;
   setRailView(view, false);
+  // Remembered like a rail choice, so a reload shows the conversation.
+  try { localStorage.setItem(RAIL_VIEW_KEY, railViewNow); } catch (e) { /* storage unavailable */ }
 }
 
 function crewMembersList() {
@@ -3897,6 +3907,282 @@ function renderCrewPage() {
     var again = body.querySelector('[data-key="' + (window.CSS && CSS.escape ? CSS.escape(keep) : keep) + '"]');
     if (again) again.focus();
   }
+}
+
+// --- Decisions page (redesign lane 4) ---
+// Three views from GET /api/decisions: Waiting on you (open asks for the
+// viewer), Open (everyone's open asks) and Closed (resolved ones). A card
+// shows the question, who asked, the room and the state; its choices are
+// answered here through the choose route with the room named (the viewer
+// answers as themselves); Open in room jumps to the message; Resolve
+// closes an open ask without a choice.
+var DECISION_VIEWS = [['waiting', 'Waiting on you'], ['open', 'Open'], ['closed', 'Closed']];
+var decisionsPage = { view: 'waiting', lists: { waiting: null, open: null, closed: null }, seq: 0 };
+
+function loadDecisionsPage() {
+  var seq = ++decisionsPage.seq;
+  var tok = encodeURIComponent(webToken());
+  var urls = {
+    waiting: '/api/decisions?state=open&token=' + tok,
+    open: '/api/decisions?state=open&for=&token=' + tok,
+    closed: '/api/decisions?state=resolved&for=&token=' + tok,
+  };
+  Object.keys(urls).forEach(function(k) {
+    fetch(urls[k]).then(function(r) { return r.ok ? r.json() : { decisions: [] }; }).then(function(d) {
+      if (seq !== decisionsPage.seq) return; // a newer load is under way
+      decisionsPage.lists[k] = (d && Array.isArray(d.decisions)) ? d.decisions : [];
+      renderDecisionViews();
+      if (pageNow === 'decisions' && k === decisionsPage.view) renderDecisionsPage();
+    }).catch(function() {
+      if (seq !== decisionsPage.seq) return;
+      decisionsPage.lists[k] = decisionsPage.lists[k] || [];
+      renderDecisionViews();
+    });
+  });
+}
+
+function setDecisionView(view) {
+  decisionsPage.view = DECISION_VIEWS.some(function(v) { return v[0] === view; }) ? view : 'waiting';
+  renderDecisionViews();
+  renderDecisionsPage();
+}
+
+// The sidebar views, with their counts.
+function renderDecisionViews() {
+  var ul = document.getElementById('decision-views');
+  if (!ul) return;
+  var keep = ul.contains(document.activeElement) ? document.activeElement.getAttribute('data-view') : null;
+  ul.textContent = '';
+  DECISION_VIEWS.forEach(function(v) {
+    var list = decisionsPage.lists[v[0]];
+    var li = document.createElement('li');
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'side-row decision-view' + (decisionsPage.view === v[0] ? ' active' : '');
+    row.setAttribute('data-view', v[0]);
+    if (decisionsPage.view === v[0]) row.setAttribute('aria-current', 'true');
+    var ico = document.createElement('span');
+    ico.className = 'side-row-ico';
+    ico.setAttribute('aria-hidden', 'true');
+    ico.textContent = '⚖';
+    var name = document.createElement('span');
+    name.className = 'side-row-name';
+    name.textContent = v[1];
+    row.appendChild(ico);
+    row.appendChild(name);
+    if (list && list.length > 0) {
+      var count = document.createElement('span');
+      count.className = 'conv-count' + (v[0] === 'waiting' ? ' mention' : '');
+      count.textContent = String(list.length);
+      row.appendChild(count);
+    }
+    row.addEventListener('click', function() { setDecisionView(v[0]); });
+    li.appendChild(row);
+    ul.appendChild(li);
+    if (keep === v[0]) row.focus();
+  });
+}
+
+function decisionCard(d, closed) {
+  var card = document.createElement('article');
+  card.className = 'decision-card' + (closed ? ' closed' : '');
+  card.setAttribute('data-key', d.conversationId + ':' + d.messageId);
+  var q = document.createElement('h3');
+  q.className = 'decision-q';
+  var firstLine = String(d.text || '').split('\n').filter(function(l) { return l.trim() !== ''; })[0] || '';
+  q.textContent = firstLine.length > 200 ? firstLine.slice(0, 200) + '...' : firstLine;
+  card.appendChild(q);
+
+  var meta = document.createElement('div');
+  meta.className = 'decision-meta';
+  var id = document.createElement('span');
+  id.className = 'pin-id';
+  id.textContent = '#' + d.messageId;
+  var by = document.createElement('span');
+  by.textContent = 'asked by ' + d.sender;
+  var room = document.createElement('span');
+  room.textContent = 'in #' + (d.conversationName || d.conversationId);
+  var st = document.createElement('span');
+  st.className = 'decision-state';
+  if (closed) {
+    st.textContent = 'Closed' + (d.choiceResponse ? ': ' + d.choiceResponse.value : '') +
+      (d.ask && d.ask.resolvedBy ? ' by ' + d.ask.resolvedBy : '');
+  } else {
+    st.textContent = 'Waiting on ' + (d.ask && d.ask.for === myName() ? 'you' : (d.ask ? d.ask.for : 'someone'));
+  }
+  meta.appendChild(id);
+  meta.appendChild(by);
+  meta.appendChild(room);
+  meta.appendChild(st);
+  card.appendChild(meta);
+
+  var choices = Array.isArray(d.choices) ? d.choices : [];
+  if (choices.length > 0) {
+    var ul = document.createElement('div');
+    ul.className = 'decision-choices';
+    ul.setAttribute('role', 'group');
+    ul.setAttribute('aria-label', 'Choices');
+    choices.forEach(function(c, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'decision-choice';
+      var key = document.createElement('span');
+      key.className = 'decision-key';
+      key.textContent = String.fromCharCode(65 + (i % 26));
+      var txt = document.createElement('span');
+      txt.className = 'decision-choice-text';
+      txt.textContent = c;
+      b.appendChild(key);
+      b.appendChild(txt);
+      var chosen = d.choiceResponse && d.choiceResponse.value === c;
+      if (chosen) {
+        b.classList.add('chosen');
+        b.appendChild(presenceAvatar(d.choiceResponse.by, 'xs', 'online'));
+        b.setAttribute('aria-pressed', 'true');
+      }
+      if (closed || d.choiceResponse) {
+        b.disabled = true;
+      } else {
+        b.addEventListener('click', function() { chooseDecision(d, c, b); });
+      }
+      b.title = chosen ? 'Chosen by ' + d.choiceResponse.by : closed ? '' : 'Answer: ' + c;
+      ul.appendChild(b);
+    });
+    card.appendChild(ul);
+  }
+
+  var acts = document.createElement('div');
+  acts.className = 'decision-actions';
+  var open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'btn btn-sm';
+  open.textContent = 'Open in #' + (d.conversationName || 'room');
+  open.addEventListener('click', function() { openDecisionMessage(d); });
+  acts.appendChild(open);
+  if (!closed) {
+    var resolve = document.createElement('button');
+    resolve.type = 'button';
+    resolve.className = 'btn btn-sm';
+    resolve.textContent = 'Resolve';
+    resolve.title = 'Close this ask without choosing';
+    resolve.addEventListener('click', function() {
+      resolve.disabled = true;
+      resolveAsk(d.messageId, d.conversationId);
+    });
+    acts.appendChild(resolve);
+  }
+  card.appendChild(acts);
+  return card;
+}
+
+function chooseDecision(d, value, btn) {
+  btn.disabled = true;
+  fetch('/api/message/' + d.messageId + '/choose', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value: value, conversation: d.conversationId }),
+  }).then(function(r) {
+    if (!r.ok) throw new Error('choose ' + r.status);
+    decisionsSeq++;
+    refreshDecisionsBadge();
+  }).catch(function() {
+    btn.disabled = false;
+    showRefNotice('Could not record the answer; try again from the room.');
+  });
+}
+
+// The same intent hand-off as the old decisions panel: select the room and
+// let its render consume the jump (DMs open their thread).
+function openDecisionMessage(d) {
+  pendingDmJump = {
+    conv: d.conversationId,
+    to: (d.to && d.to.length > 0) ? (d.sender === myName() ? d.to[0] : d.sender) : null,
+    msgId: d.messageId,
+    deadline: Date.now() + 8000,
+  };
+  selectConversation(d.conversationId);
+}
+
+function renderDecisionsPage() {
+  if (pageNow !== 'decisions') return;
+  var body = document.getElementById('page-decisions-body');
+  if (!body) return;
+  var keep = body.contains(document.activeElement) && document.activeElement.closest('.decision-card')
+    ? document.activeElement.closest('.decision-card').getAttribute('data-key') : null;
+  body.textContent = '';
+  var view = decisionsPage.view;
+  var list = decisionsPage.lists[view];
+  var head = document.createElement('div');
+  head.className = 'page-head';
+  var sub = document.createElement('span');
+  sub.className = 'page-sub';
+  var n = list ? list.length : 0;
+  sub.textContent = !list ? 'Loading...'
+    : view === 'waiting' ? (n === 0 ? 'Nothing is waiting on you.' : n + (n === 1 ? ' ask is' : ' asks are') + ' waiting on you.')
+    : view === 'open' ? n + ' open ' + (n === 1 ? 'ask' : 'asks') + ' across rooms.'
+    : n + ' closed ' + (n === 1 ? 'ask' : 'asks') + '.';
+  head.appendChild(sub);
+  // On a phone the views sit here (the sidebar is a drawer).
+  var chips = document.createElement('div');
+  chips.className = 'page-chips phone-only';
+  DECISION_VIEWS.forEach(function(v) {
+    var c = document.createElement('button');
+    c.type = 'button';
+    c.className = 'fchip' + (view === v[0] ? ' on' : '');
+    c.setAttribute('aria-pressed', view === v[0] ? 'true' : 'false');
+    c.textContent = v[1];
+    c.addEventListener('click', function() { setDecisionView(v[0]); });
+    chips.appendChild(c);
+  });
+  head.appendChild(chips);
+  body.appendChild(head);
+  var wrap = document.createElement('div');
+  wrap.className = 'decision-list';
+  (list || []).forEach(function(d) { wrap.appendChild(decisionCard(d, view === 'closed')); });
+  body.appendChild(wrap);
+  if (keep) {
+    var again = null;
+    wrap.querySelectorAll('.decision-card').forEach(function(c) { if (c.getAttribute('data-key') === keep) again = c; });
+    var target = again ? again.querySelector('button:not([disabled])') : null;
+    if (target) target.focus();
+  }
+}
+
+// --- Sections: collapsible, keyboard operable, remembered per browser ---
+var COLLAPSED_KEY = 'joind-collapsed-sections';
+function collapsedSections() {
+  try { var v = JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+function saveCollapsed(key, collapsed) {
+  if (!key) return;
+  var list = collapsedSections().filter(function(k) { return k !== key; });
+  if (collapsed) list.push(key);
+  try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify(list)); } catch (e) { /* storage unavailable */ }
+}
+function setSectionCollapsed(header, collapsed) {
+  header.classList.toggle('collapsed', collapsed);
+  var toggle = header.querySelector('h2') || header;
+  toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  var body = header.nextElementSibling;
+  if (body) body.classList.toggle('collapsed', collapsed);
+}
+function prepareSectionHeader(header) {
+  if (header.getAttribute('data-prepared') === 'yes') return;
+  header.setAttribute('data-prepared', 'yes');
+  // The heading is the toggle (the header also holds its own buttons).
+  var toggle = header.querySelector('h2') || header;
+  toggle.setAttribute('role', 'button');
+  toggle.tabIndex = 0;
+  var key = header.getAttribute('data-sec');
+  var collapsed = key ? collapsedSections().indexOf(key) >= 0 : false;
+  setSectionCollapsed(header, collapsed);
+  toggle.addEventListener('keydown', function(e) {
+    if (e.target !== toggle) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection(header); }
+  });
+}
+function initSections() {
+  document.querySelectorAll('.section-header').forEach(prepareSectionHeader);
 }
 
 // --- The composer bar: attach, decision, task ---
@@ -4832,6 +5118,9 @@ function syncChannelHeader() {
   if (pageNow === 'crew') {
     title.textContent = 'Crew';
     topic.textContent = 'Presence, terminals and sessions';
+  } else if (pageNow === 'decisions') {
+    title.textContent = 'Decisions';
+    topic.textContent = 'Asks with choices, across rooms';
   } else if (activeDm) {
     title.textContent = activeDm;
     // As in A: the partner's harness and state under a DM's title.
@@ -5152,8 +5441,12 @@ function renderRemoteSections() {
     group.className = 'remote-section' + (down ? ' link-down' : '');
     group.dataset.server = server;
 
+    // Its own collapsible section (lane 4): the same header as Rooms, keyed
+    // by server so the collapse is remembered.
     var heading = document.createElement('div');
-    heading.className = 'remote-heading';
+    heading.className = 'remote-heading section-header';
+    heading.setAttribute('data-sec', 'remote:' + server);
+    heading.addEventListener('click', function() { toggleSection(heading); });
     var since = formatLinkSince(link.since);
     heading.title = (down ? 'Link down' : 'Linked') + (since ? ' since ' + since : '') +
       (down ? '. Messages you send to these rooms will queue.' : '');
@@ -5165,9 +5458,20 @@ function renderRemoteSections() {
     var label = document.createElement('span');
     label.className = 'remote-heading-label';
     label.textContent = 'remote: ' + server;
-    heading.appendChild(icon);
-    heading.appendChild(label);
-    heading.appendChild(linkBadge(link.state));
+    var h2 = document.createElement('h2');
+    var arrow = document.createElement('span');
+    arrow.className = 'section-arrow';
+    arrow.setAttribute('aria-hidden', 'true');
+    var chev = document.createElement('i');
+    chev.setAttribute('data-lucide', 'chevron-down');
+    chev.setAttribute('width', '12');
+    chev.setAttribute('height', '12');
+    arrow.appendChild(chev);
+    h2.appendChild(arrow);
+    h2.appendChild(icon);
+    h2.appendChild(label);
+    h2.appendChild(linkBadge(link.state));
+    heading.appendChild(h2);
     group.appendChild(heading);
 
     var ul = document.createElement('ul');
@@ -5209,8 +5513,12 @@ function renderRemoteSections() {
       decorateRoomRow(li, conv, true);
       ul.appendChild(li);
     });
-    group.appendChild(ul);
+    var body = document.createElement('div');
+    body.className = 'section-body';
+    body.appendChild(ul);
+    group.appendChild(body);
     host.appendChild(group);
+    prepareSectionHeader(heading);
   });
   if (window.lucide) lucide.createIcons({ root: host });
 }
@@ -6272,6 +6580,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   initSidebarResize();
   loadCrewRoster();
+  initSections();
   initRail();
   initSidePanel();
 });
@@ -8828,6 +9137,8 @@ function refreshDecisionsBadge() {
         }
       }
       if (decisionsPanelOpen) renderDecisionsPanel();
+      // The page reloads its three views with the badge.
+      if (pageNow === 'decisions') loadDecisionsPage();
     }).catch(function() {});
 }
 
