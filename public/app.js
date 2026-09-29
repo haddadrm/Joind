@@ -2714,7 +2714,8 @@ function readSidebarWidth() {
   try {
     var raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     var v = raw === null ? NaN : Number(raw);
-    if (Number.isFinite(v) && v > 0) return clampSidebarWidth(v);
+    // Kept in memory once read, so a later storage failure still has it.
+    if (Number.isFinite(v) && v > 0) { sidebarWidthMem = clampSidebarWidth(v); return sidebarWidthMem; }
   } catch (e) { /* storage unavailable */ }
   return sidebarWidthMem;
 }

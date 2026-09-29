@@ -19,6 +19,9 @@ Three fixes from Rami's first day with the UI lane, on branch `ui-refs-search`.
 ### Gate round 2 (Codex, CHANGES REQUESTED, one Medium)
 - **The open +N list went stale on a rebuild** (Medium). A presence change rebuilt the strip but left the list as it was, so a member who had left stayed listed and clickable, and a list could stay open with no chip once everyone fit. A refit now rebuilds an open list from the new overflow members, or closes it when nothing overflows. Focus inside the list follows the same member, else the first row; when the list closes, focus goes to the first pill. `aria-expanded` is set by the rebuilt list.
 
+### Gate round 3 (Codex, PASS, one Low fixed)
+- **Low, fixed:** a width read from storage is now kept in memory, so if a later storage read throws, a cancelled or sub-threshold drag still puts the saved width back instead of the CSS default.
+
 ## 2026-09-28: Message Links, Search Filters, Resizable Sidebar
 
 The web UI gains three things: `#N` message references become links, search takes filters and pages over the room being viewed, and the left sidebar resizes by drag or keyboard. Branch `ui-refs-search` off `hosted-verdict` 16c5964.
