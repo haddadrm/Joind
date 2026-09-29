@@ -3949,3 +3949,295 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
   .setting-control { flex: 1 1 100%; }
   .user-menu { width: 100%; }
 }
+
+/* ================================================================
+   REDESIGN LANE 3b: fidelity to mockup A (A-slack-rail.html).
+   ================================================================ */
+
+/* Rail: the brand is the instance initial on an accent tile; your avatar
+   carries the connection status as its presence dot. */
+.rail-brand {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-title);
+  line-height: 36px;
+  font-weight: 700;
+  text-align: center;
+}
+.you-avatar-wrap { position: relative; display: inline-flex; }
+.rail-you .you-avatar { box-shadow: none; }
+.rail-you .connection-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  margin: 0;
+  border: 2px solid var(--bg-rail);
+  box-sizing: content-box;
+}
+.rail-you .you-name, .rail-you .you-tab-label { display: none; }
+
+/* Sidebar head: the view title and one action, as in A. */
+.side-title { font-size: var(--fs-title); }
+.side-head-action { margin-left: auto; color: var(--text-dim); }
+.section-act {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.section-act:hover { background: var(--bg-hover); color: var(--text-bright); }
+
+/* Room rows: a glyph, the name, the count; unread rows are bold. */
+.conv-glyph {
+  width: 14px;
+  flex-shrink: 0;
+  display: inline-flex;
+  justify-content: center;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.conversation-item.unread .conv-name { font-weight: 700; color: var(--text-bright); }
+.conversation-item.active .conv-glyph { color: var(--text-dim); }
+.conv-count { background: var(--white-15); color: var(--text-dim); }
+.conv-count.mention { background: var(--danger); color: #fff; }
+
+/* Presence dots, one vocabulary (A): active green, working accent,
+   idle orange, silent and offline gray. */
+.mdot { background: var(--online); }
+.mdot.working { background: var(--accent-bright); }
+.mdot.idle { background: var(--warn); }
+.mdot.silent, .mdot.offline { background: var(--text-muted); }
+.mdot.stale { background: var(--warn); }
+.mav.xs {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  font-size: var(--fs-meta);
+}
+.mav.xs .mdot { width: 8px; height: 8px; right: -3px; bottom: -3px; border-width: 2px; }
+.mav.sm { border-radius: 6px; }
+
+/* DM rows: the avatar with its dot, the name, the state on the right. */
+.dm-item { padding-left: 12px; gap: 8px; }
+.dm-dot { display: none; }
+.dm-avatar.mav { width: 20px; height: 20px; min-width: 20px; }
+.dm-meta, .side-row-meta {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* The Crew view list and the template rows. */
+.crew-side-list { list-style: none; }
+.crew-row-side .mav { flex-shrink: 0; }
+.side-row.static { cursor: default; }
+.side-row.static:hover { background: none; color: var(--text-dim); }
+.template-list { display: block; padding: 0; gap: 0; }
+.template-row .side-row-ico { width: 14px; justify-content: center; }
+
+/* Members panel: names in the bright text, you marked. */
+.mname-extra { font-weight: 400; color: var(--text-muted); }
+.member-row.static { cursor: default; }
+.member-row.static:hover { background: none; }
+
+/* Message header as in A: the harness tag, a mixed-case role. */
+.msg-tag {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  font-size: var(--fs-meta);
+  line-height: 15px;
+  white-space: nowrap;
+}
+.msg-role-badge {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: var(--fs-meta);
+  line-height: 15px;
+  padding: 0 5px;
+}
+
+/* System lines as A's wake lines: in the text column, a dot, not italic. */
+.message.system {
+  justify-content: flex-start;
+  padding: 2px 20px 2px 68px;
+}
+.message.system .msg-text-wrap {
+  position: relative;
+  padding-left: 14px;
+  font-style: normal;
+  text-align: left;
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+}
+.message.system .msg-text-wrap::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.6;
+}
+
+/* The composer as in A: the field, then a bar with attach, decision, task,
+   the hint and send. */
+.input-row.composer {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+}
+.input-row.composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.composer .input-wrapper { min-height: 42px; }
+.composer #message-input { padding: 10px 12px; min-height: 42px; }
+.composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 6px;
+  border-top: 1px solid var(--border);
+}
+.cbtn, .composer-bar .btn-decide {
+  width: var(--row);
+  height: var(--row);
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.cbtn:hover { background: var(--bg-hover); color: var(--text-bright); }
+.composer-hint {
+  flex: 1;
+  min-width: 0;
+  margin: 0 0 0 var(--s2);
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-bar .btn-send { width: 36px; height: var(--row); margin: 0 0 0 auto; border-radius: var(--radius-sm); }
+
+/* Pages (Crew): the content column instead of the conversation. */
+.page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg);
+}
+.page-body { padding: var(--s5) var(--s5) var(--s6); max-width: 100%; }
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s4);
+}
+.page-sub { flex: 1 1 200px; font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--text-dim); }
+.page-actions { display: flex; gap: var(--s2); flex-wrap: wrap; }
+.page-section { margin-bottom: var(--s5); }
+.page-h3 {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 0 var(--s3);
+  font-size: var(--fs-label);
+  line-height: var(--lh-label);
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.page-h3-act { margin-left: auto; }
+.page-empty { font-size: var(--fs-ui); color: var(--text-muted); padding: var(--s2) 0; }
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--s3);
+}
+.crew-card, .term-card, .tpl-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  min-width: 0;
+  padding: var(--s4);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-lg);
+}
+.crew-card[role="button"] { cursor: pointer; }
+.crew-card[role="button"]:hover { border-color: var(--border-strong); }
+.crew-card-text { flex: 1; min-width: 0; }
+.crew-card-name { font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 700; color: var(--text-bright); overflow-wrap: anywhere; }
+.crew-card-extra { margin-left: 6px; font-weight: 400; color: var(--text-muted); }
+.crew-card-extra:empty { display: none; }
+.crew-card-sub { font-size: var(--fs-label); line-height: var(--lh-label); color: var(--text-muted); overflow-wrap: anywhere; }
+.crew-card-state { margin-top: var(--s2); font-size: var(--fs-label); line-height: var(--lh-label); color: var(--text-dim); overflow-wrap: anywhere; }
+.crew-card-state:empty { display: none; }
+.term-ico { font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-muted); padding-top: 2px; }
+.term-card .btn, .tpl-card .btn { flex-shrink: 0; }
+
+@media (max-width: 560px) {
+  .rail-you .you-tab-label { display: block; }
+  .rail-you .connection-dot { border-color: var(--bg-rail); }
+  #room-search-btn { display: none; }
+  .composer-hint { display: none; }
+  .message.system { padding-left: 50px; }
+  .page-body { padding: var(--s4) var(--s3) var(--s5); }
+  .card-grid { grid-template-columns: 1fr; }
+  /* The composer keeps A's two rows on a phone (no floating pill). */
+  .input-row.composer { border-radius: var(--radius-md); box-shadow: none; padding: 0; }
+}
+/* A message that names you: the accent bar and warm tint of A. */
+.message.mentions-me {
+  background: var(--warn-soft);
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+.message.mentions-me:hover { background: var(--warn-soft); }
+/* Headers wrap on a narrow column instead of clipping the time. */
+.msg-header { flex-wrap: wrap; row-gap: 0; }
+/* The section add button shows on hover or focus, as in A. */
+.section-header .section-act { opacity: 0; }
+.section-header:hover .section-act,
+.section-header .section-act:focus-visible { opacity: 1; }
+/* Send stays readable when the field is empty. */
+.composer-bar .btn-send.inactive { opacity: 0.55; }
+/* The DM header avatar, as in A. */
+.mav.head { width: 24px; height: 24px; border-radius: 6px; font-size: var(--fs-meta); align-self: center; }
+.mav.head .mdot { width: 8px; height: 8px; border-color: var(--bg); }
+/* Primary buttons in the settings foot and on the signed-out screen are
+   full buttons, as in A (the base .btn carries no padding). */
+.settings-foot .btn-primary,
+.signed-out-box .btn-primary {
+  height: var(--ctl);
+  padding: 0 var(--s4);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-ui);
+  font-weight: 600;
+}

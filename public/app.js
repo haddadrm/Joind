@@ -386,8 +386,10 @@ function connect() {
             break;
           }
         }
-        // Filter: only render messages for the active conversation
+        // Filter: only render messages for the active conversation; a
+        // message in another room counts toward its unread badge.
         if (!activeConversation || (event.conversationId && event.conversationId !== activeConversation.id)) {
+          if (event.conversationId) noteRoomMessage(event.conversationId, event.data);
           break;
         }
         // A dispatched undelivered message is replaced by its real copy here
@@ -687,6 +689,9 @@ function memberAvatar(name, cls) {
 // Kept under its old name: every presence event, join, leave, rename, role
 // and typing change already calls renderPills.
 function renderPills() {
+  // Presence shows in the DM rows and on the Crew list and page too.
+  if (typeof renderDmList === 'function') renderDmList();
+  if (typeof renderCrewPage === 'function') renderCrewPage();
   // An open Settings modal lists the room's agents for per-agent sounds.
   if (settingsOverlay) refreshSettingsPart(document.getElementById('settings-agent-sounds'), renderAgentSoundsInto);
   var m = roomMembers();
@@ -809,11 +814,14 @@ function renderMembersList(body, m) {
     body.appendChild(empty);
     return;
   }
-  groups.forEach(function(g) {
+  // You first under Active now, as in A (not counted on the button).
+  if (!groups.length || groups[0][0] !== 'active') groups.unshift(['active', 'Active now', []]);
+  groups.forEach(function(g, gi) {
     var head = document.createElement('div');
     head.className = 'mgroup';
-    head.textContent = g[1] + ' · ' + g[2].length;
+    head.textContent = g[1] + ' · ' + (g[2].length + (gi === 0 ? 1 : 0));
     body.appendChild(head);
+    if (gi === 0) body.appendChild(buildYouRow());
     g[2].forEach(function(item) {
       body.appendChild(g[0] === 'offline' ? buildOfflineRow(item, m.now) : buildMemberRow(item));
     });
@@ -828,11 +836,8 @@ function buildMemberRow(x) {
   row.setAttribute('data-key', 'm:' + (a.name || ''));
   row.setAttribute('data-agent', a.name || '');
   row.title = x.title;
-  var av = memberAvatar(a.name, x.presence === 'online' ? '' : 'dim');
-  var dot = document.createElement('span');
-  dot.className = 'mdot ' + x.presence;
-  av.appendChild(dot);
-  row.appendChild(av);
+  var st = presenceOf(a.name);
+  row.appendChild(presenceAvatar(a.name, '', st.cls));
 
   var text = document.createElement('span');
   text.className = 'mtext';
@@ -840,24 +845,18 @@ function buildMemberRow(x) {
   nameLine.className = 'mname';
   var nm = document.createElement('span');
   nm.textContent = a.name;
-  nm.style.color = getSenderColor(a.name);
   nameLine.appendChild(nm);
-  if (a.host) {
-    var tag = document.createElement('span');
-    tag.className = 'remote-tag';
-    tag.textContent = 'remote: ' + a.host;
-    nameLine.appendChild(tag);
-  }
   text.appendChild(nameLine);
 
+  // As in A: the harness (or hosted, remote: <server>) first, then the
+  // role, then the state.
   var sub = [];
+  var harness = harnessOf(a.name);
+  if (a.host) sub.push('hosted', 'remote: ' + a.host);
+  else if (harness) sub.push(harness);
+  else if (memberRoute(a)) sub.push(memberRoute(a));
   if (a.role) sub.push(a.role);
-  var route = memberRoute(a);
-  if (route && !a.host) sub.push(route);
-  if (typingNames.has(a.name)) sub.push('working');
-  else if (x.presence === 'online') sub.push(x.seenAge != null && x.seenAge >= 60000 ? 'seen ' + formatAge(x.seenAge) + ' ago' : 'online');
-  else if (x.presence === 'stale') sub.push('stale' + (x.seenAge != null ? ', seen ' + formatAge(x.seenAge) + ' ago' : ''));
-  else sub.push(x.quietText);
+  sub.push(st.cls === 'working' ? 'working' : st.cls === 'idle' ? 'idle' + (x.seenAge != null ? ' ' + formatAge(x.seenAge) : '') : st.cls === 'silent' ? x.quietText : (x.seenAge != null && x.seenAge >= 60000 ? 'seen ' + formatAge(x.seenAge) + ' ago' : 'active'));
   var subEl = document.createElement('span');
   subEl.className = 'msub';
   subEl.textContent = sub.join(' · ');
@@ -876,13 +875,37 @@ function buildMemberRow(x) {
   return row;
 }
 
+function buildYouRow() {
+  var row = document.createElement('div');
+  row.className = 'member-row you static';
+  row.setAttribute('data-key', 'you');
+  row.appendChild(presenceAvatar(myName(), '', 'online'));
+  var text = document.createElement('span');
+  text.className = 'mtext';
+  var nameLine = document.createElement('span');
+  nameLine.className = 'mname';
+  var nm = document.createElement('span');
+  nm.textContent = myName();
+  var you = document.createElement('span');
+  you.className = 'mname-extra';
+  you.textContent = '(you)';
+  nameLine.appendChild(nm);
+  nameLine.appendChild(you);
+  var sub = document.createElement('span');
+  sub.className = 'msub';
+  sub.textContent = 'human · here';
+  text.appendChild(nameLine);
+  text.appendChild(sub);
+  row.appendChild(text);
+  return row;
+}
+
 function buildOfflineRow(o, nowMs) {
   var row = document.createElement('div');
   row.className = 'member-row offline';
   row.setAttribute('data-key', 'o:' + o.name);
   row.tabIndex = -1;
-  var av = memberAvatar(o.name, 'dim');
-  row.appendChild(av);
+  row.appendChild(presenceAvatar(o.name, '', 'offline'));
   var text = document.createElement('span');
   text.className = 'mtext';
   var nameLine = document.createElement('span');
@@ -891,7 +914,8 @@ function buildOfflineRow(o, nowMs) {
   text.appendChild(nameLine);
   var subEl = document.createElement('span');
   subEl.className = 'msub';
-  subEl.textContent = o.lastAt ? 'not connected · last posted ' + formatAge(Math.max(0, nowMs - o.lastAt)) + ' ago' : 'not connected';
+  var oh = harnessOf(o.name);
+  subEl.textContent = (oh ? oh + ' · ' : '') + (o.lastAt ? 'offline ' + formatAge(Math.max(0, nowMs - o.lastAt)) + ', last post' : 'not connected');
   text.appendChild(subEl);
   row.appendChild(text);
   return row;
@@ -1072,7 +1096,7 @@ function openConvMore(evt) {
   pop.setAttribute('role', 'menu');
   pop.setAttribute('aria-label', 'More room actions');
   pop.addEventListener('click', function(e) { e.stopPropagation(); });
-  var items = [['Export this room', exportChat], ['Import a room', openImportDialog]];
+  var items = [['Search in room', function() { toggleSearch(); }], ['Export this room', exportChat], ['Import a room', openImportDialog]];
   var buttons = items.map(function(it) {
     var b = document.createElement('button');
     b.type = 'button';
@@ -1432,10 +1456,19 @@ function appendMessage(msg, scroll) {
       });
     });
     var tm = document.createElement('span');
-    tm.className = 'msg-time'; tm.textContent = formatTime(msg.timestamp);
-    hdr.appendChild(sn); hdr.appendChild(mid); hdr.appendChild(tm);
-
-    // Show role badge if agent has one
+    // As in A: hours and minutes; the full date and time in the tooltip.
+    tm.className = 'msg-time'; tm.textContent = formatTimeShort(msg.timestamp);
+    tm.title = new Date(msg.timestamp).toLocaleString();
+    // As in A: sender, the harness (or remote: <server>) tag, the role, the
+    // id, the time. The tag is refreshed in place when the roster arrives.
+    el.setAttribute('data-sender', msg.sender);
+    hdr.appendChild(sn);
+    var tagText = senderTagText(msg.sender);
+    var tag = document.createElement('span');
+    tag.className = 'msg-tag';
+    tag.textContent = tagText;
+    tag.hidden = !tagText;
+    hdr.appendChild(tag);
     var agent = agents.find(function(a) { return a.name === msg.sender; });
     if (agent && agent.role) {
       var badge = document.createElement('span');
@@ -1443,10 +1476,13 @@ function appendMessage(msg, scroll) {
       badge.style.borderColor = color + '40'; badge.style.color = color;
       hdr.appendChild(badge);
     }
+    hdr.appendChild(mid); hdr.appendChild(tm);
 
     var tw = document.createElement('div');
     tw.className = 'msg-text-wrap';
     renderContent(tw, msg.text, el.dataset.conv);
+    // A message that names you is marked as in A (an accent bar and tint).
+    if (mentionsMe(msg)) el.classList.add('mentions-me');
 
     // Image display
     if (msg.image) {
@@ -1946,6 +1982,9 @@ function dmPartnerOf(msg) {
 function jumpToMessage(conv, id, known) {
   id = Number(id);
   if (!conv || !(id > 0)) return;
+  // A jump shows the conversation: leave a page (Crew) for the Rooms view,
+  // which lists rooms and DMs alike, wherever the message turns out to be.
+  leavePageFor('rooms');
   var seq = ++jumpSeq;
   var el = messageElementFor(conv, id);
   if (el) { highlightMessageEl(el); return; }
@@ -2870,6 +2909,14 @@ function openSettingsModal(section, opener) {
   }
 }
 
+// Ctrl+, (Cmd+, on a Mac) opens Settings, as the menu hint says.
+document.addEventListener('keydown', function(e) {
+  if (e.key !== ',' || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+  if (signedOut || settingsOverlay) return;
+  e.preventDefault();
+  openSettingsModal(null, document.activeElement);
+});
+
 function closeSettingsModal(returnFocus) {
   if (!settingsOverlay) return;
   settingsOverlay.remove();
@@ -3084,6 +3131,8 @@ function renderTerminals(terminals) {
     });
     li.appendChild(type); li.appendChild(info); li.appendChild(inv); list.appendChild(li);
   });
+  if (typeof renderCrewPage === 'function') renderCrewPage();
+  if (typeof refreshSenderTags === 'function') refreshSenderTags();
 }
 
 function inviteTerminal(t) {
@@ -3330,6 +3379,16 @@ function setRailView(view, fromUser) {
   });
   var title = document.getElementById('side-title');
   if (title) title.textContent = RAIL_TITLES[v];
+  // The head action, as in A: a new room, or launching an agent from Crew.
+  var act = document.getElementById('side-head-action');
+  if (act) {
+    var label = v === 'rooms' ? 'New room' : v === 'crew' ? 'Launch an agent' : '';
+    act.hidden = !label;
+    act.title = label;
+    act.setAttribute('aria-label', label || 'New');
+  }
+  // Crew is a page in the content column; Rooms and DMs show the conversation.
+  showPage(v === 'crew' ? 'crew' : null);
   document.querySelectorAll('.rail-item[data-rail-view]').forEach(function(btn) {
     var on = btn.getAttribute('data-rail-view') === v;
     btn.classList.toggle('active', on);
@@ -3375,6 +3434,11 @@ function renderRailDmBadge() {
 }
 
 function initRail() {
+  var act = document.getElementById('side-head-action');
+  if (act) act.addEventListener('click', function(e) {
+    e.stopPropagation();
+    if (railViewNow === 'crew') openLaunchDialog(); else newConversation();
+  });
   document.querySelectorAll('.rail-item[data-rail-view]').forEach(function(btn) {
     btn.addEventListener('click', function(e) {
       e.stopPropagation();
@@ -3388,6 +3452,456 @@ function initRail() {
   var brand = document.getElementById('rail-brand');
   var inst = document.getElementById('instance-name');
   if (brand && inst) brand.title = inst.textContent;
+}
+
+// --- Fidelity to mockup A (redesign lane 3b) ---
+
+// Presence in one vocabulary for every avatar (DM rows, crew rows and
+// cards, the members panel): the dot class and a short state.
+//   online  green   active (or seen a while ago)
+//   working accent  a turn is running (typing)
+//   idle    orange  presence lost (the server marked it stale)
+//   silent  gray    connected but quiet for 30 minutes
+//   offline gray    not connected; age of its last post when known
+function presenceOf(name, nowMs) {
+  var now = nowMs || serverNow();
+  var a = null;
+  for (var i = 0; i < agents.length; i++) { if (agents[i].name === name) { a = agents[i]; break; } }
+  if (!a) {
+    var lastAt = null;
+    for (var j = allMessages.length - 1; j >= 0; j--) {
+      if (allMessages[j].sender === name && typeof allMessages[j].timestamp === 'number') { lastAt = allMessages[j].timestamp; break; }
+    }
+    return { cls: 'offline', short: lastAt ? 'offline ' + shortPillAge(Math.max(0, now - lastAt)) : 'offline', agent: null };
+  }
+  var info = pillInfo(a, now);
+  if (typingNames.has(a.name)) return { cls: 'working', short: 'working', agent: a, info: info };
+  if (info.presence === 'stale') return { cls: 'idle', short: 'idle' + (info.seenAge != null ? ' ' + shortPillAge(info.seenAge) : ''), agent: a, info: info };
+  if (info.presence === 'silent') return { cls: 'silent', short: 'silent ' + shortPillAge(info.quietAge), agent: a, info: info };
+  return { cls: 'online', short: info.seenAge != null && info.seenAge >= 60000 ? 'seen ' + shortPillAge(info.seenAge) : 'active', agent: a, info: info };
+}
+
+// A square avatar with the presence dot on its corner, as in A.
+function presenceAvatar(name, size, cls) {
+  var av = memberAvatar(name, size || '');
+  var dot = document.createElement('span');
+  dot.className = 'mdot ' + cls;
+  av.appendChild(dot);
+  return av;
+}
+
+// The harness a member runs in, as the crew knows it: a Codex queue join,
+// the terminal scan by pid, else the crew roster's default harness.
+var HARNESS_LABELS = { claude: 'Claude Code', codex: 'Codex CLI', gemini: 'Gemini CLI', openclaw: 'OpenClaw', copilot: 'Copilot CLI' };
+var crewRoster = [];
+function loadCrewRoster() {
+  return fetch('/api/crew').then(function(r) { return r.ok ? r.json() : []; }).then(function(list) {
+    crewRoster = Array.isArray(list) ? list : [];
+    refreshSenderTags();
+    renderPills();
+    renderDmList();
+  }).catch(function() { /* keep what we have */ });
+}
+function harnessOf(name) {
+  var a = null;
+  for (var i = 0; i < agents.length; i++) { if (agents[i].name === name) { a = agents[i]; break; } }
+  if (a && a.codexThread) return 'Codex CLI';
+  if (a && a.pid) {
+    for (var k = 0; k < lastScanResults.length; k++) {
+      var t = lastScanResults[k];
+      if (t.pid === a.pid && HARNESS_LABELS[t.type]) return HARNESS_LABELS[t.type];
+    }
+  }
+  var lower = String(name || '').toLowerCase();
+  for (var j = 0; j < crewRoster.length; j++) {
+    var c = crewRoster[j];
+    if (String(c.joinAs || '').toLowerCase() === lower || String(c.name || '').toLowerCase() === lower) {
+      if (c.defaultHarness) return HARNESS_LABELS[c.defaultHarness] || c.defaultHarness;
+    }
+  }
+  return '';
+}
+
+// The tag beside a sender's name: remote: <server> for a hosted member,
+// else the harness. Empty for the human and for unknown senders.
+function senderTagText(name) {
+  var a = null;
+  for (var i = 0; i < agents.length; i++) { if (agents[i].name === name) { a = agents[i]; break; } }
+  if (a && a.host) return 'remote: ' + a.host;
+  return harnessOf(name);
+}
+
+// Message headers carry the tag; the roster and the members arrive after
+// the first paint, so the tags are refreshed in place.
+function refreshSenderTags() {
+  document.querySelectorAll('#messages .message[data-sender]').forEach(function(el) {
+    var tag = el.querySelector('.msg-tag');
+    if (!tag) return;
+    var text = senderTagText(el.getAttribute('data-sender'));
+    tag.textContent = text;
+    tag.hidden = !text;
+  });
+}
+
+// Whether a message names the viewer: @name as a whole word, or a
+// decision asked of the viewer. Not the viewer's own messages.
+function mentionsMe(msg) {
+  if (!msg || msg.sender === 'system') return false;
+  var me = myName();
+  if (msg.sender === me) return false;
+  if (msg.ask && msg.ask.state === 'open' && msg.ask.for === me) return true;
+  return window.joindUi ? window.joindUi.mentionsName(msg.text, me) : false;
+}
+
+// --- Rooms: unread and mention counts for rooms not on screen ---
+// Counted from the socket since this page loaded (the server keeps read
+// cursors for agents only); opening a room clears its counts.
+var roomUnread = {};
+var roomMentions = {};
+function noteRoomMessage(convId, msg) {
+  if (!convId || !msg || msg.sender === 'system' || msg.sender === myName() || msg.to) return;
+  if (typeof msg.id === 'number' && msg.id < 0) return;
+  roomUnread[convId] = (roomUnread[convId] || 0) + 1;
+  if (mentionsMe(msg) || (window.joindUi && window.joindUi.mentionsName(msg.text, 'all'))) roomMentions[convId] = (roomMentions[convId] || 0) + 1;
+  renderConversationList();
+  renderRailRoomsBadge();
+}
+function clearRoomUnread(convId) {
+  delete roomUnread[convId];
+  delete roomMentions[convId];
+  renderRailRoomsBadge();
+}
+function renderRailRoomsBadge() {
+  var badge = document.getElementById('rail-rooms-badge');
+  if (!badge) return;
+  var total = 0;
+  Object.keys(roomUnread).forEach(function(k) { total += roomUnread[k] || 0; });
+  badge.textContent = total > 99 ? '99+' : String(total);
+  badge.hidden = total === 0;
+  var btn = document.getElementById('rail-rooms');
+  if (btn) btn.setAttribute('aria-label', total > 0 ? 'Rooms, ' + total + ' unread' : 'Rooms');
+}
+// A room row as in A: a glyph (# or the globe for a linked room), the
+// name, and the count: mentions (red) first, else unread (soft). The total
+// message count moves to the tooltip. Rows are keyboard operable.
+function decorateRoomRow(li, conv, remote) {
+  var glyph = document.createElement('span');
+  glyph.className = 'conv-glyph';
+  glyph.setAttribute('aria-hidden', 'true');
+  glyph.textContent = remote ? '' : '#';
+  if (remote) {
+    var gi = document.createElement('i');
+    gi.setAttribute('data-lucide', 'globe');
+    gi.setAttribute('width', '13');
+    gi.setAttribute('height', '13');
+    glyph.appendChild(gi);
+  }
+  li.insertBefore(glyph, li.firstChild);
+  var unread = roomUnread[conv.id] || 0;
+  var mentions = roomMentions[conv.id] || 0;
+  li.classList.toggle('unread', unread > 0);
+  var count = li.querySelector('.conv-count');
+  if (count) {
+    count.textContent = mentions > 0 ? String(mentions) : unread > 0 ? String(unread) : '';
+    count.classList.toggle('mention', mentions > 0);
+  }
+  li.title = conv.name + (conv.messageCount ? ', ' + conv.messageCount + ' messages' : '') +
+    (unread > 0 ? ', ' + unread + ' unread' : '') + (mentions > 0 ? ', ' + mentions + ' mentioning you' : '');
+  li.tabIndex = 0;
+  li.setAttribute('role', 'button');
+  if (activeConversation && conv.id === activeConversation.id && !activeDm) li.setAttribute('aria-current', 'true');
+  li.addEventListener('keydown', function(e) {
+    if (e.target !== li) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectConversation(conv.id); }
+  });
+}
+
+// --- Pages: Crew takes the content column, as in A ---
+var pageNow = null; // 'crew' or null (the conversation)
+function showPage(p) {
+  var page = p === 'crew' ? 'crew' : null;
+  if (page === pageNow) { if (page) renderCrewPage(); return; }
+  pageNow = page;
+  var crew = document.getElementById('page-crew');
+  var chat = document.querySelector('.chat-area');
+  if (crew) crew.hidden = page !== 'crew';
+  if (chat) chat.hidden = !!page;
+  document.body.classList.toggle('on-page', !!page);
+  if (page) {
+    var bar = document.getElementById('search-bar');
+    if (bar && !bar.classList.contains('hidden')) closeSearch();
+    if (sidePanelTab) closeSidePanel(false);
+    renderCrewPage();
+  }
+  syncChannelHeader();
+}
+
+// Leaving a page for a conversation (a room, a DM, a jump to a message).
+function leavePageFor(view) {
+  if (!pageNow) return;
+  setRailView(view, false);
+}
+
+function crewMembersList() {
+  var m = roomMembers();
+  var out = m.infos.map(function(x) { return x.a.name; });
+  m.offline.forEach(function(o) { out.push(o.name); });
+  return out;
+}
+
+// The Crew view's sidebar list: every member with the presence avatar and
+// a short state; a connected member opens its popover.
+function renderCrewSideList() {
+  var list = document.getElementById('crew-side-list');
+  if (!list) return;
+  list.textContent = '';
+  var names = crewMembersList();
+  if (names.length === 0) {
+    var e = document.createElement('li');
+    e.className = 'empty-state';
+    e.textContent = 'No members in this room yet';
+    list.appendChild(e);
+    return;
+  }
+  var now = serverNow();
+  names.forEach(function(name) {
+    var st = presenceOf(name, now);
+    var li = document.createElement('li');
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'side-row crew-row-side ' + st.cls;
+    row.appendChild(presenceAvatar(name, 'xs', st.cls));
+    var nm = document.createElement('span');
+    nm.className = 'side-row-name';
+    nm.textContent = name;
+    var meta = document.createElement('span');
+    meta.className = 'side-row-meta';
+    // One word, as in A: active, turn, idle, silent, offline.
+    meta.textContent = { online: 'active', working: 'turn', idle: 'idle', silent: 'silent', offline: 'offline' }[st.cls];
+    row.appendChild(nm);
+    row.appendChild(meta);
+    row.title = name + ', ' + st.short + (harnessOf(name) ? ', ' + harnessOf(name) : '');
+    if (st.agent) {
+      row.addEventListener('click', function(ev) { ev.stopPropagation(); showPopover(row, st.agent); });
+    } else {
+      // Not connected: nothing to open, so not a control.
+      row.tabIndex = -1;
+      row.setAttribute('aria-disabled', 'true');
+      row.classList.add('static');
+    }
+    li.appendChild(row);
+    list.appendChild(li);
+  });
+}
+
+function pageSection(title, count) {
+  var sec = document.createElement('section');
+  sec.className = 'page-section';
+  var h = document.createElement('h3');
+  h.className = 'page-h3';
+  h.textContent = title + (count != null ? ' · ' + count : '');
+  sec.appendChild(h);
+  var grid = document.createElement('div');
+  grid.className = 'card-grid';
+  sec.appendChild(grid);
+  return { sec: sec, grid: grid, head: h };
+}
+
+function crewCard(name, sub, state, cls, extra) {
+  var card = document.createElement('div');
+  card.className = 'crew-card ' + cls;
+  card.appendChild(presenceAvatar(name, '', cls));
+  var text = document.createElement('div');
+  text.className = 'crew-card-text';
+  var n = document.createElement('div');
+  n.className = 'crew-card-name';
+  n.textContent = name;
+  if (extra) {
+    var ex = document.createElement('span');
+    ex.className = 'crew-card-extra';
+    ex.textContent = extra;
+    n.appendChild(ex);
+  }
+  var s = document.createElement('div');
+  s.className = 'crew-card-sub';
+  s.textContent = sub;
+  var w = document.createElement('div');
+  w.className = 'crew-card-state';
+  w.textContent = state;
+  text.appendChild(n);
+  text.appendChild(s);
+  text.appendChild(w);
+  card.appendChild(text);
+  return card;
+}
+
+// The Crew page: members (you first), terminals, session templates.
+function renderCrewPage() {
+  renderCrewSideList();
+  if (pageNow !== 'crew') return;
+  var body = document.getElementById('page-crew-body');
+  if (!body) return;
+  var keep = body.contains(document.activeElement) ? document.activeElement.getAttribute('data-key') : null;
+  body.textContent = '';
+  var now = serverNow();
+  var names = crewMembersList();
+  var active = names.filter(function(n) { var c = presenceOf(n, now).cls; return c === 'online' || c === 'working'; }).length;
+
+  var head = document.createElement('div');
+  head.className = 'page-head';
+  var sub = document.createElement('span');
+  sub.className = 'page-sub';
+  sub.textContent = names.length + (names.length === 1 ? ' member, ' : ' members, ') + active + ' active' +
+    (activeConversation ? ' in # ' + activeConversation.name : '');
+  var acts = document.createElement('div');
+  acts.className = 'page-actions';
+  var roster = document.createElement('button');
+  roster.type = 'button';
+  roster.className = 'btn btn-sm';
+  roster.id = 'crew-btn';
+  roster.setAttribute('data-key', 'roster');
+  roster.textContent = 'Crew roster';
+  roster.addEventListener('click', function() { openCrewPanel(); });
+  var launch = document.createElement('button');
+  launch.type = 'button';
+  launch.className = 'btn btn-sm btn-primary';
+  launch.id = 'launch-btn';
+  launch.setAttribute('data-key', 'launch');
+  launch.textContent = 'Launch an agent';
+  launch.addEventListener('click', function() { openLaunchDialog(); });
+  acts.appendChild(roster);
+  acts.appendChild(launch);
+  head.appendChild(sub);
+  head.appendChild(acts);
+  body.appendChild(head);
+
+  var members = pageSection('Members', null);
+  members.head.hidden = true;
+  members.grid.appendChild(crewCard(myName(), 'human', 'here', 'online', 'you'));
+  names.forEach(function(name) {
+    var st = presenceOf(name, now);
+    var a = st.agent;
+    var parts = [];
+    if (a && a.host) parts.push('hosted', 'remote: ' + a.host);
+    else if (harnessOf(name)) parts.push(harnessOf(name));
+    else if (a && memberRoute(a)) parts.push(memberRoute(a));
+    if (a && a.role) parts.push(a.role);
+    var card = crewCard(name, parts.join(' · ') || (a ? 'connected' : 'not connected'), st.short, st.cls, '');
+    if (a) {
+      card.tabIndex = 0;
+      card.setAttribute('role', 'button');
+      card.setAttribute('data-key', 'm:' + name);
+      card.addEventListener('click', function(e) { e.stopPropagation(); showPopover(card, a); });
+      card.addEventListener('keydown', function(e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); showPopover(card, a); } });
+    }
+    members.grid.appendChild(card);
+  });
+  body.appendChild(members.sec);
+
+  var terms = lastScanResults.filter(function(t) { return t.pid > 0; });
+  var tsec = pageSection('Terminals', terms.length || null);
+  var scan = document.createElement('button');
+  scan.type = 'button';
+  scan.className = 'btn btn-sm page-h3-act';
+  scan.setAttribute('data-key', 'scan');
+  scan.textContent = 'Scan';
+  scan.addEventListener('click', function() { scanTerminals(); });
+  tsec.head.appendChild(scan);
+  if (terms.length === 0) {
+    var none = document.createElement('div');
+    none.className = 'page-empty';
+    none.textContent = 'No terminals found yet. Scan to discover agent sessions on this machine.';
+    tsec.grid.appendChild(none);
+  }
+  terms.forEach(function(t) {
+    var joined = null;
+    for (var i = 0; i < agents.length; i++) { if (agents[i].pid && agents[i].pid === t.pid) { joined = agents[i]; break; } }
+    var card = document.createElement('div');
+    card.className = 'term-card';
+    var ico = document.createElement('span');
+    ico.className = 'term-ico';
+    ico.setAttribute('aria-hidden', 'true');
+    ico.textContent = '>_';
+    var text = document.createElement('div');
+    text.className = 'crew-card-text';
+    var n = document.createElement('div');
+    n.className = 'crew-card-name';
+    n.textContent = t.tabTitle || (joined ? joined.name : (HARNESS_LABELS[t.type] || t.type));
+    var s = document.createElement('div');
+    s.className = 'crew-card-sub';
+    s.textContent = (HARNESS_LABELS[t.type] || t.type) + ', PID ' + t.pid + (joined ? ', joined as ' + joined.name : ', not joined');
+    text.appendChild(n);
+    text.appendChild(s);
+    var act = document.createElement('button');
+    act.type = 'button';
+    act.className = 'btn btn-sm';
+    act.setAttribute('data-key', 't:' + t.pid);
+    act.textContent = joined ? 'Dismiss' : 'Invite';
+    act.addEventListener('click', function() { if (joined) kickAgent(joined.name); else inviteTerminal(t); });
+    card.appendChild(ico);
+    card.appendChild(text);
+    card.appendChild(act);
+    tsec.grid.appendChild(card);
+  });
+  body.appendChild(tsec.sec);
+
+  var tpl = pageSection('Session templates', null);
+  if (sessionTemplates.length === 0) {
+    var nt = document.createElement('div');
+    nt.className = 'page-empty';
+    nt.textContent = 'No templates loaded';
+    tpl.grid.appendChild(nt);
+  }
+  sessionTemplates.forEach(function(t) {
+    var card = document.createElement('div');
+    card.className = 'tpl-card';
+    var text = document.createElement('div');
+    text.className = 'crew-card-text';
+    var n = document.createElement('div');
+    n.className = 'crew-card-name';
+    n.textContent = t.name;
+    var d = document.createElement('div');
+    d.className = 'crew-card-sub';
+    d.textContent = t.description || '';
+    var r = document.createElement('div');
+    r.className = 'crew-card-state';
+    r.textContent = (t.roles || []).join(', ');
+    text.appendChild(n);
+    text.appendChild(d);
+    text.appendChild(r);
+    var start = document.createElement('button');
+    start.type = 'button';
+    start.className = 'btn btn-sm';
+    start.setAttribute('data-key', 's:' + t.name);
+    start.textContent = 'Start';
+    start.addEventListener('click', function() { startSessionUI(t); });
+    card.appendChild(text);
+    card.appendChild(start);
+    tpl.grid.appendChild(card);
+  });
+  body.appendChild(tpl.sec);
+
+  if (keep) {
+    var again = body.querySelector('[data-key="' + (window.CSS && CSS.escape ? CSS.escape(keep) : keep) + '"]');
+    if (again) again.focus();
+  }
+}
+
+// --- The composer bar: attach, decision, task ---
+function openAttachPicker() {
+  var input = document.getElementById('attach-input');
+  if (!input) return;
+  input.value = '';
+  input.onchange = function() {
+    var file = input.files && input.files[0];
+    if (file && /^image\//.test(file.type)) uploadImage(file);
+  };
+  input.click();
+}
+function openNewTask() {
+  if (!activeConversation) return;
+  if (!taskPanelOpen) toggleTaskPanel();
+  showCreateTaskForm();
 }
 
 // --- Utils ---
@@ -3652,7 +4166,7 @@ function openUserMenu() {
   var sub = document.createElement('span');
   sub.className = 'user-menu-sub';
   var inst = document.getElementById('instance-name');
-  sub.textContent = (inst ? inst.textContent : 'Joind') + ', this browser';
+  sub.textContent = (signedOut ? 'signed out' : 'active') + ' · human · ' + (inst ? inst.textContent : 'Joind');
   who.appendChild(nm);
   who.appendChild(sub);
   head.appendChild(av);
@@ -3680,7 +4194,7 @@ function openUserMenu() {
     items.push(b);
     return b;
   }
-  addItem('settings', 'Settings', '', function() { closePopover(); openSettingsModal(null, pill); });
+  addItem('settings', 'Settings', 'Ctrl ,', function() { closePopover(); openSettingsModal(null, pill); });
   addItem(currentTheme() === 'light' ? 'moon' : 'sun', currentTheme() === 'light' ? 'Dark theme' : 'Light theme', '', function() {
     toggleTheme();
     closePopover();
@@ -3691,6 +4205,16 @@ function openUserMenu() {
     closePopover();
     openSettingsModal('token', pill);
   });
+  addItem(isMuted ? 'volume-x' : 'volume-2', isMuted ? 'Sounds off' : 'Sounds on', '', function(b) {
+    isMuted = !isMuted;
+    localStorage.setItem('joind-muted', JSON.stringify(isMuted));
+    updateMuteBtn();
+    b.querySelector('span:not(.menu-ico)').textContent = isMuted ? 'Sounds off' : 'Sounds on';
+    b.setAttribute('aria-checked', isMuted ? 'false' : 'true');
+  });
+  var soundItem = items[items.length - 1];
+  soundItem.setAttribute('role', 'menuitemcheckbox');
+  soundItem.setAttribute('aria-checked', isMuted ? 'false' : 'true');
   var sep = document.createElement('div');
   sep.className = 'menu-sep';
   sep.setAttribute('role', 'separator');
@@ -3852,6 +4376,8 @@ var socketInitCount = 0;
 
 function selectConversation(id, after) {
   var mySelect = ++convSelectSeq;
+  clearRoomUnread(id);
+  leavePageFor('rooms');
   historyView = null;
   jumpSeq++; // a navigation: pending message jumps must not land after it
   historyExitSeq++; // nor a pending reload of the latest page
@@ -4019,6 +4545,7 @@ function renderConversationList() {
     li.appendChild(name);
     li.appendChild(count);
     li.appendChild(menuBtn);
+    decorateRoomRow(li, conv, false);
 
     // Click to select
     li.addEventListener('click', function() {
@@ -4076,6 +4603,8 @@ function renderDmList() {
   renderRailDmBadge();
   var list = document.getElementById('dm-list');
   if (!list) return;
+  // Presence changes rebuild the list: keyboard focus stays on its row.
+  var focusedDm = document.activeElement && list.contains(document.activeElement) ? document.activeElement.getAttribute('data-dm') : null;
   list.textContent = '';
   var me = myName();
   var names = [];
@@ -4106,34 +4635,38 @@ function renderDmList() {
     list.appendChild(empty);
     return;
   }
+  var dmNow = serverNow();
   names.forEach(function(name) {
     var unread = dmUnread[name] || 0;
     var li = document.createElement('li');
     li.className = 'dm-item' + (activeDm === name ? ' active' : '') + (unread > 0 ? ' dm-unread' : '');
     li.tabIndex = 0;
     li.setAttribute('role', 'button');
+    li.setAttribute('data-dm', name);
     if (activeDm === name) li.setAttribute('aria-current', 'true');
 
-    var dot = document.createElement('span');
-    dot.className = 'dm-dot' + (onlineNames.has(name) ? ' online' : '');
-
-    var av = document.createElement('span');
-    av.className = 'dm-avatar';
-    av.style.background = getSenderColor(name);
-    av.textContent = name.charAt(0).toUpperCase();
+    // As in A: the avatar carries the presence dot, the state sits right.
+    var st = presenceOf(name, dmNow);
+    var av = presenceAvatar(name, 'xs', st.cls);
+    av.classList.add('dm-avatar');
 
     var nm = document.createElement('span');
     nm.className = 'dm-name';
     nm.textContent = name;
 
-    li.appendChild(dot);
     li.appendChild(av);
     li.appendChild(nm);
+    li.title = name + ', ' + st.short;
     if (unread > 0) {
       var badge = document.createElement('span');
       badge.className = 'dm-unread-count';
       badge.textContent = unread;
       li.appendChild(badge);
+    } else {
+      var meta = document.createElement('span');
+      meta.className = 'dm-meta';
+      meta.textContent = st.short;
+      li.appendChild(meta);
     }
     li.addEventListener('click', function() { selectDm(name); });
     li.addEventListener('keydown', function(e) {
@@ -4143,6 +4676,7 @@ function renderDmList() {
       }
     });
     list.appendChild(li);
+    if (focusedDm === name) li.focus();
   });
 }
 
@@ -4165,6 +4699,7 @@ function mergeDmThread(existing, incoming) {
 }
 
 function selectDm(name) {
+  leavePageFor('dms');
   activeDm = name;
   jumpSeq++; // a navigation: pending message jumps must not land after it
   historyExitSeq++; // nor a pending reload of the latest page
@@ -4281,9 +4816,15 @@ function syncChannelHeader() {
   // Presence lives on the members button now (its count lists everyone the
   // panel does), so the topic no longer says "0 member(s)" in a room whose
   // agents are simply not connected.
-  if (activeDm) {
+  if (pageNow === 'crew') {
+    title.textContent = 'Crew';
+    topic.textContent = 'Presence, terminals and sessions';
+  } else if (activeDm) {
     title.textContent = activeDm;
-    topic.textContent = 'Direct message';
+    // As in A: the partner's harness and state under a DM's title.
+    var dst = presenceOf(activeDm);
+    var dh = harnessOf(activeDm);
+    topic.textContent = (dh ? dh + ', ' : '') + dst.short + ', direct message';
   } else if (activeConversation) {
     title.textContent = '# ' + activeConversation.name;
     var server = remoteServerOf(activeConversation.id);
@@ -4293,18 +4834,30 @@ function syncChannelHeader() {
     title.textContent = '#';
     topic.textContent = '';
   }
+  // A DM shows the partner's avatar before the title.
+  var oldAv = document.getElementById('dm-head-avatar');
+  if (oldAv) oldAv.remove();
+  if (activeDm && !pageNow) {
+    var hav = presenceAvatar(activeDm, 'head', presenceOf(activeDm).cls);
+    hav.id = 'dm-head-avatar';
+    hav.setAttribute('aria-hidden', 'true');
+    title.parentNode.insertBefore(hav, title);
+  }
   syncConvTools();
   syncLinkHint();
+  syncInputPlaceholder();
 }
 
 // The toolbar follows the view: members and pins belong to a room, so a
 // DM (a cross-room mailbox) hides them and closes the side panel.
 function syncConvTools() {
-  var inRoom = !!activeConversation && !activeDm;
+  var tools = document.getElementById('conv-tools');
+  if (tools) tools.hidden = !!pageNow;
+  var inRoom = !!activeConversation && !activeDm && !pageNow;
   document.querySelectorAll('.conv-tools .room-only').forEach(function(el) { el.hidden = !inRoom; });
   if (!inRoom && sidePanelTab) closeSidePanel(false);
   var label = document.getElementById('room-search-label');
-  if (label) label.textContent = activeDm ? 'Search' : activeConversation ? 'Search # ' + activeConversation.name : 'Search this room';
+  if (label) label.textContent = activeDm ? 'Search in DM' : activeConversation ? 'Search in #' + activeConversation.name : 'Search this room';
   if (inRoom && pinsState.conv !== activeConversation.id) loadPins(false);
 }
 
@@ -4640,6 +5193,7 @@ function renderRemoteSections() {
       li.appendChild(count);
       // No menu: star, rename and delete belong to the home server.
       li.addEventListener('click', function() { selectConversation(conv.id); });
+      decorateRoomRow(li, conv, true);
       ul.appendChild(li);
     });
     group.appendChild(ul);
@@ -5063,34 +5617,27 @@ function renderTemplates() {
     list.appendChild(e);
     return;
   }
+  // Compact rows as in A: the name, the roles and description in the
+  // tooltip; a row starts the session. The Crew page shows them as cards.
   sessionTemplates.forEach(function(t) {
-    var card = document.createElement('div');
-    card.className = 'template-card';
-
-    var name = document.createElement('div');
-    name.className = 'template-name';
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'side-row template-row';
+    row.title = (t.description ? t.description + '. ' : '') + 'Roles: ' + t.roles.join(', ') + '. Click to start.';
+    var ico = document.createElement('span');
+    ico.className = 'side-row-ico';
+    ico.setAttribute('aria-hidden', 'true');
+    ico.textContent = '≡';
+    var name = document.createElement('span');
+    name.className = 'side-row-name';
     name.textContent = t.name;
-
-    var desc = document.createElement('div');
-    desc.className = 'template-desc';
-    desc.textContent = t.description;
-
-    var roles = document.createElement('div');
-    roles.className = 'template-roles';
-    roles.textContent = t.roles.join(', ');
-
-    var startBtn = document.createElement('button');
-    startBtn.className = 'btn btn-sm';
-    startBtn.textContent = 'Start';
-    startBtn.style.marginTop = '4px';
-    startBtn.addEventListener('click', function() { startSessionUI(t); });
-
-    card.appendChild(name);
-    card.appendChild(desc);
-    card.appendChild(roles);
-    card.appendChild(startBtn);
-    list.appendChild(card);
+    row.appendChild(ico);
+    row.appendChild(name);
+    row.setAttribute('aria-label', 'Start session: ' + t.name);
+    row.addEventListener('click', function() { startSessionUI(t); });
+    list.appendChild(row);
   });
+  renderCrewPage();
 }
 
 function startSessionUI(template) {
@@ -5659,10 +6206,10 @@ function syncInputPlaceholder() {
   if (!input) return;
   var w = window.innerWidth;
   var ph;
+  void w;
   if (activeDm) ph = 'Message ' + activeDm;
-  else if (w <= 400) ph = 'Type a message…';
-  else if (w <= 560) ph = 'Type a message… @name · /decide';
-  else ph = 'Type a message... @name to mention · /decide for a poll';
+  else if (activeConversation) ph = 'Message #' + activeConversation.name;
+  else ph = 'Message';
   if (input.placeholder !== ph) input.placeholder = ph;
 }
 window.addEventListener('resize', syncInputPlaceholder);
@@ -5693,7 +6240,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var el = document.getElementById('instance-name');
     if (el) el.textContent = info.name;
     var brand = document.getElementById('rail-brand');
-    if (brand) brand.title = info.name;
+    if (brand) { brand.title = info.name; brand.textContent = info.name.charAt(0).toUpperCase(); }
     document.title = info.name === 'Joind' ? 'Joind' : info.name + ' — Joind';
   }).catch(function() { /* ignore */ });
   // Wire conversation search
@@ -5711,6 +6258,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('sidebar').classList.add('hidden');
   }
   initSidebarResize();
+  loadCrewRoster();
   initRail();
   initSidePanel();
 });
@@ -7117,7 +7665,9 @@ function openCrewPanel() {
 }
 
 function closeCrewPanel() {
+  var wasOpen = !!crewPanelOverlay;
   if (crewPanelOverlay) { crewPanelOverlay.remove(); crewPanelOverlay = null; }
+  if (wasOpen && !signedOut) loadCrewRoster(); // harness labels follow roster edits
 }
 
 function buildCrewPanel(content, crewList, meta, harnesses) {
@@ -8366,7 +8916,7 @@ function renderDecisionsPanel() {
 function scrollToMessageWhenReady(id, tries, conv, navSeq) {
   if (navSeq !== undefined && navSeq !== jumpSeq) return;
   var el = conv ? messageElementFor(conv, id) : document.querySelector('.message[data-id="' + id + '"]');
-  if (el) { highlightMessageEl(el); return; }
+  if (el) { leavePageFor('rooms'); highlightMessageEl(el); return; }
   if (tries > 0) setTimeout(function() { scrollToMessageWhenReady(id, tries - 1, conv, navSeq); }, 200);
 }
 

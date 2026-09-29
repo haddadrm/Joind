@@ -138,7 +138,18 @@
     return { count: total, label: 'Members: ' + parts.join(', ') };
   }
 
+  // --- Redesign lane 3b ---
+
+  // Whether text mentions @name as a whole word (case-insensitive): not
+  // inside an email address or a longer name (@Ramiro, rami@host).
+  function mentionsName(text, name) {
+    if (!name) return false;
+    var esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(^|[^\\w@])@' + esc + '(?![\\w-])', 'i').test(String(text == null ? '' : text));
+  }
+
   return {
+    mentionsName: mentionsName,
     railView: railView,
     sectionInView: sectionInView,
     offlineAuthors: offlineAuthors,

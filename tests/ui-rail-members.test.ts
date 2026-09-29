@@ -117,3 +117,24 @@ describe("membersSummary", () => {
     expect(ui.membersSummary(0, 0)).toEqual({ count: 0, label: "No members yet" });
   });
 });
+
+describe("mentionsName (lane 3b)", () => {
+  const m = (ui as unknown as { mentionsName(text: unknown, name: string): boolean }).mentionsName;
+  it("finds @name as a whole word, any case", () => {
+    expect(m("@Rami one call needed", "Rami")).toBe(true);
+    expect(m("hold on, @rami.", "Rami")).toBe(true);
+    expect(m("(@RAMI) see #12", "Rami")).toBe(true);
+  });
+  it("ignores longer names, emails and plain words", () => {
+    expect(m("@Ramiro is here", "Rami")).toBe(false);
+    expect(m("mail rami@host.example", "Rami")).toBe(false);
+    expect(m("Rami said so", "Rami")).toBe(false);
+    expect(m("@Rami-bot ran", "Rami")).toBe(false);
+  });
+  it("escapes names with special characters and tolerates junk", () => {
+    expect(m("@a.b hi", "a.b")).toBe(true);
+    expect(m("@axb hi", "a.b")).toBe(false);
+    expect(m(null, "Rami")).toBe(false);
+    expect(m("@Rami", "")).toBe(false);
+  });
+});
