@@ -29,7 +29,7 @@ import { setDefaultPresenceGrace, setInjectBaseUrl } from "./room.js";
 import { injectBaseUrlFor } from "./wake.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { ConversationManager, newRegistrationId, isTerminalLess } from "./manager.js";
+import { ConversationManager, newRegistrationId, isTerminalLess, type AgentBindingEntry } from "./manager.js";
 import { visibleToViewer, type ChatMessage, type ChatRoom } from "./room.js";
 import { registerTools, resolvePaneForJoin, defaultPaneResolverDeps, resolveOrcaForJoin, defaultOrcaResolverDeps, requestedOrcaHandle, weztermEnvFor, availableForAutoJoin, departureIsCurrent, peerOwnerRefusal } from "./tools.js";
 import { parseCodexHome, parseCodexThread } from "./codex-queue.js";
@@ -1872,9 +1872,31 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.status(403).json({ error: "moving a task to in progress or review, or reassigning it, needs the web token" });
       return;
     }
-    const convId = conversation || manager.getActiveId();
+    // A token-less caller that names a responder must be that responder:
+    // the name is tied to the caller's own registration, found by the
+    // registration id, pid, pane (with its GUI) or Orca handle it sends,
+    // never by the name alone. Without a named responder the resolution
+    // stays anonymous, as before.
+    let callerConv: string | undefined;
+    if (!announce && respondedBy !== undefined) {
+      if (typeof respondedBy !== "string" || validWebName(respondedBy) === null) {
+        res.status(400).json({ error: "respondedBy must be a name" });
+        return;
+      }
+      const caller = callerRegistration(req, respondedBy, typeof conversation === "string" && conversation ? conversation : undefined);
+      if (!caller) {
+        res.status(403).json({ error: "respondedBy must be the caller: pass your registration (from your join reply), pid, paneId with weztermGui, or orcaTerminal" });
+        return;
+      }
+      callerConv = caller.conversationId;
+    }
+    const convId = conversation || callerConv || manager.getActiveId();
     if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
     if (manager.isRemote(convId)) { res.status(400).json({ error: "Tasks of a remote room are resolved on its home server" }); return; }
+    if (callerConv !== undefined && callerConv !== convId) {
+      res.status(403).json({ error: `${respondedBy} is not registered in that conversation from this terminal` });
+      return;
+    }
 
     const before = taskStore.get(convId, id);
     const prevStatus = before?.status;
@@ -1947,6 +1969,28 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   function registrationOf(req: express.Request): string | undefined {
     const raw = req.query?.registration ?? (req.body as { registration?: unknown } | undefined)?.registration;
     return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+  }
+
+  /** The caller's own registration of `name`, proved by what the request
+   *  names: its registration id (matched alone, hosted members included), or
+   *  else an exact terminal alias (pid, pane with its GUI, Orca handle),
+   *  preferring the registration in `conversationId`. Never the lone binding
+   *  of a name, so a name alone proves nothing. */
+  function callerRegistration(req: express.Request, name: string, conversationId?: string): AgentBindingEntry | undefined {
+    const registration = registrationOf(req);
+    if (registration !== undefined) return manager.bindingsOf(name).find((e) => e.registration === registration);
+    const num = (raw: unknown, min: number): number | undefined => {
+      const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+      return Number.isInteger(n) && n >= min ? n : undefined;
+    };
+    const body = (req.body ?? {}) as { pid?: unknown; paneId?: unknown };
+    const pid = num(req.query?.pid ?? body.pid, 1);
+    // WezTerm numbers panes from 0.
+    const paneId = num(req.query?.paneId ?? body.paneId, 0);
+    const weztermGui = weztermGuiOf(req);
+    const orcaTerminal = orcaOf(req);
+    if (pid === undefined && (paneId === undefined || weztermGui === undefined) && orcaTerminal === undefined) return undefined;
+    return manager.bindingEntryForTerminal(name, { pid, paneId, weztermGui, orcaTerminal }, conversationId);
   }
 
   /** The candidates of a name registered more than once, for a 403 or 409:

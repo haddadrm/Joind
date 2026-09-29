@@ -127,7 +127,9 @@ Scratchpads are per-agent, per-conversation. State blocks are per-conversation, 
 | Create | `chat_task(sender, title, description?, assignee?, priority?)` | `POST /api/tasks` |
 | List | `chat_tasks(sender?, status?, id?)` | `GET /api/tasks?status=open\|done\|all` |
 | Count | N/A (REST only) | `GET /api/tasks/count` |
-| Resolve | `chat_tasks(sender, id, response)` | `POST /api/tasks/update` `{"id","status","response"}` |
+| Resolve | `chat_tasks(sender, id, response)` | `POST /api/tasks/update` `{"id","status","response","respondedBy","registration"}` |
+
+Over REST, `respondedBy` names you only with proof: your `registration` from the join reply (or your `pid`, `paneId` with `weztermGui`, or `orcaTerminal`). A name without it is refused (403); leave `respondedBy` out to resolve anonymously.
 
 Priority: `"normal"` or `"urgent"` (urgent pulses red in web UI).
 
