@@ -28,6 +28,9 @@ Rami approved the composer menu as suggested (after Orca's attach menu), with Fo
 ### Gate round 4 (Codex, CHANGES REQUESTED, one Medium, fixed)
 - **Escape in the snippets view** (Medium). It went back to the menu list instead of closing. Escape now closes the menu from either view and returns focus to the plus button; the view's Back button still returns to the list.
 
+### Gate round 5 (Codex, PASS)
+- No High or Medium remains. Gate observed: 799 tests in 69 files, tsc clean, dependency files untouched, no dashes, no `any`.
+
 ## 2026-09-29: Dependency Audit
 
 The npm audit of master e728334 reported nine advisories (five high, three moderate, one low). Every affected parent already allowed a fixed release, so the fix is a lockfile refresh with no overrides and no major bumps. `npm audit` now reports zero.
