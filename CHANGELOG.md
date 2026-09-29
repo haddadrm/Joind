@@ -20,6 +20,10 @@ Rami chose variant A of the redesign exploration ("A feels most comfortable and 
 - **Pure helpers** in `public/ui-helpers.js`: the rail view, which sections a view shows, the offline authors, the panel's groups and the button's count and label. Covered by `tests/ui-rail-members.test.ts`. `pillsThatFit` stays in the helpers (and its tests) though the page no longer calls it.
 - Cache-bust: `style.css?v=24`, `sanitize.js?v=24`, `ui-helpers.js?v=24`, `app.js?v=24`.
 
+#### Lane 2 gate round 1 (Codex, CHANGES REQUESTED, two Mediums)
+- **Pins during a room switch** (Medium). With the Pins tab open, a switch could leave the previous room's pins on screen, and clickable, until the select answer landed. The optimistic switch now drops the list and fetches the new room by name at once; the Pins tab never paints a list whose room is not the one on screen (it shows Loading and fetches), and a pin row from a room no longer on screen does nothing when clicked. Checked with the select answer held back 1.5 s: the tab reads the new room at once.
+- **Escape with focus outside the panel** (Medium). Escape closed the panel only while focus was inside it. It now closes an open panel from anywhere, after any popover, except while a modal or overlay, the phone drawer, the mention menu or a text field outside the panel (the search box, the composer) has it. Focus returns to the opener when it was in the panel or nowhere; focus on another control stays put.
+
 ### Lane 1: tokens and type scale
 - **Six type steps** in `:root`, each a size and a line height: `--fs-meta` 11/16 (ids, times, counts, ages), `--fs-label` 12/16 (section headers, captions), `--fs-ui` 13/20 (rows, buttons, menus, cards), `--fs-body` 14/21 (messages), `--fs-title` 16/24 (room and panel titles), `--fs-display` 20/28 (empty states and onboarding).
 - **Spacing and heights.** The 4 px spacing scale `--s1` to `--s6` (4, 8, 12, 16, 24, 32) and the fixed heights `--row` 28 (sidebar row), `--ctl` 32 (toolbar control) and `--bar` 52 (conversation toolbar and sidebar head). Sidebar rows now use `--row`.

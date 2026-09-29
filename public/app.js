@@ -917,7 +917,11 @@ function renderPinsCount() {
 }
 
 function renderPinsList(body) {
-  if (!pinsState.list) {
+  // Never paint (or let anyone click) another room's pins: a list for a
+  // room that is not on screen is replaced by Loading and a fetch.
+  // loadPins resets the list and repaints this tab itself.
+  if (activeConversation && pinsState.conv !== activeConversation.id) { loadPins(false); return; }
+  if (!pinsState.list || !activeConversation) {
     var loading = document.createElement('div');
     loading.className = 'side-empty';
     loading.textContent = 'Loading pins...';
@@ -959,6 +963,7 @@ function renderPinsList(body) {
     row.title = 'Go to message #' + msg.id;
     row.addEventListener('click', function(e) {
       e.stopPropagation();
+      if (!activeConversation || activeConversation.id !== conv) return; // a row from a room no longer on screen
       if (isMobileView() || window.innerWidth <= 1024) closeSidePanel(false);
       jumpToMessage(conv, msg.id, msg);
     });
@@ -1015,10 +1020,22 @@ document.addEventListener('keydown', function(e) {
     return;
   }
   var panel = document.getElementById('side-panel');
-  if (panel && sidePanelTab && panel.contains(document.activeElement)) {
-    e.preventDefault();
-    closeSidePanel(true);
+  if (!panel || !sidePanelTab) return;
+  var active = document.activeElement;
+  var inPanel = panel.contains(active);
+  if (!inPanel) {
+    // Escape belongs to whatever else is on top or being typed in: a modal
+    // or overlay, the phone drawer, the mention menu, or a text field
+    // outside the panel (the search box, the composer).
+    if (document.querySelector('.session-modal-overlay, .crew-panel-overlay, .launch-dialog-overlay, .notify-panel-overlay, .sidebar-backdrop.visible')) return;
+    var mention = document.getElementById('mention-menu');
+    if (mention && !mention.classList.contains('hidden')) return;
+    if (active && active !== document.body && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))) return;
   }
+  e.preventDefault();
+  // Focus goes back to the opener when it was in the panel or nowhere;
+  // focus on another control stays where it is.
+  closeSidePanel(inPanel || !active || active === document.body);
 });
 
 // The room actions that do not fit a phone toolbar: export and import.
@@ -3434,6 +3451,9 @@ function selectConversation(id, after) {
     renderConversationList();
     renderDmList();
     renderPills();
+    // Pins belong to the room on screen: drop the old list and fetch the
+    // new room by name at once, not when the select answer lands.
+    loadPins(false);
   }
   var c = document.getElementById('messages');
   c.textContent = '';
