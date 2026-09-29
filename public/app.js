@@ -256,6 +256,8 @@ function connect() {
 
   ws.onopen = function() {
     dot.classList.remove('disconnected');
+    dot.title = 'Connected';
+    dot.setAttribute('aria-label', 'Connected');
     wsAuthFailures = 0;
     // Reconcile the decisions badge and mailbox partners after every (re)connection.
     if (typeof refreshDecisionsBadge === 'function') refreshDecisionsBadge();
@@ -592,6 +594,8 @@ function connect() {
   };
   ws.onclose = function(e) {
     dot.classList.add('disconnected');
+    dot.title = signedOut ? 'Signed out' : 'Disconnected, reconnecting';
+    dot.setAttribute('aria-label', dot.title);
     if (signedOut) return; // signed out: no reconnect
     // Repeated auth rejections with a user-supplied token: drop it and ask
     // again (covers typos and stale sessionStorage tokens). Injected-token
@@ -692,6 +696,8 @@ function memberAvatar(name, cls) {
 // Kept under its old name: every presence event, join, leave, rename, role
 // and typing change already calls renderPills.
 function renderPills() {
+  // An open DM shows its partner's presence and harness in the header.
+  if (activeDm && typeof syncChannelHeader === 'function') syncChannelHeader();
   // Presence shows in the DM rows and on the Crew list and page too.
   if (typeof renderDmList === 'function') renderDmList();
   if (typeof renderCrewPage === 'function') renderCrewPage();

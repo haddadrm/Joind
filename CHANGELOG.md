@@ -21,6 +21,11 @@ Rami found the build diverging from mockup A, naming the Crew section and the cr
 - **Unread while a DM is open** (Medium). A public message in the selected room, arriving while a DM was on screen, was never counted. It now counts toward that room, and returning to the room clears it.
 - **Low, fixed:** Ctrl+, no longer opens Settings while focus is in a text field, a select or an editable element.
 
+#### Lane 3b gate round 2 (Codex, PASS, two Lows fixed)
+- **Low, fixed:** the connection dot on your avatar kept saying "Connected" in its tooltip and label after the socket closed; both now follow the state (Connected, Disconnected, reconnecting, or Signed out).
+- **Low, fixed:** an open DM's header (partner avatar dot, harness, state) now refreshes on presence and roster changes.
+- Gate observed: 745 tests in 65 files, tsc clean, no dashes, no `any`.
+
 ### Lane 3: user menu and settings
 - **Your menu.** Your avatar at the rail foot (the You tab on a phone) opens a menu headed by your name and this Joind: Settings, Theme (Light theme or Dark theme, whichever is not current), Web token (with where it comes from: served, this tab, or not set) and Sign out. It opens with focus on Settings; the arrows, Home and End move and wrap; Enter or Space activates; Escape closes it and returns focus to the avatar; Tab leaves it. On a phone it is a bottom sheet.
 - **The Settings modal** replaces the settings cog, the sound toggle and the turn limit that sat in the sidebar, and the old profile popover. Sections: Profile (display name, colour), Appearance (theme), Sounds (play sounds on or off, the sound with a preview, per-agent overrides for the room's agents), Agents (the turn limit switch and count, saved to the server as before), Roles (presets, custom roles with delete, and add; a name that exists says so; the added role shows under the label the server keeps), Web token (masked to its last four characters, its source, Change or Enter token when the tab supplied it, Sign out) and View (Clear view). It is a modal dialog: focus starts on the display name, Tab wraps inside it, Escape, Done, the close button or a click outside closes it, and focus returns to what opened it. The Web token menu item opens it at that section. On a phone it is a bottom sheet.
