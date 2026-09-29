@@ -1262,7 +1262,12 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
     const partner = req.query.with as string | undefined;
     if (partner) {
-      res.json({ partner, messages: collectDmThread(manager, viewer, partner) });
+      // Where a DM to this partner would go now (the same rule as
+      // /api/dm/send), so the composer can say up front that a remote room
+      // takes no attachments. The send still decides for itself.
+      const routesTo = resolveDmTargetConversation(manager, viewer, partner);
+      const routeRoom = routesTo ? manager.getRoom(routesTo) : undefined;
+      res.json({ partner, messages: collectDmThread(manager, viewer, partner), routesTo, routesToRemote: routeRoom instanceof MirrorRoom });
       return;
     }
     res.json({ partners: collectDmPartners(manager, viewer) });

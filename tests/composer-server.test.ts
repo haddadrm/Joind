@@ -266,6 +266,9 @@ describe("composer routes", { timeout: 30_000 }, () => {
     const m = S.manager.getRoom(d.json.conversationId as string)!.getMessageById(d.json.id as number)!;
     expect(m.images).toEqual(IMG(2));
     expect((await call(S.baseUrl, "POST", "/api/dm/send", { to: "Kira", text: "bad", images: ["http://x/y.png"], token: WEB })).status).toBe(400);
+     const thread = await (await fetch(`${S.baseUrl}/api/dms?with=Kira&token=${WEB}`)).json() as { routesTo: string; routesToRemote: boolean };
+    expect(thread.routesTo).toBe(d.json.conversationId);
+    expect(thread.routesToRemote).toBe(false);
   });
 
   it("export writes every image of a message", async () => {

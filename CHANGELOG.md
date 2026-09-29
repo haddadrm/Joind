@@ -15,6 +15,10 @@ Rami approved the composer menu as suggested (after Orca's attach menu), with Fo
 - Tests: `tests/composer-server.test.ts` (routes, auth, validation, the schema through agent reads and the mirror), `tests/composer-ui.test.ts` (the helpers and the link card through marked, the sanitizer and the shipped `decorateLinkCards`), a remote-room case in `tests/linked-servers-gate7.test.ts`. Browser checks (Playwright on a throwaway server): the menu by mouse and keyboard, three images in one message, drop, URL cards with javascript: and data: refused, snippets from Settings and the menu, at 1280 and 400 px.
 - Cache-bust: `?v=30`.
 
+### Gate round 1 (Codex, CHANGES REQUESTED, two Mediums, both fixed)
+- **A DM routed into a remote room** (Medium). The composer judged remoteness only for rooms, so in a DM whose partner lives in a remote room it offered attachments the send then refused. `GET /api/dms?with=` now also answers `routesTo` and `routesToRemote` (the same rule `/api/dm/send` uses), and the composer refuses attachments up front in such a DM. The send still decides for itself.
+- **Image order** (Medium). Uploads run side by side and joined the draft as each finished, so a slow first image went out last. Each image now takes its place in the draft when chosen (shown as a placeholder while it uploads), so the message keeps the order they were picked. A browser check delays the first upload and confirms the order.
+
 ## 2026-09-29: Dependency Audit
 
 The npm audit of master e728334 reported nine advisories (five high, three moderate, one low). Every affected parent already allowed a fixed release, so the fix is a lockfile refresh with no overrides and no major bumps. `npm audit` now reports zero.

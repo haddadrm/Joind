@@ -1805,11 +1805,16 @@ function jumpToBottom() {
 // Remote rooms refuse attachments on the server; the composer says so first.
 var MAX_COMPOSER_IMAGES = 10;
 var MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-var pendingImages = []; // [{ url, name }] attached to the current draft
+// Slots in the order the images were chosen: { url, name }, url null while
+// its upload runs, so a slow first upload still goes out first.
+var pendingImages = [];
 var imageUploadsInFlight = 0;
+// Where the open DM would be routed, from its thread read: { partner, remote }.
+var dmRoute = null;
 
 function composerIsRemote() {
-  return !activeDm && !!activeConversation && isRemoteConversation(activeConversation.id);
+  if (activeDm) return !!(dmRoute && dmRoute.partner === activeDm && dmRoute.remote);
+  return !!activeConversation && isRemoteConversation(activeConversation.id);
 }
 
 function attachmentsRefusedHere() {
@@ -1845,19 +1850,23 @@ function addImageFiles(files) {
   if (list.length === 0) return;
   if (attachmentsRefusedHere()) return;
   showComposerError('');
-  var fit = window.joindUi.imagesThatFit(pendingImages.length + imageUploadsInFlight, list.length, MAX_COMPOSER_IMAGES);
+  var fit = window.joindUi.imagesThatFit(pendingImages.length, list.length, MAX_COMPOSER_IMAGES);
   var notes = [];
   if (fit.refused > 0) notes.push('At most ' + MAX_COMPOSER_IMAGES + ' images per message; ' + fit.refused + ' not added.');
   list.slice(0, fit.take).forEach(function(file) {
     if (file.size > MAX_UPLOAD_BYTES) { notes.push('"' + (file.name || 'image') + '" is over 25 MB.'); return; }
+    var slot = { url: null, name: file.name || 'image' };
+    pendingImages.push(slot);
     imageUploadsInFlight++;
     renderImageStrip();
     uploadFile(file).then(function(url) {
       imageUploadsInFlight--;
-      pendingImages.push({ url: url, name: file.name || 'image' });
+      slot.url = url;
       renderImageStrip();
     }).catch(function() {
       imageUploadsInFlight--;
+      var at = pendingImages.indexOf(slot);
+      if (at >= 0) pendingImages.splice(at, 1);
       renderImageStrip();
       showComposerError('Could not upload "' + (file.name || 'image') + '".');
     });
@@ -1872,6 +1881,13 @@ function renderImageStrip() {
   if (!bar || !strip) return;
   strip.textContent = '';
   pendingImages.forEach(function(img, i) {
+    if (!img.url) {
+      var wait = document.createElement('div');
+      wait.className = 'image-thumb uploading';
+      wait.setAttribute('aria-hidden', 'true');
+      strip.appendChild(wait);
+      return;
+    }
     var cell = document.createElement('div');
     cell.className = 'image-thumb';
     var pic = document.createElement('img');
@@ -1896,13 +1912,7 @@ function renderImageStrip() {
     cell.appendChild(rm);
     strip.appendChild(cell);
   });
-  for (var k = 0; k < imageUploadsInFlight; k++) {
-    var wait = document.createElement('div');
-    wait.className = 'image-thumb uploading';
-    wait.setAttribute('aria-hidden', 'true');
-    strip.appendChild(wait);
-  }
-  var n = pendingImages.length;
+  var n = pendingImages.length - imageUploadsInFlight;
   label.textContent = imageUploadsInFlight > 0
     ? 'Uploading ' + imageUploadsInFlight + (imageUploadsInFlight === 1 ? ' image' : ' images') + '...'
     : n + (n === 1 ? ' image attached' : ' images attached');
@@ -6433,6 +6443,7 @@ function refreshDmThread(name) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (mySeq !== dmFetchSeq || activeDm !== name) return; // superseded
+      dmRoute = { partner: name, remote: data.routesToRemote === true };
       // Merge the snapshot with anything that arrived over the socket while
       // the fetch was in flight: union by (conversation, id), then order.
       dmThread = mergeDmThread(dmThread, data.messages || []);

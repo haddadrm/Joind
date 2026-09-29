@@ -204,6 +204,10 @@ describe("gate round 7, routes", { timeout: 20_000 }, () => {
     expect(dm.json.error).toBe("Attachments are not supported in remote rooms");
     expect(mirror.queuedCount()).toBe(0);
     expect(A.manager.getRoom(roomX)!.messageCount()).toBe(before);
+    // The thread read says where the DM goes, so the composer can refuse first.
+    const thread = await (await fetch(`${B.baseUrl}/api/dms?with=Kira&token=${WEB}`)).json() as { routesTo: string; routesToRemote: boolean };
+    expect(thread.routesTo).toBe(remote);
+    expect(thread.routesToRemote).toBe(true);
   });
 
   it("finding 3: a selection answers with its own room's metadata and contents when another selection lands meanwhile", async () => {
