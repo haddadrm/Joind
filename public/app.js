@@ -524,9 +524,8 @@ function connect() {
         break;
       case 'roles-updated':
         availableRoles = event.data;
-        // An open Settings modal shows the new roles, unless someone is typing in its form.
-        var rolesSec = document.getElementById('settings-roles');
-        if (rolesSec && !rolesSec.contains(document.activeElement)) renderRolesInto(rolesSec);
+        // An open Settings modal shows the new roles, at once or when focus leaves the section.
+        refreshSettingsPart(document.getElementById('settings-roles'), renderRolesInto);
         break;
       case 'web-rename-ok':
         // Server re-registered the name and rebound this socket; nothing else needed.
@@ -678,6 +677,8 @@ function memberAvatar(name, cls) {
 // Kept under its old name: every presence event, join, leave, rename, role
 // and typing change already calls renderPills.
 function renderPills() {
+  // An open Settings modal lists the room's agents for per-agent sounds.
+  if (settingsOverlay) refreshSettingsPart(document.getElementById('settings-agent-sounds'), renderAgentSoundsInto);
   var m = roomMembers();
   renderMembersButton(m);
   if (sidePanelTab === 'members') renderSidePanel(m);
@@ -2528,30 +2529,62 @@ function buildSoundsSection() {
   both.appendChild(global);
   both.appendChild(preview);
   sec.appendChild(settingsRow('Sound', 'The default for every agent', both, 'settings-sound').row);
-  if (agents.length > 0) {
-    var hint = settingsRow('Per agent', 'Overrides for the agents in this room', null);
-    sec.appendChild(hint.row);
-    var grid = document.createElement('div');
-    grid.className = 'settings-agent-sounds';
-    agents.forEach(function(a, i) {
-      var id = 'settings-agent-sound-' + i;
-      var lbl = document.createElement('label');
-      lbl.className = 'settings-agent-name';
-      lbl.htmlFor = id;
-      lbl.textContent = a.name;
-      lbl.title = a.name;
-      lbl.style.color = getSenderColor(a.name);
-      var sel = soundSelect(id, soundSettings[a.name] || '', true, function(v) {
-        if (v === '') delete soundSettings[a.name];
-        else soundSettings[a.name] = v;
-        saveSoundSettings();
-      });
-      grid.appendChild(lbl);
-      grid.appendChild(sel);
-    });
-    sec.appendChild(grid);
-  }
+  // The room's agents change while the modal is open (joins, leaves,
+  // renames): this part is re-rendered from renderPills.
+  var perAgent = document.createElement('div');
+  perAgent.id = 'settings-agent-sounds';
+  renderAgentSoundsInto(perAgent);
+  sec.appendChild(perAgent);
   return sec;
+}
+
+function renderAgentSoundsInto(wrap) {
+  wrap.textContent = '';
+  if (agents.length === 0) return;
+  wrap.appendChild(settingsRow('Per agent', 'Overrides for the agents in this room', null).row);
+  var grid = document.createElement('div');
+  grid.className = 'settings-agent-sounds';
+  agents.forEach(function(a, i) {
+    var id = 'settings-agent-sound-' + i;
+    var lbl = document.createElement('label');
+    lbl.className = 'settings-agent-name';
+    lbl.htmlFor = id;
+    lbl.textContent = a.name;
+    lbl.title = a.name;
+    lbl.style.color = getSenderColor(a.name);
+    // Each choice is saved as it is made, so a re-render loses nothing.
+    var sel = soundSelect(id, soundSettings[a.name] || '', true, function(v) {
+      if (v === '') delete soundSettings[a.name];
+      else soundSettings[a.name] = v;
+      saveSoundSettings();
+    });
+    sel.setAttribute('data-agent', a.name);
+    grid.appendChild(lbl);
+    grid.appendChild(sel);
+  });
+  wrap.appendChild(grid);
+}
+
+// Re-render a part of the open Settings modal now, or, while focus is
+// inside it (someone is choosing or typing), as soon as focus leaves it.
+// One pending refresh per part; it runs only if the part is still shown.
+function refreshSettingsPart(el, render) {
+  if (!el || !el.isConnected) return;
+  if (!el.contains(document.activeElement)) { render(el); return; }
+  if (el.getAttribute('data-refresh-pending') === 'yes') return;
+  el.setAttribute('data-refresh-pending', 'yes');
+  el.addEventListener('focusout', function onOut(e) {
+    if (e.relatedTarget && el.contains(e.relatedTarget)) return; // focus moved within
+    el.removeEventListener('focusout', onOut);
+    // After the focus move finishes: re-rendering inside focusout would
+    // remove the element the browser is still blurring.
+    setTimeout(function() {
+      el.removeAttribute('data-refresh-pending');
+      if (!el.isConnected) return;
+      if (el.contains(document.activeElement)) { refreshSettingsPart(el, render); return; } // focus came back in
+      render(el);
+    }, 0);
+  });
 }
 
 function buildAgentsSection() {
@@ -2576,6 +2609,11 @@ function buildAgentsSection() {
 }
 
 function renderRolesInto(sec) {
+  // Whatever is typed in the add form survives a re-render.
+  var keepEmoji = sec.querySelector('input[placeholder="emoji"]');
+  var keepLabel = document.getElementById('settings-role-label');
+  var typedEmoji = keepEmoji ? keepEmoji.value : '';
+  var typedLabel = keepLabel && sec.contains(keepLabel) ? keepLabel.value : '';
   while (sec.children.length > 1) sec.removeChild(sec.lastChild);
   var presetRow = settingsRow('Presets', 'Built in', null);
   sec.appendChild(presetRow.row);
@@ -2627,11 +2665,13 @@ function renderRolesInto(sec) {
   emoji.placeholder = 'emoji';
   emoji.maxLength = 4;
   emoji.setAttribute('aria-label', 'Role emoji');
+  emoji.value = typedEmoji;
   var label = document.createElement('input');
   label.type = 'text';
   label.id = 'settings-role-label';
   label.className = 'setting-input';
   label.placeholder = 'role name';
+  label.value = typedLabel;
   var add = document.createElement('button');
   add.type = 'button';
   add.className = 'btn btn-sm';
@@ -2653,6 +2693,8 @@ function renderRolesInto(sec) {
           if (!(availableRoles.custom || []).some(function(x) { return x.label === role.label; })) {
             availableRoles.custom = (availableRoles.custom || []).concat([role]);
           }
+          emoji.value = '';
+          label.value = '';
           renderRolesInto(sec);
           var again = document.getElementById('settings-role-label');
           if (again) again.focus();
