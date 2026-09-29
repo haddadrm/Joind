@@ -113,7 +113,9 @@
 
 /* Light theme (redesign lane 3): the same tokens on a light ground, from
  * the variant mockups. Chosen from the user menu or Settings; stored per
- * browser as joind-theme and applied before first paint by index.html. */
+ * browser as joind-theme and applied before first paint by index.html.
+ * Every text colour clears 4.5:1 on every light ground and on its own soft
+ * tint, and white clears it on every status colour (tests/theme-contrast). */
 :root[data-theme="light"] {
   color-scheme: light;
   --bg-sidebar: #f4f2f8;
@@ -127,21 +129,21 @@
   --text: #2b2a2e;
   --text-bright: #121114;
   --text-dim: #4d4c52;
-  --text-muted: #6d6c73;
-  --accent: #7c3aed;
+  --text-muted: #5d5c63;
+  --accent: #7330e3;
   --accent-bright: #6d28d9;
-  --accent-soft: rgba(124, 58, 237, 0.10);
-  --accent-hover: rgba(124, 58, 237, 0.18);
-  --accent-glow: rgba(124, 58, 237, 0.30);
-  --success: #1f8a5c;
-  --success-soft: rgba(31, 138, 92, 0.10);
-  --success-border: rgba(31, 138, 92, 0.30);
-  --warn: #c26a06;
-  --warn-soft: rgba(194, 106, 6, 0.10);
-  --warn-border: rgba(194, 106, 6, 0.28);
-  --danger: #c8174f;
-  --danger-soft: rgba(200, 23, 79, 0.08);
-  --danger-border: rgba(200, 23, 79, 0.28);
+  --accent-soft: rgba(115, 48, 227, 0.10);
+  --accent-hover: rgba(115, 48, 227, 0.18);
+  --accent-glow: rgba(115, 48, 227, 0.30);
+  --success: #15693f;
+  --success-soft: rgba(21, 105, 63, 0.10);
+  --success-border: rgba(21, 105, 63, 0.30);
+  --warn: #8a4b00;
+  --warn-soft: rgba(138, 75, 0, 0.10);
+  --warn-border: rgba(138, 75, 0, 0.28);
+  --danger: #b0123f;
+  --danger-soft: rgba(176, 18, 63, 0.08);
+  --danger-border: rgba(176, 18, 63, 0.28);
   --border: rgba(0, 0, 0, 0.08);
   --border-bright: rgba(0, 0, 0, 0.14);
   --border-strong: rgba(0, 0, 0, 0.22);
@@ -3363,6 +3365,8 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
   box-shadow: 0 0 0 2px var(--bg-rail);
 }
 .rail .rail-badge.warn { background: var(--warn); color: #1a1d21; }
+/* The light theme darkens --warn for text contrast, so its badge takes white. */
+:root[data-theme="light"] .rail .rail-badge.warn { color: #fff; }
 .rail .rail-badge.task-badge-count { background: var(--accent); }
 
 /* Your avatar at the rail foot */

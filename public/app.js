@@ -294,7 +294,12 @@ function connect() {
         initTaskCount = event.data.openTaskCount || 0;
         initHasUrgent = event.data.hasUrgentTask || false;
         if (event.data.turnGuard) initTurnGuard(event.data.turnGuard);
-        if (event.data.roles) { availableRoles = event.data.roles; }
+        if (event.data.roles) {
+          availableRoles = event.data.roles;
+          // Roles may have changed while this socket was down: an open
+          // Settings modal catches up (at once, or after focus leaves it).
+          if (settingsOverlay) refreshSettingsPart(document.getElementById('settings-roles'), renderRolesInto);
+        }
         if (event.data.reactions) allReactions = event.data.reactions;
         if (activeConversation) {
           renderPills();
