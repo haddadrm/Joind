@@ -409,6 +409,9 @@ function connect() {
         // Filter: only render messages that belong to the current view
         // (channel view skips DMs; DM view skips channel traffic)
         if (!messageInCurrentView(event.data)) {
+          // A DM is open: a public message in the selected room is unread
+          // there until the room is back on screen.
+          if (activeDm) noteRoomMessage(activeConversation.id, event.data);
           break;
         }
         hideWelcome();
@@ -2913,6 +2916,9 @@ function openSettingsModal(section, opener) {
 document.addEventListener('keydown', function(e) {
   if (e.key !== ',' || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
   if (signedOut || settingsOverlay) return;
+  // Not while typing: an editable target keeps the key.
+  var t = e.target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
   e.preventDefault();
   openSettingsModal(null, document.activeElement);
 });
@@ -4773,6 +4779,7 @@ var channelRenderStamp = 0;
 var pendingDmJump = null;
 function renderChannelView() {
   channelRenderStamp++;
+  if (activeConversation) clearRoomUnread(activeConversation.id);
   if (pendingDmJump) {
     var j = pendingDmJump;
     if (Date.now() > j.deadline) {
