@@ -16,6 +16,9 @@ Three fixes from Rami's first day with the UI lane, on branch `ui-refs-search`.
 - **Stale search results stayed actionable during the debounce** (Medium). Between a keystroke and the debounced query, an older go-to fetch or mentions page could land and be clicked under the new text. Every input event now invalidates the search sequence, and the old results are inert (neither clickable nor focusable) and dimmed until the new query renders; a chip removal or Clear does the same. The go-to result fills in only while it is still attached, so paging the mentions (More) before it loads no longer leaves it on "Loading".
 - **Found alongside, fixed:** a pill rebuild (a presence event, the minute tick) dropped keyboard focus from a pill or the chip; focus now returns to the same pill, or to the chip when that pill moved behind it. A rebuild while the +N list is open hands the list to the new chip, so `aria-expanded` stays true and Escape returns focus to the chip on screen.
 
+### Gate round 2 (Codex, CHANGES REQUESTED, one Medium)
+- **The open +N list went stale on a rebuild** (Medium). A presence change rebuilt the strip but left the list as it was, so a member who had left stayed listed and clickable, and a list could stay open with no chip once everyone fit. A refit now rebuilds an open list from the new overflow members, or closes it when nothing overflows. Focus inside the list follows the same member, else the first row; when the list closes, focus goes to the first pill. `aria-expanded` is set by the rebuilt list.
+
 ## 2026-09-28: Message Links, Search Filters, Resizable Sidebar
 
 The web UI gains three things: `#N` message references become links, search takes filters and pages over the room being viewed, and the left sidebar resizes by drag or keyboard. Branch `ui-refs-search` off `hosted-verdict` 16c5964.

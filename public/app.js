@@ -751,26 +751,58 @@ function pillStripAvailable(c) {
   return Math.floor(Math.min(inner * PILL_STRIP_SHARE, inner - others - gap - PILL_TITLE_MIN) - pad) - 1;
 }
 
+// Refit the strip. An open +N list is rebuilt from the new overflow (so a
+// member who left or now fits is not listed), or closed when nothing
+// overflows any more; focus inside it follows the same member, else the
+// first row, else the first pill.
 function fitPills() {
   var c = document.getElementById('agent-pills');
   if (!c) return;
+  var listOpen = !!(openPopover && openPopover.classList.contains('pill-overflow'));
+  var listFocus = null;
+  if (listOpen && openPopover.contains(document.activeElement)) {
+    listFocus = document.activeElement.getAttribute('data-agent') || '';
+  }
+  var chip = layoutPills(c);
+  if (!listOpen) return;
+  if (!chip) {
+    closePopover();
+    if (listFocus !== null) {
+      var first = c.querySelector('.agent-pill:not([hidden])');
+      if (first) first.focus();
+    }
+    return;
+  }
+  showPillOverflow(chip, false);
+  if (listFocus === null || !openPopover) return;
+  var rows = openPopover.querySelectorAll('.pill-overflow-row');
+  var target = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].getAttribute('data-agent') === listFocus) { target = rows[i]; break; }
+  }
+  target = target || rows[0] || chip;
+  target.focus();
+}
+
+// Lay the strip out; returns the +N chip, or null when every pill shows.
+function layoutPills(c) {
   var oldChip = c.querySelector('.pill-more-item');
   if (oldChip) oldChip.remove();
   c.classList.remove('pills-compact');
   var pills = Array.prototype.slice.call(c.querySelectorAll('.agent-pill'));
   pills.forEach(function(p) { p.hidden = false; });
   pillOverflow = [];
-  if (pills.length === 0 || !window.joindUi) return;
+  if (pills.length === 0 || !window.joindUi) return null;
   var avail = pillStripAvailable(c);
-  if (avail <= 0) return; // not laid out (hidden header): the next resize refits
+  if (avail <= 0) return null; // not laid out (hidden header): the next resize refits
   var gap = parseFloat(getComputedStyle(c).columnGap) || 0;
   var measure = function() { return pills.map(function(p) { return p.getBoundingClientRect().width; }); };
   var fit = window.joindUi.pillsThatFit;
-  if (fit(measure(), avail, gap, 0) === pills.length) return;
+  if (fit(measure(), avail, gap, 0) === pills.length) return null;
   // Short on space: drop the role and status text before any pill.
   c.classList.add('pills-compact');
   var widths = measure();
-  if (fit(widths, avail, gap, 0) === pills.length) return;
+  if (fit(widths, avail, gap, 0) === pills.length) return null;
   var item = document.createElement('div');
   item.className = 'pill-more-item';
   item.setAttribute('role', 'listitem');
@@ -795,11 +827,7 @@ function fitPills() {
     // detail 0: activated from the keyboard, so focus moves into the list.
     showPillOverflow(chip, e.detail === 0);
   });
-  // A refit while the list is open: the new chip owns the open list.
-  if (openPopover && openPopover.classList.contains('pill-overflow')) {
-    chip.setAttribute('aria-expanded', 'true');
-    popoverOnClose = function() { chip.setAttribute('aria-expanded', 'false'); };
-  }
+  return chip;
 }
 
 // The chip on screen now (a refit replaces it), for focus and anchoring.
@@ -846,6 +874,7 @@ function showPillOverflow(chip, fromKeyboard) {
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'pill-overflow-row ' + x.presence;
+    row.setAttribute('data-agent', x.a.name || '');
     row.title = x.title;
     var dot = document.createElement('span');
     dot.className = 'pill-dot';
