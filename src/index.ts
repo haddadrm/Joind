@@ -809,7 +809,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // The token first: without it, nothing about the rooms is revealed.
     if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     // An explicit conversation wins over the active one (a remote room is "<server>:<room>").
-    const room = typeof conversation === "string" && conversation ? manager.getRoom(conversation) : activeRoom(res);
+    const room = conversation !== undefined ? viewedRoom(conversation) : activeRoom(res);
     if (!room) { if (!res.headersSent) res.status(404).json({ error: "Conversation not found" }); return; }
     if (!sender || !text) {
       res.status(400).json({ error: "sender and text required" });
@@ -869,7 +869,20 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
    */
   function viewedRoom(conv: unknown): ChatRoom | undefined {
     if (conv === undefined) return manager.getActiveRoom();
-    return typeof conv === "string" && conv ? manager.getRoom(conv) : undefined;
+    return typeof conv === "string" && conv.trim() ? manager.getRoom(conv) : undefined;
+  }
+
+  /**
+   * The room id a request's `conversation` parameter asks for: the named id,
+   * else (only when the parameter is absent) the active room's id. An empty
+   * or blank value, or one that is not a string, names no room and is never
+   * read as absent: `bad` is then true with no id, and the route answers 404
+   * instead of serving the active room.
+   */
+  function conversationParam(conv: unknown): { id: string | undefined; named: boolean; bad: boolean } {
+    if (conv === undefined) return { id: manager.getActiveId() ?? undefined, named: false, bad: false };
+    if (typeof conv === "string" && conv.trim()) return { id: conv, named: true, bad: false };
+    return { id: undefined, named: true, bad: true };
   }
 
   /** The id of the room viewedRoom resolved, for answers that name it. */
@@ -905,7 +918,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.json({ conversation: viewedRoomId(conv), anchor: id, ...win });
       return;
     }
-    const room = typeof conv === "string" && conv ? manager.getRoom(conv) : manager.getActiveRoom();
+    // A named room (an empty value included) that is not here is a 404,
+    // never the active room in its place.
+    const room = viewedRoom(conv);
+    if (!room && conv !== undefined) { res.status(404).json({ error: "Conversation not found" }); return; }
     const from = req.query.from as string | undefined;
     // Viewer is the registered web name, never the request (fails closed).
     if (room instanceof MirrorRoom && !from) { res.json(room.readForView(100, webViewer())); return; }
@@ -1085,7 +1101,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // The UI removes a member from the conversation it has selected, and only
     // that conversation's registration: the same name elsewhere (another GUI,
     // another room) is another registration (gate round 3, finding 3).
-    const convId = conversation ?? manager.getActiveId() ?? undefined;
+    const convId = conversationParam(conversation).id;
     const room = convId ? manager.getRoom(convId) : undefined;
     if (!convId || !room) { res.status(404).json({ error: "Conversation not found" }); return; }
     manager.supersedeJoins(name);
@@ -1102,8 +1118,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   app.post("/api/rename", express.json(), (req, res) => {
     if (!requireWebToken(req, res)) return;
     const { oldName, newName, conversation } = req.body as { oldName?: string; newName?: string; conversation?: string };
-    const convId = conversation ?? manager.getActiveId() ?? undefined;
+    const target = conversationParam(conversation);
+    const convId = target.id;
     const room = convId ? manager.getRoom(convId) : undefined;
+    if (target.named && !room) { res.status(404).json({ error: "Conversation not found" }); return; }
     if (!convId || !room) { res.status(400).json({ error: "No active conversation. Create or select one." }); return; }
     if (!oldName || !newName) { res.status(400).json({ error: "oldName and newName required" }); return; }
     // The registration being renamed is this conversation's, from the member's
@@ -1230,7 +1248,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
       // Message ids are per conversation; the panel resolves across rooms, so
       // an explicit conversation id wins over whatever room happens to be active.
-      room = conversation ? manager.getRoom(conversation) : manager.getActiveRoom();
+      room = viewedRoom(conversation);
       const viewer = webViewer();
       if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
       by = viewer;
@@ -1536,7 +1554,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   app.get("/api/agent/scratchpad", (req, res) => {
     const sender = req.query.sender as string;
     if (!sender) { res.status(400).json({ error: "sender param required" }); return; }
-    const convId = (req.query.conversation as string) || manager.getActiveId() || "";
+    const target = conversationParam(req.query.conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const convId = target.id ?? "";
     const key = `${convId}:${sender}`;
     res.json({ notes: scratchpads[key] || "" });
   });
@@ -1544,7 +1564,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   app.post("/api/agent/scratchpad", express.json(), (req, res) => {
     const { sender, notes, conversation } = req.body as { sender?: string; notes?: string; conversation?: string };
     if (!sender) { res.status(400).json({ error: "sender required" }); return; }
-    const convId = conversation || manager.getActiveId() || "";
+    const target = conversationParam(conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const convId = target.id ?? "";
     const key = `${convId}:${sender}`;
     if (notes) {
       scratchpads[key] = notes;
@@ -1570,14 +1592,18 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   const stateBlocks = loadStateBlocks();
 
   app.get("/api/state", (req, res) => {
-    const convId = (req.query.conversation as string) || manager.getActiveId() || "";
+    const target = conversationParam(req.query.conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const convId = target.id ?? "";
     res.json(stateBlocks[convId] || {});
   });
 
   app.post("/api/state", express.json(), (req, res) => {
     const { conversation, key, value } = req.body as { conversation?: string; key?: string; value?: string };
     if (!key) { res.status(400).json({ error: "key required" }); return; }
-    const convId = conversation || manager.getActiveId() || "";
+    const target = conversationParam(conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const convId = target.id ?? "";
     if (!stateBlocks[convId]) stateBlocks[convId] = {};
     if (value) {
       stateBlocks[convId][key] = value;
@@ -1802,7 +1828,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       res.json(out);
       return;
     }
-    const convId = (req.query.conversation as string) || manager.getActiveId();
+    const target = conversationParam(req.query.conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const convId = target.id;
     if (!convId) { res.json([]); return; }
     const status = (req.query.status as string) || "open";
     const assignee = req.query.assignee as string | undefined;
@@ -1810,7 +1838,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.get("/api/tasks/count", (req, res) => {
-    const convId = (req.query.conversation as string) || manager.getActiveId();
+    const target = conversationParam(req.query.conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const convId = target.id;
     if (!convId) { res.json({ count: 0, hasUrgent: false }); return; }
     res.json({
       count: taskStore.countOpen(convId),
@@ -1824,7 +1854,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       assignee?: string; priority?: "normal" | "urgent"; conversation?: string;
     };
     if (!title || !creator) { res.status(400).json({ error: "title and creator required" }); return; }
-    const convId = conversation || manager.getActiveId();
+    const target = conversationParam(conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const convId = target.id;
     if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
     if (manager.isRemote(convId)) { res.status(400).json({ error: "Tasks of a remote room are created on its home server" }); return; }
 
@@ -1877,20 +1909,22 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     // registration id, pid, pane (with its GUI) or Orca handle it sends,
     // never by the name alone. Without a named responder the resolution
     // stays anonymous, as before.
+    const target = conversationParam(conversation);
+    if (target.bad) { res.status(404).json({ error: "Conversation not found" }); return; }
     let callerConv: string | undefined;
     if (!announce && respondedBy !== undefined) {
       if (typeof respondedBy !== "string" || validWebName(respondedBy) === null) {
         res.status(400).json({ error: "respondedBy must be a name" });
         return;
       }
-      const caller = callerRegistration(req, respondedBy, typeof conversation === "string" && conversation ? conversation : undefined);
+      const caller = callerRegistration(req, respondedBy, target.named ? target.id : undefined);
       if (!caller) {
         res.status(403).json({ error: "respondedBy must be the caller: pass your registration (from your join reply), pid, paneId with weztermGui, or orcaTerminal" });
         return;
       }
       callerConv = caller.conversationId;
     }
-    const convId = conversation || callerConv || manager.getActiveId();
+    const convId = target.named ? target.id : callerConv ?? target.id;
     if (!convId) { res.status(400).json({ error: "No active conversation" }); return; }
     if (manager.isRemote(convId)) { res.status(400).json({ error: "Tasks of a remote room are resolved on its home server" }); return; }
     if (callerConv !== undefined && callerConv !== convId) {
@@ -2079,6 +2113,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     }
 
     // Resolve conversation (a remote room "<server>:<room>" through its link)
+    // A conversation that is named but empty names no room: never the active one.
+    if (conversation !== undefined && conversationParam(conversation).bad) { res.status(404).json({ error: "Conversation not found" }); return; }
     let convId = conversation;
     if (convId && linkRegistry.isRemoteId(convId) && !(await linkRegistry.prepare(convId))) {
       res.status(404).json({ error: "Conversation not found (its home server has no such room, or cannot be reached)" }); return;

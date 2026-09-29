@@ -5,6 +5,7 @@
 Five small fixes approved by Rami, built on branch `hygiene`, one commit each.
 
 - **Task resolutions name only the caller.** A token-less `POST /api/tasks/update` that names `respondedBy` must prove it is that member: its registration id from the join reply (hosted members included), or its own pid, pane with its GUI, or Orca handle. The name alone, another member's id or terminal, or a room the caller is not registered in is refused (403); a responder that is not a name is a 400. Without a named conversation the caller's own room is used, not the active one. Anonymous resolutions (no `respondedBy`) and the web board are unchanged. Tests: `tests/task-responder.test.ts`.
+- **An empty `conversation` names no room.** `GET /api/messages` read an empty `conversation` as absent and served the active room; an empty, blank or non-string value is now a 404, and so is a named room that is not here (it answered an empty list). The same rule now holds on every route that takes `conversation`: `/api/send`, `/api/message/:id/resolve` (web path), `/api/leave`, `/api/rename`, `GET` and `POST /api/tasks`, `/api/tasks/count`, `/api/tasks/update`, `GET` and `POST /api/agent/scratchpad`, `GET` and `POST /api/state`, and `/api/agent/join`. Absent still means the active room. Routes that already refused it (pins, message, search, choose, messages delete) are unchanged. The MCP `chat_join` tool still reads an empty conversation as absent; it is not a route. Tests: `tests/conversation-param.test.ts`.
 
 ## 2026-09-29: Backlog After the Composer
 
