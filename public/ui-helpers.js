@@ -186,7 +186,53 @@
     return out;
   }
 
+  // --- Redesign lane 6: the command palette ---
+
+  // How well a query matches a label: 0 for no match; higher is better. A
+  // prefix of the label beats a word start, which beats a substring, which
+  // beats letters in order (subsequence). Case-insensitive; spaces in the
+  // query are ignored for the subsequence test.
+  function paletteScore(query, label) {
+    var q = String(query == null ? '' : query).trim().toLowerCase();
+    var l = String(label == null ? '' : label).toLowerCase();
+    if (!q) return 1;
+    if (l.indexOf(q) === 0) return 400 - Math.min(l.length, 200);
+    var words = l.split(/[^a-z0-9]+/);
+    for (var i = 0; i < words.length; i++) {
+      if (words[i] && words[i].indexOf(q) === 0) return 300 - Math.min(l.length, 200);
+    }
+    if (l.indexOf(q) >= 0) return 200 - Math.min(l.length, 200);
+    var qs = q.replace(/\s+/g, '');
+    var at = 0;
+    for (var k = 0; k < l.length && at < qs.length; k++) {
+      if (l[k] === qs[at]) at++;
+    }
+    return at === qs.length ? 100 - Math.min(l.length, 99) : 0;
+  }
+
+  // The items that match, best first; equal scores keep their given order
+  // (so groups stay in the order the palette lists them). Each item has a
+  // label and optional keywords that also match. At most `limit`.
+  function paletteRank(items, query, limit) {
+    var max = limit == null ? 50 : limit;
+    return (items || [])
+      .map(function(item, i) {
+        var s = paletteScore(query, item.label);
+        if (item.keywords) {
+          var ks = paletteScore(query, item.keywords);
+          if (ks > 0) s = Math.max(s, Math.round(ks / 2));
+        }
+        return { item: item, i: i, s: s };
+      })
+      .filter(function(x) { return x.s > 0; })
+      .sort(function(a, b) { return b.s - a.s || a.i - b.i; })
+      .slice(0, max)
+      .map(function(x) { return x.item; });
+  }
+
   return {
+    paletteScore: paletteScore,
+    paletteRank: paletteRank,
     boardColumns: boardColumns,
     filterBoardTasks: filterBoardTasks,
     groupByStatus: groupByStatus,

@@ -178,3 +178,39 @@ describe("board helpers (lane 5)", () => {
     expect(b.groupByStatus([])).toEqual({ open: [], in_progress: [], review: [], done: [] });
   });
 });
+
+interface PaletteItem { label: string; keywords?: string }
+interface PaletteHelpers {
+  paletteScore(query: string, label: string): number;
+  paletteRank<T extends PaletteItem>(items: T[], query: string, limit?: number): T[];
+}
+describe("palette ranking (lane 6)", () => {
+  const p = ui as unknown as PaletteHelpers;
+  it("scores a prefix over a word start over a substring over letters in order", () => {
+    const prefix = p.paletteScore("cpm", "cpm-engine");
+    const word = p.paletteScore("eng", "cpm-engine");
+    const sub = p.paletteScore("ngin", "cpm-engine");
+    const seq = p.paletteScore("cpe", "cpm-engine");
+    expect(prefix).toBeGreaterThan(word);
+    expect(word).toBeGreaterThan(sub);
+    expect(sub).toBeGreaterThan(seq);
+    expect(seq).toBeGreaterThan(0);
+    expect(p.paletteScore("xyz", "cpm-engine")).toBe(0);
+  });
+  it("ignores case and spaces; an empty query matches everything", () => {
+    expect(p.paletteScore("CPM", "cpm-engine")).toBeGreaterThan(0);
+    expect(p.paletteScore("light theme", "Light theme")).toBeGreaterThan(0);
+    expect(p.paletteScore("", "anything")).toBe(1);
+    expect(p.paletteScore("  ", "anything")).toBe(1);
+  });
+  it("ranks best first, keeps order on ties, uses keywords, honours the limit", () => {
+    const items: PaletteItem[] = [
+      { label: "#joind-ui" }, { label: "#cpm-engine" }, { label: "Settings", keywords: "preferences options" }, { label: "#cpm-lab" },
+    ];
+    expect(p.paletteRank(items, "cpm").map((i) => i.label)).toEqual(["#cpm-lab", "#cpm-engine"]);
+    expect(p.paletteRank(items, "pref").map((i) => i.label)).toEqual(["Settings"]);
+    expect(p.paletteRank(items, "").map((i) => i.label)).toEqual(["#joind-ui", "#cpm-engine", "Settings", "#cpm-lab"]);
+    expect(p.paletteRank(items, "", 2).length).toBe(2);
+    expect(p.paletteRank(items, "zzz")).toEqual([]);
+  });
+});

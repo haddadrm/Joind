@@ -1085,7 +1085,7 @@ document.addEventListener('keydown', function(e) {
     // Escape belongs to whatever else is on top or being typed in: a modal
     // or overlay, the phone drawer, the mention menu, or a text field
     // outside the panel (the search box, the composer).
-    if (document.querySelector('.session-modal-overlay, .crew-panel-overlay, .launch-dialog-overlay, .notify-panel-overlay, .settings-overlay, .signed-out-overlay, .sidebar-backdrop.visible')) return;
+    if (document.querySelector('.session-modal-overlay, .crew-panel-overlay, .launch-dialog-overlay, .notify-panel-overlay, .settings-overlay, .signed-out-overlay, .palette-overlay, .sidebar-backdrop.visible')) return;
     var mention = document.getElementById('mention-menu');
     if (mention && !mention.classList.contains('hidden')) return;
     if (active && active !== document.body && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))) return;
@@ -1107,7 +1107,7 @@ function openConvMore(evt) {
   pop.setAttribute('role', 'menu');
   pop.setAttribute('aria-label', 'More room actions');
   pop.addEventListener('click', function(e) { e.stopPropagation(); });
-  var items = [['Search in room', function() { toggleSearch(); }], ['Export this room', exportChat], ['Import a room', openImportDialog]];
+  var items = [['Jump to...', function() { openPalette(); }], ['Search in room', function() { toggleSearch(); }], ['Export this room', exportChat], ['Import a room', openImportDialog]];
   var buttons = items.map(function(it) {
     var b = document.createElement('button');
     b.type = 'button';
@@ -4660,6 +4660,213 @@ function renderBoard() {
     if (f) f.focus();
   }
 }
+
+// --- The command palette (redesign lane 6, from variant B) ---
+// Ctrl+K (Cmd+K on a Mac) anywhere, or "Jump to" in the phone's More menu:
+// one box that jumps to a room, a linked room, a DM, a page, a message by
+// number, or runs a room action. Type to filter (best match first), arrows
+// to move, Enter to run, Escape to close; focus returns to where it was.
+var palette = { overlay: null, opener: null, items: [], shown: [], at: 0 };
+
+function paletteItems(query) {
+  var items = [];
+  var n = window.joindUi ? window.joindUi.parseBareMessageNumber(query) : null;
+  if (n && activeConversation) {
+    items.push({ group: 'Go to', label: 'Go to message #' + n, hint: activeDm ? 'in this DM view' : 'in #' + activeConversation.name, always: true,
+      run: function() { jumpToMessage(currentConvId(), n); } });
+  }
+  conversationList.forEach(function(c) {
+    var u = roomUnread[c.id] || 0;
+    items.push({ group: 'Rooms', label: '#' + c.name, keywords: c.name, hint: u > 0 ? u + ' unread' : 'Room',
+      run: function() { if (!activeConversation || activeConversation.id !== c.id || activeDm || pageNow) selectConversation(c.id); } });
+  });
+  remoteConversations.forEach(function(c) {
+    items.push({ group: 'Rooms', label: c.name, keywords: 'remote ' + c.server + ' ' + c.name, hint: 'remote: ' + c.server,
+      run: function() { selectConversation(c.id); } });
+  });
+  var dmNames = [];
+  agents.forEach(function(a) { if (dmNames.indexOf(a.name) < 0) dmNames.push(a.name); });
+  dmPartnersCache.forEach(function(p) { if (p !== myName() && dmNames.indexOf(p) < 0) dmNames.push(p); });
+  dmNames.forEach(function(name) {
+    var st = presenceOf(name);
+    items.push({ group: 'Direct messages', label: name, keywords: 'dm direct message ' + name, hint: 'DM, ' + st.short,
+      run: function() { selectDm(name); } });
+  });
+  var waiting = decisionsCache ? decisionsCache.length : 0;
+  [['Rooms', 'rooms', 'Rooms and direct messages'], ['Direct messages', 'dms', 'DMs only'], ['Decisions', 'decisions', waiting > 0 ? waiting + ' waiting on you' : 'Asks across rooms'],
+    ['Tasks board', 'tasks', 'All local rooms'], ['Crew', 'crew', 'Presence, terminals and sessions']].forEach(function(p) {
+    items.push({ group: 'Pages', label: p[0], keywords: 'go page view ' + p[1], hint: p[2], run: function() { setRailView(p[1], true); } });
+  });
+  var inRoom = !!activeConversation && !activeDm && !pageNow;
+  var roomName = activeConversation ? '#' + activeConversation.name : 'this room';
+  if (activeConversation) {
+    items.push({ group: 'Actions', label: 'Search in ' + roomName, keywords: 'find search', hint: 'Room search', run: function() { if (pageNow) leavePageFor('rooms'); var bar = document.getElementById('search-bar'); if (bar && bar.classList.contains('hidden')) toggleSearch(); else { var i = document.getElementById('search-input'); if (i) i.focus(); } } });
+  }
+  if (inRoom) {
+    items.push({ group: 'Actions', label: 'Members of ' + roomName, keywords: 'members presence who', hint: 'Side panel', run: function() { openSidePanel('members', document.getElementById('members-btn')); } });
+    items.push({ group: 'Actions', label: 'Pinned messages in ' + roomName, keywords: 'pins pinned', hint: 'Side panel', run: function() { openSidePanel('pins', document.getElementById('pins-btn')); } });
+    items.push({ group: 'Actions', label: 'Export ' + roomName, keywords: 'export download markdown', hint: 'Room action', run: function() { exportChat(); } });
+  }
+  items.push({ group: 'Actions', label: 'Import a room', keywords: 'import upload json', hint: 'Room action', run: function() { openImportDialog(); } });
+  items.push({ group: 'Actions', label: 'New room', keywords: 'create conversation channel', hint: 'Rooms', run: function() { newConversation(); } });
+  items.push({ group: 'Actions', label: 'Launch an agent', keywords: 'launch start agent crew', hint: 'Crew', run: function() { openLaunchDialog(); } });
+  items.push({ group: 'Actions', label: 'New task', keywords: 'task create todo', hint: activeConversation ? roomName : 'needs a room', run: function() { if (pageNow) leavePageFor('rooms'); openNewTask(); } });
+  items.push({ group: 'Preferences', label: 'Settings', keywords: 'preferences options profile', hint: 'Ctrl ,', run: function() { openSettingsModal(null, palette.opener); } });
+  items.push({ group: 'Preferences', label: currentTheme() === 'light' ? 'Dark theme' : 'Light theme', keywords: 'theme toggle appearance', hint: 'Preference', run: function() { toggleTheme(); } });
+  items.push({ group: 'Preferences', label: isMuted ? 'Sounds on' : 'Sounds off', keywords: 'sound mute audio', hint: 'Preference', run: function() { isMuted = !isMuted; localStorage.setItem('joind-muted', JSON.stringify(isMuted)); updateMuteBtn(); } });
+  return items;
+}
+
+function openPalette() {
+  if (signedOut || settingsOverlay) return;
+  if (palette.overlay) { closePalette(true); return; }
+  closePopover();
+  palette.opener = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
+  var overlay = document.createElement('div');
+  overlay.className = 'palette-overlay';
+  overlay.addEventListener('mousedown', function(e) { if (e.target === overlay) closePalette(true); });
+  overlay.addEventListener('click', function(e) { e.stopPropagation(); });
+  var box = document.createElement('div');
+  box.className = 'palette';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  box.setAttribute('aria-label', 'Jump to');
+  var field = document.createElement('div');
+  field.className = 'palette-field';
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.id = 'palette-input';
+  input.className = 'palette-input';
+  input.placeholder = 'Jump to a room, DM, page, message number or action';
+  input.spellcheck = false;
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-expanded', 'true');
+  input.setAttribute('aria-controls', 'palette-list');
+  input.setAttribute('aria-autocomplete', 'list');
+  input.setAttribute('aria-label', 'Jump to');
+  var kbd = document.createElement('kbd');
+  kbd.textContent = 'Esc';
+  field.appendChild(input);
+  field.appendChild(kbd);
+  var list = document.createElement('div');
+  list.className = 'palette-list';
+  list.id = 'palette-list';
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', 'Results');
+  box.appendChild(field);
+  box.appendChild(list);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  palette.overlay = overlay;
+  input.addEventListener('input', function() { palette.at = 0; drawPalette(); });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (palette.shown.length === 0) return;
+      palette.at = e.key === 'ArrowDown' ? (palette.at + 1) % palette.shown.length : (palette.at - 1 + palette.shown.length) % palette.shown.length;
+      markPalette();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      runPalette(palette.at);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closePalette(true);
+    } else if (e.key === 'Tab') {
+      e.preventDefault(); // the field is the only stop; the list follows the arrows
+    }
+  });
+  drawPalette();
+  input.focus();
+}
+
+function drawPalette() {
+  if (!palette.overlay) return;
+  var input = document.getElementById('palette-input');
+  var list = document.getElementById('palette-list');
+  var q = input ? input.value : '';
+  var all = paletteItems(q);
+  var ranked = window.joindUi ? window.joindUi.paletteRank(all.filter(function(x) { return !x.always; }), q, 40) : [];
+  palette.shown = all.filter(function(x) { return x.always; }).concat(ranked);
+  list.textContent = '';
+  if (palette.shown.length === 0) {
+    var none = document.createElement('div');
+    none.className = 'palette-empty';
+    none.textContent = 'Nothing matches';
+    list.appendChild(none);
+  }
+  var lastGroup = null;
+  palette.shown.forEach(function(item, i) {
+    // Group labels only while browsing; a query ranks across groups.
+    if (!q.trim() && item.group !== lastGroup) {
+      var g = document.createElement('div');
+      g.className = 'palette-group';
+      g.setAttribute('role', 'presentation');
+      g.textContent = item.group;
+      list.appendChild(g);
+      lastGroup = item.group;
+    }
+    var opt = document.createElement('div');
+    opt.className = 'palette-item';
+    opt.id = 'palette-opt-' + i;
+    opt.setAttribute('role', 'option');
+    var label = document.createElement('span');
+    label.className = 'palette-label';
+    label.textContent = item.label;
+    var hint = document.createElement('span');
+    hint.className = 'palette-hint';
+    hint.textContent = item.hint || item.group;
+    opt.appendChild(label);
+    opt.appendChild(hint);
+    opt.addEventListener('mousemove', function() { if (palette.at !== i) { palette.at = i; markPalette(); } });
+    opt.addEventListener('click', function() { runPalette(i); });
+    list.appendChild(opt);
+  });
+  if (palette.at >= palette.shown.length) palette.at = 0;
+  markPalette();
+}
+
+function markPalette() {
+  var input = document.getElementById('palette-input');
+  var list = document.getElementById('palette-list');
+  if (!list) return;
+  list.querySelectorAll('.palette-item').forEach(function(el) {
+    var on = el.id === 'palette-opt-' + palette.at;
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-selected', on ? 'true' : 'false');
+    if (on) el.scrollIntoView({ block: 'nearest' });
+  });
+  if (input) {
+    if (palette.shown.length > 0) input.setAttribute('aria-activedescendant', 'palette-opt-' + palette.at);
+    else input.removeAttribute('aria-activedescendant');
+  }
+}
+
+function runPalette(i) {
+  var item = palette.shown[i];
+  if (!item) return;
+  closePalette(false);
+  item.run();
+}
+
+function closePalette(returnFocus) {
+  if (!palette.overlay) return;
+  palette.overlay.remove();
+  palette.overlay = null;
+  palette.shown = [];
+  var back = palette.opener;
+  palette.opener = null;
+  if (returnFocus && back && back.isConnected && back.offsetParent !== null) back.focus();
+}
+
+// Ctrl+K or Cmd+K opens it from anywhere (typing in the composer too: the
+// key has no other use there).
+document.addEventListener('keydown', function(e) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || String(e.key).toLowerCase() !== 'k') return;
+  if (signedOut || settingsOverlay) return;
+  e.preventDefault();
+  openPalette();
+});
 
 // --- The composer bar: attach, decision, task ---
 function openAttachPicker() {
