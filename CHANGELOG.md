@@ -14,6 +14,9 @@ Rami approved the lane on 29 Sep. The agent API needed no credential on a tailne
 ### Gate round 1 (Codex, CHANGES REQUESTED, one Medium, fixed)
 - **Resolve took a body-only web token under require** (Medium). The web branch of `/api/message/:id/resolve` now needs the web token (or the key) in the header or query, like every gated route; counted in warn. Rotation also ends open MCP sessions.
 
+### Gate round 2 (Codex, PASS)
+- No High or Medium. One Low, applied after the pass: the host logged a hosted member's home registration id (`src/link.ts`, present on master too); the line now says only whether one was received. Gate observed 26 agent-auth tests, the full suite and tsc clean; one vitest worker exit under load was seen once by the gate and once here, not reproduced in ten further runs.
+
 ## 2026-09-29: Backlog After the Hygiene Batch
 
 - The backlog drops what the hygiene batch shipped: token-less task attribution, the empty conversation fallback, the dead pill helper, the short wake prompt for MCP joiners, and the flaky queue-room timing test.

@@ -479,7 +479,7 @@ export class LinkClient extends EventEmitter {
   async register(body: PeerRegisterBody): Promise<PeerRegisterResult> {
     const out = await this.call<PeerRegisterResult>("POST", "/api/peer/register", body);
     // The home logs the join; the peer says what it did too, so both logs tell the story.
-    console.log(`  [link:${this.name}] registered ${body.name} in ${body.room} as hosted here (home registration ${out.registration ?? "?"})`);
+    console.log(`  [link:${this.name}] registered ${body.name} in ${body.room} as hosted here (home registration ${out.registration ? "received" : "missing"})`);
     return out;
   }
 
