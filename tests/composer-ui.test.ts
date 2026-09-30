@@ -115,11 +115,16 @@ function vendored(prefix: string): string {
   return readFileSync(join(PUB, "vendor", f), "utf8");
 }
 
-/** One top-level function's source from app.js, by name. */
-function lift(src: string, name: string): string {
+/** One top-level function's source from app.js, by name. The file is
+ *  normalised to LF first: a Windows checkout with core.autocrlf=true has
+ *  CRLF line endings, and the closing delimiter would not be found (seen on
+ *  the Y530 deploy gate, 30 Sep 2026). A missing delimiter fails loudly. */
+function lift(raw: string, name: string): string {
+  const src = raw.replace(/\r\n?/g, "\n");
   const start = src.indexOf(`function ${name}(`);
-  if (start < 0) throw new Error(`${name} not found`);
+  if (start < 0) throw new Error(`${name} not found in app.js`);
   const end = src.indexOf("\n}\n", start);
+  if (end < 0) throw new Error(`end of ${name} not found in app.js (no top-level closing brace line)`);
   return src.slice(start, end + 2);
 }
 
