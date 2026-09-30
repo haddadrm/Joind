@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-09-29: Agent Credentials (branch `agent-creds`, not merged)
+## 2026-09-29: Agent Credentials
 
 Rami approved the lane on 29 Sep. The agent API needed no credential on a tailnet bind: anyone who could reach the port could join as any free name, post as a joined agent, read rooms and trigger wakes. Design note: `docs/superpowers/specs/2026-09-29-agent-credentials-design.md`.
 
