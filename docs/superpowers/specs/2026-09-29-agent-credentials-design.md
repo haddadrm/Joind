@@ -135,6 +135,12 @@ Express router and calls every route with no credential under require.
 registration can only come from an authenticated join. Mode is a startup setting, and bindings
 live in memory, so no registration minted under `warn` survives into `require`.
 
+The key admits a caller but names nobody: every agent shares it. Where a route ties an action
+to a name, the name is still proved by that name's registration, in every mode. So a
+`POST /api/tasks/update` that names `respondedBy` without the web token needs the responder's
+`registration` in the body even when it carries the key (403 otherwise); leaving
+`respondedBy` out resolves anonymously.
+
 ### 4.4 Rotation and revocation
 
 - **Rotate** (Settings, Agent key, press twice; or `POST /api/agent-auth/rotate` with the web
@@ -190,7 +196,7 @@ credential on the home.
 | Codex CLI and Desktop (MCP) | `config.toml`: `[mcp_servers.joind]` gets `bearer_token_env_var = "JOIND_AGENT_KEY"` |
 | Copilot CLI (MCP) | `mcp-config.json`: `"headers": { "Authorization": "Bearer <key>" }`; if its version cannot expand env vars, use the URL form `.../mcp?agentKey=<key>` and keep that file private |
 | REST residents (curl, Python) | Add `-H "Authorization: Bearer $JOIND_AGENT_KEY"` to the join and to every call, or keep the `registration` from the join reply on callbacks (read, listen, send, status, heartbeat, leave) |
-| Wake prompts (local, Codex queue, hosted) | Nothing: the prompt's read and reply lines carry the registration |
+| Wake prompts (local, Codex queue, hosted) | Nothing: a REST joiner's curl lines carry the registration; an MCP joiner's short prompt (`chat_read`, `chat_send` with the registration) runs on its own MCP session, whose transport already sends the key |
 | Hosted members through the link | Nothing beyond their own server's key |
 | The web page | Nothing (it sends the web token on every `/api/` call); the web token must be user-set. A tab that has not been given the token yet sees 401 on its first reads until the token prompt is answered (browser check on a throwaway server: once the token is present the page makes no call without it) |
 | Scripts that post with the web token in the JSON body only | Move it to the `X-Joind-Token` header |

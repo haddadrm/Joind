@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 import { tmpdir } from "os";
 import { createServer } from "net";
 
@@ -26,7 +26,7 @@ vi.mock("../src/terminals.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
-import { loadConfig, type JoindConfig } from "../src/config.js";
+import { loadConfig, webNamePath, webTokenPath, type JoindConfig } from "../src/config.js";
 import {
   AgentAuth, AgentKeyRotateError, classifyRoute, parseAgentAuthMode, presentedAgentKey, routeLabel, keyFingerprint, agentKeyPath,
   type AgentAuthMode,
@@ -135,6 +135,14 @@ function concrete(path: string): string {
 // ---------------------------------------------------------------------------
 
 describe("agent-auth units", () => {
+  it("every secret written beside the default data dir (the repo root) is git-ignored by name", () => {
+    const ignored = readFileSync(join(__dirname, "..", ".gitignore"), "utf8").split(/\r?\n/).map((l) => l.trim());
+    const dataDir = join(__dirname, "..", "data");
+    for (const p of [agentKeyPath(dataDir), webTokenPath(dataDir), webNamePath(dataDir)]) {
+      expect(ignored).toContain(basename(p));
+    }
+  });
+
   it("parses the mode: default warn, the three names, anything else throws", () => {
     expect(parseAgentAuthMode(undefined)).toBe("warn");
     expect(parseAgentAuthMode("")).toBe("warn");
@@ -398,6 +406,7 @@ describe("require: one server", { timeout: 30_000 }, () => {
 
   it("the REST fallbacks work with the key or with the web token header, never without", async () => {
     const msg = (await post(S.baseUrl, "/api/agent/send", { sender: "Curzon", text: "tag me", pid: PID }, bearer(KEY))).json.id as number;
+    const curzonReg = S.manager.bindingsOf("Curzon")[0].registration;
     for (const h of [bearer(KEY), webHdr]) {
       expect((await post(S.baseUrl, `/api/message/${msg}/react`, { sender: "Curzon", emoji: "👍" }, h)).status).toBe(200);
       expect((await post(S.baseUrl, `/api/message/${msg}/tag`, { tag: "status" }, h)).status).toBe(200);
@@ -407,7 +416,16 @@ describe("require: one server", { timeout: 30_000 }, () => {
       expect((await get(S.baseUrl, `/api/state?conversation=${room}`, h)).status).toBe(200);
       const t = await post(S.baseUrl, "/api/tasks", { title: "fallback", creator: "Curzon", conversation: room }, h);
       expect(t.status).toBe(200);
-      expect((await post(S.baseUrl, "/api/tasks/update", { id: t.json.id, status: "done", response: "ok", respondedBy: "Curzon", conversation: room }, h)).status).toBe(200);
+      const done = { id: t.json.id, status: "done", response: "ok", respondedBy: "Curzon", conversation: room };
+      if (h === webHdr) {
+        // The web viewer resolves as the registered viewer.
+        expect((await post(S.baseUrl, "/api/tasks/update", done, h)).status).toBe(200);
+      } else {
+        // The key admits the caller but names nobody: a named responder is
+        // still proved by the registration its join returned.
+        expect((await post(S.baseUrl, "/api/tasks/update", done, h)).status).toBe(403);
+        expect((await post(S.baseUrl, "/api/tasks/update", { ...done, registration: curzonReg }, h)).status).toBe(200);
+      }
       const up = await fetch(`${S.baseUrl}/api/upload`, { method: "POST", headers: { "Content-Type": "text/plain", ...h }, body: "file body" });
       expect(up.status).toBe(200);
       expect((await post(S.baseUrl, "/api/agent/scratchpad", { sender: "Curzon", notes: "n", conversation: room }, h)).status).toBe(200);
@@ -466,6 +484,34 @@ describe("require: one server", { timeout: 30_000 }, () => {
     expect(msgs.some((m) => m.text === "@Curzon wake up")).toBe(true);
     const bodyJson = /-d '([^']+)'/.exec(w.prompt)![1].replace("YOUR_REPLY", "replied from the prompt");
     const reply = await fetch(`${S.baseUrl}/api/agent/send`, { method: "POST", headers: { "Content-Type": "application/json" }, body: bodyJson });
+    expect(reply.status).toBe(200);
+  });
+
+  it("an MCP joiner's short wake prompt names chat_read and chat_send, carries no key, and runs on its own keyed session", async () => {
+    const s = await mcpInit(S.baseUrl, bearer(KEY));
+    expect(s.status).toBe(200);
+    const session = s.session!;
+    const pid = PID + 11;
+    const join1 = await mcpTool(S.baseUrl, session, "chat_join", { name: "Jadzia", pid, conversation: room }, bearer(KEY));
+    expect(join1.status).toBe(200);
+    injected.length = 0;
+    const sent = await post(S.baseUrl, "/api/send", { sender: "Rami", text: "@Jadzia over MCP", conversation: room, token: WEB }, webHdr);
+    expect(sent.status).toBe(200);
+    const w = await waitFor("the MCP wake", () => injected.find((i) => i.pid === pid));
+    const reg = S.manager.bindingsOf("Jadzia")[0].registration;
+    expect(w.prompt).toMatch(/chat_read\(sender="Jadzia", since=\d+, registration="[^"]+"\)/);
+    expect(w.prompt).toContain(`chat_send(sender="Jadzia", registration="${reg}")`);
+    expect(w.prompt).not.toContain("curl");
+    expect(w.prompt).not.toContain(KEY);
+    expect(w.prompt).not.toContain(WEB);
+    // The session's transport carries the key on every call, so the prompt
+    // needs nothing more; the same call without the key is refused.
+    const since = Number(/since=(\d+)/.exec(w.prompt)![1]);
+    const read = await mcpTool(S.baseUrl, session, "chat_read", { sender: "Jadzia", since, registration: reg }, bearer(KEY));
+    expect(read.status).toBe(200);
+    expect(read.text).toContain("@Jadzia over MCP");
+    expect((await mcpTool(S.baseUrl, session, "chat_read", { sender: "Jadzia", since, registration: reg }, {})).status).toBe(401);
+    const reply = await mcpTool(S.baseUrl, session, "chat_send", { sender: "Jadzia", text: "replied over MCP", registration: reg }, bearer(KEY));
     expect(reply.status).toBe(200);
   });
 
@@ -583,6 +629,12 @@ describe("warn and off never refuse", { timeout: 30_000 }, () => {
           const t = await post(S.baseUrl, "/api/tasks", { title: "t", creator: "Lela" }, h);
           expect(t.status).toBe(200);
           expect((await post(S.baseUrl, "/api/tasks/update", { id: t.json.id, status: "done", response: "r" }, h)).status).toBe(200);
+          // The responder rule is not an auth mode: a named responder needs
+          // its registration here too (403 is not 401, so warn counts nothing).
+          const t2 = await post(S.baseUrl, "/api/tasks", { title: "t2", creator: "Lela" }, h);
+          const named = { id: t2.json.id, status: "done", response: "r", respondedBy: "Lela" };
+          expect((await post(S.baseUrl, "/api/tasks/update", named, h)).status).toBe(403);
+          expect((await post(S.baseUrl, "/api/tasks/update", { ...named, registration: reg }, h)).status).toBe(200);
           expect((await fetch(`${S.baseUrl}/api/upload`, { method: "POST", headers: { "Content-Type": "text/plain", ...h }, body: "x" })).status).toBe(200);
           const s = await mcpInit(S.baseUrl, h);
           expect(s.status).toBe(200);
@@ -663,6 +715,27 @@ describe("linked servers, both in require", { timeout: 40_000 }, () => {
     const reply = await fetch(`${B.baseUrl}/api/agent/send`, { method: "POST", headers: { "Content-Type": "application/json" }, body: bodyJson });
     expect(reply.status).toBe(200);
     await waitFor("the reply on A", () => A.manager.getRoom(room)!.read().some((m) => m.text === "hosted reply" && m.sender === "Curzon"));
+  });
+
+  it("a member hosted on B through MCP gets the short prompt on B, carrying B's registration and no key, and it runs on its B session", async () => {
+    const s = await mcpInit(B.baseUrl, bearer(KEY_B));
+    expect(s.status).toBe(200);
+    const session = s.session!;
+    const pid = PID + 12;
+    const joined = await mcpTool(B.baseUrl, session, "chat_join", { name: "Ezri", pid, conversation: remote }, bearer(KEY_B));
+    expect(joined.status).toBe(200);
+    await waitFor("Ezri hosted on A", () => A.manager.getRoom(room)!.getAgent("Ezri")?.host === "bravo");
+    injected.length = 0;
+    expect((await post(A.baseUrl, "/api/send", { sender: "Rami", text: "@Ezri hosted MCP ping", conversation: room, token: WEB }, webHdr)).status).toBe(200);
+    const w = await waitFor("B's injector for Ezri", () => injected.find((i) => i.pid === pid));
+    const regB = B.manager.bindingsOf("Ezri")[0].registration;
+    expect(w.prompt).toContain(`chat_send(sender="Ezri", registration="${regB}")`);
+    expect(w.prompt).not.toContain("curl");
+    for (const secret of [KEY_A, KEY_B, LINK]) expect(w.prompt).not.toContain(secret);
+    const since = Number(/since=(\d+)/.exec(w.prompt)![1]);
+    const read = await mcpTool(B.baseUrl, session, "chat_read", { sender: "Ezri", since, registration: regB }, bearer(KEY_B));
+    expect(read.status).toBe(200);
+    expect(read.text).toContain("@Ezri hosted MCP ping");
   });
 
   it("the hosted registration A holds is not a credential on A", async () => {

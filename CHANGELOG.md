@@ -17,6 +17,11 @@ Rami approved the lane on 29 Sep. The agent API needed no credential on a tailne
 ### Gate round 2 (Codex, PASS)
 - No High or Medium. One Low, applied after the pass: the host logged a hosted member's home registration id (`src/link.ts`, present on master too); the line now says only whether one was received. Gate observed 26 agent-auth tests, the full suite and tsc clean; one vitest worker exit under load was seen once by the gate and once here, not reproduced in ten further runs.
 
+### Rebase onto the hygiene batch
+- **The REST fallbacks test expected a key-only task resolution naming `respondedBy` to pass.** The hygiene batch requires a token-less caller that names a responder to send that member's registration; the key is shared by every agent and names nobody, so the server's 403 is right and the test was wrong. The test now asserts 403 with the key alone and 200 with the key plus the registration; the design note states the rule.
+- **`joind-agent-key` is git-ignored**, beside `joind-web-token` and `joind-web-name`; with the default data dir it lands in the repo root. A test checks every secret path helper's file name against `.gitignore`.
+- A new test covers the short MCP wake prompt under require: it names `chat_read` and `chat_send` with the registration, carries no key and no curl, and its calls run on the joiner's keyed session (401 without the key).
+
 ## 2026-09-29: Backlog After the Hygiene Batch
 
 - The backlog drops what the hygiene batch shipped: token-less task attribution, the empty conversation fallback, the dead pill helper, the short wake prompt for MCP joiners, and the flaky queue-room timing test.
