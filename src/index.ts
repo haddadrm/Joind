@@ -2158,10 +2158,11 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
    *  proves it: a pid, pane or Orca handle is a request-supplied value that
    *  anyone can guess or read from this server's candidate lists, so it
    *  never names a responder. With `conversationId`, only a registration in
-   *  that room answers. */
+   *  that room answers. A registration a key rotation revoked proves nothing,
+   *  in any mode, even while its binding stays in place. */
   function callerRegistration(req: express.Request, name: string, conversationId?: string): AgentBindingEntry | undefined {
     const registration = registrationOf(req);
-    if (registration === undefined) return undefined;
+    if (registration === undefined || agentAuth.isRevoked(registration)) return undefined;
     const byId = manager.bindingsOf(name).find((e) => e.registration === registration);
     return byId && (conversationId === undefined || byId.conversationId === conversationId) ? byId : undefined;
   }

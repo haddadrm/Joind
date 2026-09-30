@@ -20,6 +20,7 @@ Rami approved the lane on 29 Sep. The agent API needed no credential on a tailne
 ### Rebase onto the hygiene batch
 - **The REST fallbacks test expected a key-only task resolution naming `respondedBy` to pass.** The hygiene batch requires a token-less caller that names a responder to send that member's registration; the key is shared by every agent and names nobody, so the server's 403 is right and the test was wrong. The test now asserts 403 with the key alone and 200 with the key plus the registration; the design note states the rule.
 - **`joind-agent-key` is git-ignored**, beside `joind-web-token` and `joind-web-name`; with the default data dir it lands in the repo root. A test checks every secret path helper's file name against `.gitignore`.
+- **Rebase gate round 1 (Codex, CHANGES REQUESTED, one Medium, fixed): a rotation left revoked registrations good for task attribution.** The hygiene responder check matched the registration against the bindings only, so after a rotation the old registration beside the new key still resolved a task as that member. The check now refuses a revoked registration in every mode; the rotation test covers it.
 - A new test covers the short MCP wake prompt under require: it names `chat_read` and `chat_send` with the registration, carries no key and no curl, and its calls run on the joiner's keyed session (401 without the key).
 
 ## 2026-09-29: Backlog After the Hygiene Batch

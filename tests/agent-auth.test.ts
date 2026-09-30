@@ -581,6 +581,8 @@ describe("rotation with a file key", { timeout: 30_000 }, () => {
     const reg = j.json.registration as string;
     const s = await mcpInit(S.baseUrl, bearer(oldKey));
     expect(s.status).toBe(200);
+    const task = await post(S.baseUrl, "/api/tasks", { title: "after rotation", creator: "Tobin", conversation: room }, bearer(oldKey));
+    expect(task.status).toBe(200);
 
     const rot = await post(S.baseUrl, "/api/agent-auth/rotate", {}, webHdr);
     expect(rot.status).toBe(200);
@@ -593,11 +595,16 @@ describe("rotation with a file key", { timeout: 30_000 }, () => {
     expect((await get(S.baseUrl, `/api/agent/read?sender=Tobin&registration=${reg}`)).status).toBe(401);
     expect((await mcpTool(S.baseUrl, s.session!, "chat_who", {}, bearer(oldKey))).status).toBe(401);
     expect((await get(S.baseUrl, `/api/agent/read?sender=Tobin&pid=${PID}`, bearer(newKey))).status).toBe(200);
+    // A revoked registration no longer names a responder either, even beside
+    // the new key (the binding it came from is still in place).
+    const done = { id: task.json.id, status: "done", response: "r", respondedBy: "Tobin", conversation: room };
+    expect((await post(S.baseUrl, "/api/tasks/update", { ...done, registration: reg }, bearer(newKey))).status).toBe(403);
     // A rejoin with the new key gets a registration that works.
     const j2 = await post(S.baseUrl, "/api/agent/join", { name: "Tobin", pid: PID, conversation: room }, bearer(newKey));
     const reg2 = j2.json.registration as string;
     expect(reg2).not.toBe(reg);
     expect((await get(S.baseUrl, `/api/agent/read?sender=Tobin&registration=${reg2}`)).status).toBe(200);
+    expect((await post(S.baseUrl, "/api/tasks/update", { ...done, registration: reg2 }, bearer(newKey))).status).toBe(200);
   });
 });
 

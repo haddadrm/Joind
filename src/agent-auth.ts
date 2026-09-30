@@ -255,6 +255,12 @@ export class AgentAuth {
     return ok;
   }
 
+  /** True when a rotation revoked this registration: it names nobody any more,
+   *  on a callback or where a route ties an action to a name. */
+  isRevoked(registration: string): boolean {
+    return this.revoked.has(registration);
+  }
+
   /**
    * Record a call that has no valid credential. In warn it is served; in
    * require it is refused by the caller. Logged at most once per route per
