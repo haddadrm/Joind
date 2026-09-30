@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-30: Backlog, Three UI Items From Rami
+
+- The backlog records the composer task button that still opens the retired Tasks drawer, the notification bell that still opens the old right-side popover, and crew creation as the first-run experience (large, design first).
+
 ## 2026-09-30: Backlog, Joind Logo
 
 - The backlog records that the redesign's rail dropped the Joind logo (Rami, small, bundled with the next UI tweaks).
