@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-30: Backlog, Joind Logo
+
+- The backlog records that the redesign's rail dropped the Joind logo (Rami, small, bundled with the next UI tweaks).
+
 ## 2026-09-30: CRLF-Tolerant Composer Test
 
 - `tests/composer-ui.test.ts` lifted functions out of `public/app.js` by searching for an LF-only closing line, so on a Windows checkout with `core.autocrlf=true` (the Y530 deploy gate of 0fb0a05: 845 of 846, `decorateLinkCards is not defined` in beforeAll) the delimiter was never found. The extractor now normalises line endings first and fails with a named error when a function's end is missing. Verified by running the file against a CRLF copy of app.js (12 of 12). Test-only change; no runtime code touched. The other tests that read public/ files use no line-ending-sensitive parsing.
