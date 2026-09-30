@@ -129,11 +129,14 @@ describe("token-less task resolution names only the caller", { timeout: 30_000 }
     expect(lines(other).some((l) => /also fixed/.test(l))).toBe(false);
   });
 
-  it("accepts a hosted member by its registration id, never by a pid", async () => {
+  it("a hosted member is never named by the id held here for it, nor by a pid", async () => {
+    // The id this server holds for a member hosted on a peer is a routing id
+    // for the link, never proof (agent credentials: a hosted registration is
+    // not a credential on the home); the member itself never sees it.
     const id = await newTask(ops, "hosted");
     const r = await raw({ id, status: "done", response: "from the peer", respondedBy: "Worf", registration: "reg-worf", conversation: ops });
-    expect(r.status).toBe(200);
-    expect(lines(ops)).toContain(`[Task #${id} done] Worf responded: from the peer`);
+    expect(r.status).toBe(403);
+    expect(lines(ops).some((l) => /from the peer/.test(l))).toBe(false);
     const id2 = await newTask(ops, "hosted 2");
     expect((await raw({ id: id2, status: "done", response: "x", respondedBy: "Worf", pid: 999_901, conversation: ops })).status).toBe(403);
   });

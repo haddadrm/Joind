@@ -139,7 +139,8 @@ The key admits a caller but names nobody: every agent shares it. Where a route t
 to a name, the name is still proved by that name's registration, in every mode. So a
 `POST /api/tasks/update` that names `respondedBy` without the web token needs the responder's
 `registration` in the body even when it carries the key (403 otherwise); leaving
-`respondedBy` out resolves anonymously.
+`respondedBy` out resolves anonymously. As on the callbacks, only a local registration that no
+rotation revoked proves the name: the id a home holds for a hosted member does not.
 
 ### 4.4 Rotation and revocation
 

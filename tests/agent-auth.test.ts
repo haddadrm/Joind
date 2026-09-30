@@ -750,6 +750,11 @@ describe("linked servers, both in require", { timeout: 40_000 }, () => {
     expect(hosted).toBeDefined();
     expect((await get(A.baseUrl, `/api/agent/read?sender=Curzon&registration=${hosted.registration}`)).status).toBe(401);
     expect((await post(A.baseUrl, "/api/agent/send", { sender: "Curzon", text: "forged on A", registration: hosted.registration })).status).toBe(401);
+    // Nor does it name a task responder on A, even beside A's key.
+    const t = await post(A.baseUrl, "/api/tasks", { title: "hosted attribution", creator: "Rami", conversation: room }, bearer(KEY_A));
+    expect(t.status).toBe(200);
+    const done = { id: t.json.id, status: "done", response: "forged", respondedBy: "Curzon", registration: hosted.registration, conversation: room };
+    expect((await post(A.baseUrl, "/api/tasks/update", done, bearer(KEY_A))).status).toBe(403);
   });
 
   it("the peer routes still take the link token, not an agent key", async () => {

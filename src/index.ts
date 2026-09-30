@@ -2154,16 +2154,19 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   }
 
   /** The caller's own registration of `name`, proved by the registration id
-   *  its join returned (matched alone, hosted members included). Only the id
-   *  proves it: a pid, pane or Orca handle is a request-supplied value that
-   *  anyone can guess or read from this server's candidate lists, so it
-   *  never names a responder. With `conversationId`, only a registration in
-   *  that room answers. A registration a key rotation revoked proves nothing,
-   *  in any mode, even while its binding stays in place. */
+   *  its join returned (matched alone). Only the id proves it: a pid, pane or
+   *  Orca handle is a request-supplied value that anyone can guess or read
+   *  from this server's candidate lists, so it never names a responder. With
+   *  `conversationId`, only a registration in that room answers. A local
+   *  registration only: the id this server holds for a member hosted on a
+   *  linked peer is a routing id for the link, never proof here (the member
+   *  itself never sees it: its wake prompts carry its host's id). A
+   *  registration a key rotation revoked proves nothing, in any mode, even
+   *  while its binding stays in place. */
   function callerRegistration(req: express.Request, name: string, conversationId?: string): AgentBindingEntry | undefined {
     const registration = registrationOf(req);
     if (registration === undefined || agentAuth.isRevoked(registration)) return undefined;
-    const byId = manager.bindingsOf(name).find((e) => e.registration === registration);
+    const byId = manager.bindingsOf(name).find((e) => !e.host && e.registration === registration);
     return byId && (conversationId === undefined || byId.conversationId === conversationId) ? byId : undefined;
   }
 
