@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-01: Backlog, Linked Servers From Settings and In-App Toasts
+
+- The backlog records adding a linked server from Settings with a pairing code instead of flags and environment variables, and replacing the six browser confirm and alert dialogs with in-app ones.
+
 ## 2026-09-30: Backlog, Three UI Items From Rami
 
 - The backlog records the composer task button that still opens the retired Tasks drawer, the notification bell that still opens the old right-side popover, and crew creation as the first-run experience (large, design first).
