@@ -169,7 +169,7 @@ describe("read-only seat units", () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-seat-unit-"));
     try {
       const store = new ReadonlySeatStore(dir, { log: () => undefined });
-      const { seat, token } = store.mint("Watcher", "room-a", 7);
+      const { seat, token } = store.mint("Watcher", "room-a");
       expect(token.startsWith("jrs_")).toBe(true);
       expect(token.length).toBeGreaterThan(40);
       const file = readFileSync(seatsPath(dir), "utf8");
@@ -191,16 +191,16 @@ describe("read-only seat units", () => {
     try {
       const store = new ReadonlySeatStore(dir, { log: () => undefined });
       for (const bad of ["", "all", "System", "has space", "-lead", "x".repeat(65), "a/b"]) {
-        expect(() => store.mint(bad, "r", 0), bad).toThrow();
+        expect(() => store.mint(bad, "r"), bad).toThrow();
       }
-      store.mint("Watcher", "r", 0);
-      expect(() => store.mint("watcher", "r", 0)).toThrow(/already has a read-only seat/);
-      store.mint("Watcher", "r2", 0);
+      store.mint("Watcher", "r");
+      expect(() => store.mint("watcher", "r")).toThrow(/already has a read-only seat/);
+      store.mint("Watcher", "r2");
       writeFileSync(seatsPath(dir), "{ not json");
       const broken = new ReadonlySeatStore(dir, { log: () => undefined });
       expect(broken.broken).toBe(true);
       expect(broken.list()).toEqual([]);
-      expect(() => broken.mint("Other", "r", 0)).toThrow(/cannot be read/);
+      expect(() => broken.mint("Other", "r")).toThrow(/cannot be read/);
       // Nothing was written over the broken file.
       expect(readFileSync(seatsPath(dir), "utf8")).toBe("{ not json");
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -210,7 +210,7 @@ describe("read-only seat units", () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-seat-unit-"));
     try {
       const store = new ReadonlySeatStore(dir, { log: () => undefined });
-      const a = store.mint("A", "r", 0), b = store.mint("B", "r", 0);
+      const a = store.mint("A", "r"), b = store.mint("B", "r");
       expect(store.revoke(a.seat.id)?.revokedAt).not.toBeNull();
       expect(store.revoke(a.seat.id)?.revokedAt).not.toBeNull();
       expect(store.verify(a.token)).toBeUndefined();
@@ -221,15 +221,26 @@ describe("read-only seat units", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("sees public messages and DMs to its name sent after minting, nothing else", () => {
-    const seat = { name: "Watcher", dmFloorId: 10 };
+  it("sees public messages only, never a DM, even one to its own name", () => {
     const m = (id: number, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id, sender: "A", text: "t", timestamp: 0, ...extra });
-    expect(seatCanSee(seat, m(1))).toBe(true);
-    expect(seatCanSee(seat, m(11, { to: ["Watcher"] }))).toBe(true);
-    expect(seatCanSee(seat, m(9, { to: ["Watcher"] }))).toBe(false);
-    expect(seatCanSee(seat, m(12, { to: ["Other"] }))).toBe(false);
-    expect(seatCanSee(seat, m(13, { sender: "Watcher", to: ["Other"] }))).toBe(false);
-    expect(seatCanSee(seat, m(-1, { local: true }))).toBe(false);
+    expect(seatCanSee(m(1))).toBe(true);
+    expect(seatCanSee(m(11, { to: ["Watcher"] }))).toBe(false);
+    expect(seatCanSee(m(12, { to: ["Other"] }))).toBe(false);
+    expect(seatCanSee(m(13, { sender: "Watcher", to: ["Other"] }))).toBe(false);
+    expect(seatCanSee(m(14, { to: [] }))).toBe(false);
+    expect(seatCanSee(m(-1, { local: true }))).toBe(false);
+  });
+
+  it("knows a seat's name in any room, case-insensitive, until revoked", () => {
+    const dir = mkdtempSync(join(tmpdir(), "joind-seat-unit-"));
+    try {
+      const store = new ReadonlySeatStore(dir, { log: () => undefined });
+      const a = store.mint("Auditor", "r");
+      expect(store.holdsAnywhere("auditor")).toBe(true);
+      expect(store.holdsAnywhere("Other")).toBe(false);
+      store.revoke(a.seat.id);
+      expect(store.holdsAnywhere("Auditor")).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("normalizes paths as Express matches them", () => {
@@ -276,7 +287,7 @@ describe("read-only seat on a server (warn, the default mode)", () => {
     expect(terminalCalls).toContain("inject.inject");
   }, 30_000);
 
-  it("R1: reads its room (public messages, and DMs to it sent after minting) with since, limit, search and by id", async () => {
+  it("R1: reads its room's public messages (never a DM, even to its name) with since, limit, search and by id", async () => {
     const me = await get(s.base, "/api/seat/me", seatHdr(seat.token));
     expect(me.status).toBe(200);
     expect(me.json.conversation).toEqual({ id: roomA, name: "Ops" });
@@ -286,7 +297,7 @@ describe("read-only seat on a server (warn, the default mode)", () => {
     const texts = (r.json.messages as ChatMessage[]).map((m) => m.text);
     expect(texts).toContain("before the seat");
     expect(texts).toContain("@Watcher please read this");
-    expect(texts).toContain("@Watcher and this one");
+    expect(texts).not.toContain("@Watcher and this one");
     const lastId = r.json.lastId as number;
     const since = await get(s.base, `/api/seat/read?since=${lastId}`, seatHdr(seat.token));
     expect(since.json.messages).toEqual([]);
@@ -303,7 +314,7 @@ describe("read-only seat on a server (warn, the default mode)", () => {
     expect(byId.json.text).toBe("@Watcher please read this");
   });
 
-  it("R1: never reads another room, a DM to someone else, or a DM to its name from before it was minted", async () => {
+  it("R1: never reads another room, a DM to someone else, or a DM to its name sent before or after minting", async () => {
     const elsewhere = await say(s.base, roomB, "secret of the other room");
     const dmOther = await say(s.base, roomA, "for Member only", { to: ["Member"] });
     // A fresh seat whose name received a DM before it existed.
@@ -320,7 +331,7 @@ describe("read-only seat on a server (warn, the default mode)", () => {
     expect(((await get(s.base, "/api/seat/search?q=secret", seatHdr(lurker.token))).json.results as unknown[]).length).toBe(0);
     await say(s.base, roomA, "new DM to Lurker", { to: ["Lurker"] });
     const after = await get(s.base, "/api/seat/read?limit=5", seatHdr(lurker.token));
-    expect((after.json.messages as ChatMessage[]).map((m) => m.text)).toContain("new DM to Lurker");
+    expect((after.json.messages as ChatMessage[]).map((m) => m.text)).not.toContain("new DM to Lurker");
   });
 
   it("R1: default deny, every route of the server refuses the seat token and nothing changes", async () => {
@@ -508,6 +519,122 @@ describe("read-only seat under require, and across a restart", () => {
       rmSync(s.dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("read-only seat and human viewers (gate 1 on 6ab3e39)", () => {
+  type Ev = { type: string; name?: string; error?: string };
+  type Sock = { ws: import("ws").WebSocket; events: Ev[]; opened: Promise<"init" | number> };
+  /** A browser socket; `opened` is "init" once the server greets it, or the
+   *  HTTP status (or close code) it was refused with. */
+  async function socket(s: Server, name: string, headers: Record<string, string> = {}, extraQuery = ""): Promise<Sock> {
+    const { default: WebSocket } = await import("ws");
+    const events: Ev[] = [];
+    const ws = new WebSocket(`${s.base.replace("http:", "ws:")}/ws?token=${WEB}&name=${name}${extraQuery}`, { headers });
+    const opened = new Promise<"init" | number>((resolve) => {
+      ws.on("message", (raw) => {
+        events.push(JSON.parse(String(raw)) as Ev);
+        if (events.some((e) => e.type === "init")) resolve("init");
+      });
+      ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on("error", () => resolve(-1));
+      ws.on("close", (code) => resolve(code));
+    });
+    return { ws, events, opened };
+  }
+
+  it("R1: a seat cannot be minted under a name a browser socket still holds", async () => {
+    const s = await start("require");
+    const open: Sock[] = [];
+    try {
+      const room = s.h.manager.createConversation("Ops").id;
+      s.h.manager.setActive(room);
+      expect((await post(s.base, "/api/web/register", { token: WEB, name: "Alice" })).status).toBe(200);
+      const stale = await socket(s, "Alice"); open.push(stale);
+      const renamed = await socket(s, "Alice"); open.push(renamed);
+      expect(await stale.opened).toBe("init");
+      expect(await renamed.opened).toBe("init");
+      renamed.ws.send(JSON.stringify({ type: "web-rename", name: "Bob" }));
+      await waitFor("rename", () => renamed.events.find((e) => e.type === "web-rename-ok"));
+      // The other tab still holds Alice: the name is a human's, so no seat.
+      const refused = await post(s.base, "/api/readonly-seats", { name: "alice", conversation: room }, webHdr);
+      expect(refused.status, refused.text).toBe(409);
+      // Once that tab is gone the name is free again.
+      stale.ws.close();
+      await waitFor("mint after the stale tab closed", async () => (await post(s.base, "/api/readonly-seats", { name: "Alice", conversation: room }, webHdr)).status === 200);
+    } finally {
+      for (const x of open) x.ws.terminate();
+      await s.h.close();
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("R1: a human cannot register or rename onto a seat's name, and the seat reads no DM sent to that name", async () => {
+    const s = await start("require");
+    const open: Sock[] = [];
+    try {
+      const room = s.h.manager.createConversation("Ops").id;
+      const other = s.h.manager.createConversation("Elsewhere").id;
+      s.h.manager.setActive(room);
+      const seat = await mint(s.base, "Auditor", room);
+      await mint(s.base, "Lookout", other);
+      expect((await post(s.base, "/api/web/register", { token: WEB, name: "Auditor" })).status).toBe(409);
+      expect((await post(s.base, "/api/web/register", { token: WEB, name: "auditor" })).status).toBe(409);
+      expect((await post(s.base, "/api/web/register", { token: WEB, name: "Carol" })).status).toBe(200);
+      const tab = await socket(s, "Carol"); open.push(tab);
+      expect(await tab.opened).toBe("init");
+      // A seat in any room holds the name against the human: DMs route by name.
+      for (const name of ["Auditor", "LOOKOUT"]) {
+        tab.ws.send(JSON.stringify({ type: "web-rename", name }));
+        const err = await waitFor(`rename to ${name} refused`, () => tab.events.find((e) => e.type === "web-rename-error" && /read-only seat/.test(e.error ?? "")));
+        tab.events.splice(tab.events.indexOf(err), 1);
+      }
+      expect(tab.events.some((e) => e.type === "web-rename-ok")).toBe(false);
+      // Backstop: even a DM addressed to the seat's own name is not read.
+      await say(s.base, room, "private delivery to the name Auditor", { to: ["Auditor"] });
+      await say(s.base, room, "public line");
+      const read = await get(s.base, "/api/seat/read?limit=500", seatHdr(seat.token));
+      const texts = (read.json.messages as ChatMessage[]).map((m) => m.text);
+      expect(texts).toContain("public line");
+      expect(texts).not.toContain("private delivery to the name Auditor");
+      // After a revoke the human may take the name.
+      expect((await post(s.base, `/api/readonly-seats/${seat.id}/revoke`, {}, webHdr)).status).toBe(200);
+      tab.ws.send(JSON.stringify({ type: "web-rename", name: "Auditor" }));
+      await waitFor("rename after revoke", () => tab.events.find((e) => e.type === "web-rename-ok" && e.name === "Auditor"));
+    } finally {
+      for (const x of open) x.ws.terminate();
+      await s.h.close();
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("R1: a socket upgrade carrying a seat token is refused even beside a valid web token", async () => {
+    const s = await start("require");
+    const open: Sock[] = [];
+    try {
+      const room = s.h.manager.createConversation("Ops").id;
+      s.h.manager.setActive(room);
+      const seat = await mint(s.base, "Auditor", room);
+      expect((await post(s.base, "/api/web/register", { token: WEB, name: "Bob" })).status).toBe(200);
+      const tries = [
+        await socket(s, "Bob", seatHdr(seat.token)),
+        await socket(s, "Bob", seatHdr("jrs_not-a-real-token")),
+        await socket(s, "Bob", {}, `&x=${seat.token}`),
+        await socket(s, "Bob", { Authorization: `Bearer ${seat.token}` }),
+      ];
+      open.push(...tries);
+      for (const t of tries) {
+        expect(await t.opened).toBe(403);
+        expect(t.events).toEqual([]);
+      }
+      // The plain web socket still opens.
+      const plain = await socket(s, "Bob"); open.push(plain);
+      expect(await plain.opened).toBe("init");
+    } finally {
+      for (const x of open) x.ws.terminate();
+      await s.h.close();
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("read-only seat and linked servers", () => {

@@ -42,7 +42,7 @@ import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from
 import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webNamePath, validWebName, canRegister, type JoindConfig } from "./config.js";
 import { AgentAuth, AgentKeyRotateError, agentKeyPath, classifyRoute, loadOrCreateAgentKey, newAgentKey, routeLabel, type Credential } from "./agent-auth.js";
 import { LinkRegistry, type LinkClientOptions } from "./link.js";
-import { ReadonlySeatStore, SeatError, seatGate } from "./readonly-seats.js";
+import { ReadonlySeatStore, SeatError, seatGate, seatUpgradeRefusal } from "./readonly-seats.js";
 import { PeerHub } from "./peer.js";
 import { MirrorRoom, type MirrorNotice } from "./mirror.js";
 import { parseSearchQuery, hasTerms, searchLimit, searchBefore, windowLimit } from "./search.js";
@@ -281,12 +281,22 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // --- HTTP + WebSocket server ---
   const app = express();
   const httpServer = createServer(app);
-  const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
-
   // --- Read-only room seats (src/readonly-seats.ts) ---
-  // Mounted first: a request carrying a seat token is answered by the seat's
-  // read allowlist and never reaches any route below, in any agent-auth mode.
+  // The gate is mounted first: a request carrying a seat token is answered by
+  // the seat's read allowlist and never reaches any route below, in any
+  // agent-auth mode. A socket upgrade carrying one is refused (403) before
+  // the web-token check, so a seat never holds a socket.
   const seatStore = new ReadonlySeatStore(DATA_DIR);
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: "/ws",
+    verifyClient: (info, done) => {
+      const refusal = seatUpgradeRefusal(seatStore, info.req.headers, info.req.url);
+      if (refusal) done(false, 403, refusal);
+      else done(true);
+    },
+  });
+
   app.use(seatGate(seatStore, {
     messagesOf: (id) => {
       if (manager.isRemote(id)) return undefined;
@@ -681,6 +691,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!clientNames.has(ws)) { reply({ type: "web-rename-error", error: "socket not bound" }); return; }
     const valid = validWebName(parsed.name);
     if (valid === null) { reply({ type: "web-rename-error", error: "invalid name" }); return; }
+    if (seatStore.holdsAnywhere(valid)) { reply({ type: "web-rename-error", error: `${valid} is a read-only seat's name; pick another name` }); return; }
     registeredWebName = valid;
     clientNames.set(ws, valid);
     try {
@@ -880,6 +891,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     const valid = validWebName(name);
     if (valid === null) { res.status(400).json({ error: "invalid name" }); return; }
+    if (seatStore.holdsAnywhere(valid)) { res.status(409).json({ error: `${valid} is a read-only seat's name; pick another name` }); return; }
     const decision = canRegister(registeredWebName, valid);
     if (decision === "reject-conflict") {
       res.status(409).json({ error: "name already registered; renames use the websocket" });
@@ -953,10 +965,10 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     const room = manager.getRoom(convId);
     if (!room || room instanceof MirrorRoom) { res.status(404).json({ error: "Conversation not found" }); return; }
     // The name must be nobody's here: not a member, a binding, a linked
-    // peer's member or human, nor a human viewer (the seat reads DMs sent
-    // to its name from now on).
+    // peer's member or human, nor a human viewer under any name a browser
+    // socket still holds (a rename moves only one tab).
     const lower = name.toLowerCase();
-    const humans = [...CONFIG.humanNames, ...(registeredWebName ? [registeredWebName] : [])].map((h) => h.toLowerCase());
+    const humans = [...CONFIG.humanNames, ...(registeredWebName ? [registeredWebName] : []), ...clientNames.values()].map((h) => h.toLowerCase());
     if (humans.includes(lower)) { res.status(409).json({ error: `${name} is a human viewer's name; pick another name` }); return; }
     if (room.whoNames().some((n) => n.toLowerCase() === lower)
       || manager.bindingsOf(name).some((e) => e.conversationId === convId)
@@ -965,7 +977,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
       return;
     }
     try {
-      const out = seatStore.mint(name, convId, room.highWaterId());
+      const out = seatStore.mint(name, convId);
       console.log(`  [readonly-seats] minted ${out.seat.id} for ${name} in ${convId}`);
       res.json({ ...out, conversation: { id: convId, name: manager.getMeta(convId)?.name ?? convId }, header: "X-Joind-Seat-Token" });
     } catch (err) {

@@ -1,7 +1,7 @@
 # Read-only room seats: design note
 
 Date: 5 Oct 2026. Branch `readonly-seat` from master 6e3d590. Status: implemented, not merged;
-for the Codex gate. Sits beside the agent credentials
+gate 1 (on 6ab3e39) failed on two findings, both fixed in the next commit (sections 4 and 5). Sits beside the agent credentials
 (`docs/superpowers/specs/2026-09-29-agent-credentials-design.md`).
 
 ## 1. The need
@@ -34,14 +34,16 @@ What the seat token must never do, whatever the server's `--agent-auth` mode:
 1. Reach any route other than its four reads (no send, upload, edit, delete, react, tag, pin,
    choose, resolve, task, decision, state, notes, session marker, join, leave, heartbeat,
    typing, status, rename, settings, launcher, crew, peer route, MCP, static files).
-2. Read a room other than the one it was minted for, or a DM not addressed to it.
+2. Read a room other than the one it was minted for, or any DM (section 4: a DM is routed by
+   name, and a name is not a principal).
 3. Change any state on read: no cursor, no `lastSeen`, no presence or typing event, no
    notification read mark, no room creation.
 4. Be mistaken for another credential: a seat token in `Authorization: Bearer`,
    `X-Joind-Agent-Key`, `X-Joind-Token` or any query parameter is refused, never tried as the
    agent key or the web token.
 5. Let its name be taken by a member (local, hosted through a link, or a linked peer's human)
-   in its room, so its name can never be woken.
+   in its room, so its name can never be woken; or share a name with a human viewer (section 5).
+6. Open a WebSocket, alone or beside the web token.
 
 Out of scope, stated so the gate can judge it:
 
@@ -63,7 +65,7 @@ Out of scope, stated so the gate can judge it:
 |---|---|
 | Token | `jrs_` plus 32 random bytes, base64url (47 characters). Shown once, in the mint reply. |
 | Presented as | `X-Joind-Seat-Token: <token>`, and only that header. No query form (it would land in logs and browser history), no Bearer form (Bearer is the agent key's). |
-| Stored | `<data dir>/readonly-seats.json`, mode 0600, written atomically (temp file then rename). Each record: id (`seat-<12 hex>`), name, room id, the token's SHA-256, created and revoked times, and the DM floor (below). Never the token. The data dir is git-ignored, and the file name is also ignored explicitly. |
+| Stored | `<data dir>/readonly-seats.json`, mode 0600, written atomically (temp file then rename). Each record: id (`seat-<12 hex>`), name, room id, the token's SHA-256, created and revoked times. Never the token. The data dir is git-ignored, and the file name is also ignored explicitly. |
 | Compared | SHA-256 of the presented token against every record with `timingSafeEqual`. |
 | Bound to | One name in one local room. The name follows the mention grammar (`[A-Za-z0-9_][A-Za-z0-9_-]{0,63}`), is not `all` or `system`, and at most one active seat holds a name in a room (case-insensitive). |
 | Home only | A seat is minted only for a room whose home is this server. A remote room (`<server>:<room>`, a mirror) is refused (400). Mirrors never learn of seats; a linked server's member or human registering the seat's name on the home is refused there (409). Link and peer trust are unchanged. |
@@ -92,6 +94,13 @@ remembering to add a check to a new route. Paths are normalized the way Express 
 (lower case, doubled slashes collapsed, trailing slash dropped); an encoded spelling such as
 `/api/seat/%2e%2e/agent/read` matches nothing and is 403.
 
+**Sockets.** The WebSocket server handles `/ws` upgrades on the HTTP server, outside Express, so
+the gate's rule is repeated there (`seatUpgradeRefusal`, the `verifyClient` hook): an upgrade
+carrying the seat header (any value, valid or not) or a seat token in `Authorization`, the
+agent-key or web-token header, or any query parameter, is refused with 403 before the socket
+opens and before the web-token check. A seat never holds a socket, even beside a valid web token
+(gate 1 on 6ab3e39 found a mixed-credential upgrade accepted and able to `web-rename`).
+
 **The allowlist** (GET only; HEAD and OPTIONS are refused):
 
 | Route | Answer |
@@ -105,10 +114,18 @@ The room is always the seat's own; a `conversation` parameter is ignored. Each h
 the room's message array through `readAll` (a copy) and filters it; none calls `touch`,
 `setTyping`, the cursor store, the notification store or anything that writes.
 
-**What a seat sees.** Every public message of its room, and a DM addressed to its name with an
-id above the room's high-water mark at minting (the DM floor). A DM sent to that name before the
-seat existed was meant for whoever held the name then, so it stays hidden. A DM is never shown
-because its sender carries the seat's name. Mirror-local lines (negative ids) never appear.
+**What a seat sees.** The public messages of its room, and nothing else: no DM, not even one
+addressed to its own name. Mirror-local lines (negative ids) never appear.
+
+Why no DMs at all: Joind routes a DM by recipient NAME, and a name is not a principal. The same
+name can be a human viewer's, a browser tab still holding a name its owner has since renamed
+away from, or a member of another room. Gate 1 on 6ab3e39 showed both directions: a seat minted
+under a name an open tab still held, and a human registering a seat's name after minting, each
+let the seat read the human's DMs. Section 5 now closes both, but the only rule that holds
+whatever the next identity path turns out to be is that a seat reads no DM. A seat that must
+receive private instructions is a future case for a distinct seat principal (see the backlog
+item on seat permissions); a mention in the room (`@Watcher`) reaches it in the next read. The
+first version's DM floor (a DM to the name above the room's high-water id at minting) is gone.
 
 **Read position.** Choice: the seat keeps no server-side cursor. It passes `since` (the
 `lastId` of its previous read). This is the simplest choice that satisfies R3 by construction:
@@ -137,8 +154,13 @@ Two rules keep it that way if someone tries to make the name a member:
    backstop.
 
 Minting refuses a name that is already a member, a binding, a linked peer's member or human in
-that room, or a human viewer's name (`--human-names` and the registered web name), because the
-seat would read DMs sent to that name from then on. Revoking frees the name.
+that room, or a human viewer's name: `--human-names`, the registered web name, and the name every
+open browser socket holds (a `web-rename` moves only the tab that sent it; the others keep the
+old name until they reconnect). In the other direction, `POST /api/web/register` (409) and the
+socket's `web-rename` (an error reply) refuse a name an active seat holds in ANY room, case
+insensitive, because DMs route by name across rooms. Revoking frees the name. With section 4's
+no-DM rule these are belt and braces: a collision could no longer disclose a DM, but two
+principals sharing a name is wrong on its own.
 
 ## 6. Mint, list, revoke (R4)
 
@@ -156,11 +178,13 @@ seats; their reads answer 404 ("room no longer exists") until revoked.
 
 ## 7. How each requirement is met, and the test that proves it
 
-All in `tests/readonly-seat.test.ts` (21 tests).
+All in `tests/readonly-seat.test.ts` (25 tests).
 
 | | How | Proving tests |
 |---|---|---|
-| R1 read | Four GET routes over the seat's own room, filtered by `seatCanSee`. | "R1: reads its room ... with since, limit, search and by id"; "R1: never reads another room, a DM to someone else, or a DM to its name from before it was minted"; unit "sees public messages and DMs to its name sent after minting" |
+| R1 read | Four GET routes over the seat's own room, public messages only (`seatCanSee`). | "R1: reads its room's public messages (never a DM, even to its name) with since, limit, search and by id"; "R1: never reads another room, a DM to someone else, or a DM to its name sent before or after minting"; unit "sees public messages only, never a DM, even one to its own name" |
+| R1 human names (gate 1) | Mint refuses names open sockets hold; register and rename refuse seat names; no DMs. | "R1: a seat cannot be minted under a name a browser socket still holds"; "R1: a human cannot register or rename onto a seat's name, and the seat reads no DM sent to that name"; unit "knows a seat's name in any room, case-insensitive, until revoked" |
+| R1 sockets (gate 1) | `verifyClient` refuses any upgrade carrying a seat token. | "R1: a socket upgrade carrying a seat token is refused even beside a valid web token" (seat header, a junk `jrs_` header, a query value and Bearer: 403 each, no frame received) |
 | R1 never act | The gate answers every seat-header request; only the allowlist is served. | "R1: default deny, every route of the server refuses the seat token and nothing changes" (walks every `app.*` route in `src/index.ts`, plus `/mcp`, the peer routes, `/`, static files and off-list seat paths, with the seat header beside the web token and the agent key; 403 for all, and message counts, members and rooms unchanged); "R1: an MCP session cannot be opened"; "R1: a seat token in any other credential slot is refused"; "R1, R2: no member can take the seat's name" |
 | R2 no console | No terminal call at mint; name held; room never wakes it. | "R2: minting and mentioning the seat never reach injection, discovery, Orca, classification or the Codex queue" (every function export of `inject`, `terminals`, `orca`, `target` and `codex-queue` is recorded: zero calls across mint and two mentions; a real member's mention is the positive control); "R2: even a member that somehow holds the name is not woken by @name or @all" (backstop, with control) |
 | R3 no side effect | Handlers read a copy; no cursor is stored. | "R3: reading moves no other seat's cursor, presence or activity record" (another member's unread count, both members' `lastSeen`, the notification unread count and the high-water id unchanged after repeated reads) |
@@ -173,6 +197,8 @@ All in `tests/readonly-seat.test.ts` (21 tests).
 - In `off` and `warn`, the server serves agent calls without any credential (section 2). The
   seat token cannot post, but its holder could post without it, as anyone on the network can.
   Run `require` when that matters.
+- No DMs, by design (section 4). Private instructions to a seat wait for a distinct seat
+  principal.
 - No listen (long poll) route; the seat polls `read` with `since`.
 - No MCP tools for seats.
 - No UI. Mint, list and revoke are REST calls (below).
@@ -205,8 +231,9 @@ curl -s "http://127.0.0.1:4200/api/seat/search?q=decision" -H "X-Joind-Seat-Toke
 curl -s http://127.0.0.1:4200/api/seat/message/1234 -H "X-Joind-Seat-Token: $SEAT"
 ```
 
-Keep `lastId` from each read and pass it as `since` next time. A mention of `@Watcher` (or a
-DM to it) is simply in the next read.
+Keep `lastId` from each read and pass it as `since` next time. A mention of `@Watcher` in the
+room is simply in the next read; a DM to it is never shown (section 4), so do not send it one.
+The name must not be a human viewer's or one any open browser tab holds (the mint answers 409).
 
 List and revoke:
 
@@ -215,4 +242,5 @@ curl -s http://127.0.0.1:4200/api/readonly-seats -H "X-Joind-Token: $WEB"
 curl -s -X POST http://127.0.0.1:4200/api/readonly-seats/seat-0123456789ab/revoke -H "X-Joind-Token: $WEB"
 ```
 
-After a revoke the token answers 401 at once, and the name may be used by a member again.
+After a revoke the token answers 401 at once, and the name may be used by a member or a human
+viewer again.

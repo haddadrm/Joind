@@ -8,12 +8,15 @@
  * allowlist of read routes, and never reaches any other route of the
  * server: default deny. Nothing here binds a terminal, discovers one, or
  * wakes anyone; the seat's name is held in its room so no member can take
- * it, and the room never wakes it (ChatRoom.seatReserved).
+ * it, and the room never wakes it (ChatRoom.seatReserved). A seat reads
+ * public messages only: a DM is routed by name, and a name is not a
+ * principal, so no DM is ever shown to a seat.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
+import type { IncomingHttpHeaders } from "http";
 import type { Request, Response, NextFunction, RequestHandler } from "express";
 import type { ChatMessage } from "./room.js";
 import { parseSearchQuery, hasTerms, searchLimit, searchBefore, searchMessages } from "./search.js";
@@ -51,9 +54,6 @@ export interface SeatRecord {
   tokenHash: string;
   createdAt: number;
   revokedAt: number | null;
-  /** The room's high-water id at minting: a DM to this name is readable only
-   *  above it (one sent earlier was meant for whoever held the name then). */
-  dmFloorId: number;
 }
 
 /** A seat as listed: no digest, no token. */
@@ -87,8 +87,7 @@ function isSeatRecord(v: unknown): v is SeatRecord {
   const r = v as Record<string, unknown>;
   return typeof r.id === "string" && typeof r.name === "string" && typeof r.conversationId === "string"
     && typeof r.tokenHash === "string" && /^[0-9a-f]{64}$/.test(r.tokenHash)
-    && typeof r.createdAt === "number" && (r.revokedAt === null || typeof r.revokedAt === "number")
-    && typeof r.dmFloorId === "number";
+    && typeof r.createdAt === "number" && (r.revokedAt === null || typeof r.revokedAt === "number");
 }
 
 export class ReadonlySeatStore {
@@ -147,12 +146,19 @@ export class ReadonlySeatStore {
     return this.activeFor(conversationId, name) !== undefined;
   }
 
+  /** True when an active seat holds `name` in any room (case-insensitive).
+   *  A human viewer may not take such a name: DMs route by name. */
+  holdsAnywhere(name: string): boolean {
+    const lower = name.toLowerCase();
+    return this.seats.some((s) => s.revokedAt === null && s.name.toLowerCase() === lower);
+  }
+
   /**
    * Mint a seat. The caller has checked the room is local and the name is
    * free there; this checks the name's form and the one-seat-per-name rule.
    * The token is returned once and never stored.
    */
-  mint(name: string, conversationId: string, dmFloorId: number): { seat: SeatView; token: string } {
+  mint(name: string, conversationId: string): { seat: SeatView; token: string } {
     if (this.broken) throw new SeatError(503, "the read-only seat file cannot be read; fix or remove it and restart");
     if (!SEAT_NAME.test(name) || RESERVED_WORDS.has(name.toLowerCase())) {
       throw new SeatError(400, "name must be 1 to 64 letters, digits, _ or - (starting with a letter, digit or _), and not all or system");
@@ -166,7 +172,6 @@ export class ReadonlySeatStore {
       tokenHash: sha256(token).toString("hex"),
       createdAt: this.now(),
       revokedAt: null,
-      dmFloorId,
     };
     this.seats.push(record);
     try {
@@ -228,14 +233,14 @@ export class ReadonlySeatStore {
 }
 
 /**
- * What a seat may read of a message: every public message, and a DM
- * addressed to the seat's name that was sent after the seat was minted.
- * Never a DM merely because its sender carries the seat's name.
+ * What a seat may read of a message: a public message of its room, and
+ * nothing else. A DM names its recipients by name, and the same name may
+ * belong to a human viewer, a browser tab still holding an old name, or a
+ * member of another room, so a seat never reads any DM, even one addressed
+ * to its own name. Mirror-local lines (id <= 0) are never shown.
  */
-export function seatCanSee(seat: Pick<SeatRecord, "name" | "dmFloorId">, m: ChatMessage): boolean {
-  if (!(m.id > 0)) return false;
-  if (!m.to) return true;
-  return m.id > seat.dmFloorId && m.to.includes(seat.name);
+export function seatCanSee(m: ChatMessage): boolean {
+  return m.id > 0 && m.to === undefined;
 }
 
 /** The room a seat reads: a local room only (never a mirror of a remote one). */
@@ -296,7 +301,7 @@ function seatRoutes(rooms: SeatRoomSource): Array<{ method: "GET"; path: RegExp;
         const limit = Math.min(limitN, READ_LIMIT_MAX);
         const all = roomOr404(seat, res);
         if (!all) return;
-        const visible = all.filter((m) => (since === undefined || m.id > since) && (!from || m.sender === from) && seatCanSee(seat, m));
+        const visible = all.filter((m) => (since === undefined || m.id > since) && (!from || m.sender === from) && seatCanSee(m));
         const messages = visible.slice(-limit);
         // The seat keeps its own place: no cursor is stored for it, or moved
         // for anyone, by a read. lastId is what the next `since` should be.
@@ -314,7 +319,7 @@ function seatRoutes(rooms: SeatRoomSource): Array<{ method: "GET"; path: RegExp;
         if (!all) return;
         const query = parseSearchQuery(raw ?? "");
         const page = hasTerms(query)
-          ? searchMessages(all, query, { limit: searchLimit(req.query.limit), before: searchBefore(req.query.before), visible: (m) => seatCanSee(seat, m) })
+          ? searchMessages(all, query, { limit: searchLimit(req.query.limit), before: searchBefore(req.query.before), visible: (m) => seatCanSee(m) })
           : { results: [], nextBefore: null };
         res.json({ conversation: conversation(seat), ...page });
       },
@@ -327,7 +332,7 @@ function seatRoutes(rooms: SeatRoomSource): Array<{ method: "GET"; path: RegExp;
         const all = roomOr404(seat, res);
         if (!all) return;
         const m = all.find((x) => x.id === id);
-        if (!m || !seatCanSee(seat, m)) { res.status(404).json({ error: "Message not found" }); return; }
+        if (!m || !seatCanSee(m)) { res.status(404).json({ error: "Message not found" }); return; }
         res.json(m);
       },
     },
@@ -346,23 +351,54 @@ function refuse(res: Response, status: 401 | 403, error: string): void {
 /** Every place another credential may ride: a seat token found in one of
  *  them is refused, never read as that credential. */
 function otherCredentialValues(req: Request): string[] {
+  const queryValues: string[] = [];
+  const query = req.query as Record<string, unknown>;
+  for (const k of Object.keys(query)) {
+    const v = query[k];
+    if (typeof v === "string") queryValues.push(v);
+    else if (Array.isArray(v)) for (const x of v) if (typeof x === "string") queryValues.push(x);
+  }
+  return credentialSlotValues(req.headers, queryValues);
+}
+
+/** The values in every credential slot other than the seat header: the
+ *  Authorization value (scheme dropped), the agent-key and web-token
+ *  headers, and the given query values. */
+function credentialSlotValues(headers: IncomingHttpHeaders, queryValues: string[]): string[] {
   const out: string[] = [];
-  const authz = req.get("authorization");
+  const authz = headers.authorization;
   if (typeof authz === "string") {
     const m = /^\s*\S+\s+(\S+)\s*$/.exec(authz);
     out.push(m ? m[1] : authz.trim());
   }
   for (const h of ["x-joind-agent-key", "x-joind-token"]) {
-    const v = req.get(h);
+    const v = headers[h];
     if (typeof v === "string") out.push(v.trim());
+    else if (Array.isArray(v)) for (const x of v) out.push(x.trim());
   }
-  const query = req.query as Record<string, unknown>;
-  for (const k of Object.keys(query)) {
-    const v = query[k];
-    if (typeof v === "string") out.push(v);
-    else if (Array.isArray(v)) for (const x of v) if (typeof x === "string") out.push(x);
-  }
+  out.push(...queryValues);
   return out;
+}
+
+/**
+ * The socket upgrade rule, matching the HTTP gate: an upgrade carrying the
+ * seat header (any value), or a seat token in any other credential slot, is
+ * refused before the socket opens, so a seat never holds a socket. Returns
+ * the refusal message, or null to let the upgrade go on to the web-token
+ * check.
+ */
+export function seatUpgradeRefusal(store: ReadonlySeatStore, headers: IncomingHttpHeaders, url: string | undefined): string | null {
+  if (headers[SEAT_HEADER] !== undefined) return "A read-only seat token cannot open a socket";
+  let queryValues: string[] = [];
+  try {
+    queryValues = [...new URL(url ?? "", "http://localhost").searchParams.values()];
+  } catch {
+    queryValues = [];
+  }
+  if (credentialSlotValues(headers, queryValues).some((v) => v.startsWith(SEAT_TOKEN_PREFIX) && store.isSeatToken(v))) {
+    return "A read-only seat token cannot open a socket";
+  }
+  return null;
 }
 
 /**

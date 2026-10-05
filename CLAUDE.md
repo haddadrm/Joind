@@ -97,7 +97,9 @@ Settings has an Agent key section.
 A seat token (`jrs_...`, header `X-Joind-Seat-Token` only) reads one local room through four GET
 routes (`/api/seat/me`, `read`, `search`, `message/:id`) and nothing else: `seatGate` is the
 first middleware and answers every request carrying the header itself (403 off the allowlist,
-in every agent-auth mode). Reads are stateless (the seat passes `since`). The seat's name is
+in every agent-auth mode; a `/ws` upgrade carrying a seat token is refused). Reads are stateless
+(the seat passes `since`) and public only: a seat never reads a DM, and no human viewer may share
+a seat's name. The seat's name is
 held in its room (`ChatRoom.seatReserved`): no join, rename or peer registration may take it,
 and the room never wakes it. Web-token routes: `GET /api/readonly-seats`,
 `POST /api/readonly-seats` (needs a user-set web token), `POST /api/readonly-seats/:id/revoke`.
