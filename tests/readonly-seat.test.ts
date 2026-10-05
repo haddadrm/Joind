@@ -658,6 +658,31 @@ describe("read-only seat and linked servers", () => {
       rmSync(s.dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("R5: minting ignores case when it checks owners, so a case variant cannot lock out an existing peer human, hosted or local member (gate 2 on cd313e8)", async () => {
+    const peerPort = await freePort();
+    const s = await start("warn", { links: [{ name: "peerx", url: `http://127.0.0.1:${peerPort}`, token: LINK }] });
+    try {
+      const room = s.h.manager.createConversation("Ops").id;
+      const link = { Authorization: `Bearer ${LINK}` };
+      const human = { room, name: "Reader", registration: "reg-peerx-human", host: "peerx", human: true };
+      const hosted = { room, name: "Hosted", registration: "reg-peerx-hosted", host: "peerx" };
+      expect((await post(s.base, "/api/peer/register", human, link)).status).toBe(200);
+      expect((await post(s.base, "/api/peer/register", hosted, link)).status).toBe(200);
+      await join_(s.base, "Member", room, PID2);
+      for (const variant of ["reader", "READER", "hosted", "mEMBER"]) {
+        const r = await post(s.base, "/api/readonly-seats", { name: variant, conversation: room }, webHdr);
+        expect(r.status, `${variant}: ${r.text}`).toBe(409);
+      }
+      // The existing registrations still renew, exactly as before.
+      expect((await post(s.base, "/api/peer/register", human, link)).status).toBe(200);
+      expect((await post(s.base, "/api/peer/register", hosted, link)).status).toBe(200);
+      expect((await get(s.base, "/api/readonly-seats", webHdr)).json.seats).toEqual([]);
+    } finally {
+      await s.h.close();
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("the room never wakes a seat's name (backstop)", () => {

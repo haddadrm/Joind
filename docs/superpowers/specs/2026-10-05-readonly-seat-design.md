@@ -1,7 +1,8 @@
 # Read-only room seats: design note
 
 Date: 5 Oct 2026. Branch `readonly-seat` from master 6e3d590. Status: implemented, not merged;
-gate 1 (on 6ab3e39) failed on two findings, both fixed in the next commit (sections 4 and 5). Sits beside the agent credentials
+gate 1 (on 6ab3e39) failed on two findings, both fixed in cd313e8 (sections 4 and 5); gate 2 (on
+cd313e8) failed on one, fixed in the next commit (section 5). Sits beside the agent credentials
 (`docs/superpowers/specs/2026-09-29-agent-credentials-design.md`).
 
 ## 1. The need
@@ -158,7 +159,11 @@ that room, or a human viewer's name: `--human-names`, the registered web name, a
 open browser socket holds (a `web-rename` moves only the tab that sent it; the others keep the
 old name until they reconnect). In the other direction, `POST /api/web/register` (409) and the
 socket's `web-rename` (an error reply) refuse a name an active seat holds in ANY room, case
-insensitive, because DMs route by name across rooms. Revoking frees the name. With section 4's
+insensitive, because DMs route by name across rooms. Revoking frees the name. Every mint check
+ignores case (`ChatRoom.holdsNameIgnoringCase` over local and hosted members and peer humans,
+`hasBindingIgnoringCase` for bindings, lower-cased human names), as the reservation does: gate 2
+on cd313e8 found that a seat `reader` minted beside a peer human `Reader` made that human's
+next unchanged re-registration fail with 409 (an R5 regression). With section 4's
 no-DM rule these are belt and braces: a collision could no longer disclose a DM, but two
 principals sharing a name is wrong on its own.
 
@@ -178,7 +183,7 @@ seats; their reads answer 404 ("room no longer exists") until revoked.
 
 ## 7. How each requirement is met, and the test that proves it
 
-All in `tests/readonly-seat.test.ts` (25 tests).
+All in `tests/readonly-seat.test.ts` (26 tests).
 
 | | How | Proving tests |
 |---|---|---|
@@ -189,7 +194,7 @@ All in `tests/readonly-seat.test.ts` (25 tests).
 | R2 no console | No terminal call at mint; name held; room never wakes it. | "R2: minting and mentioning the seat never reach injection, discovery, Orca, classification or the Codex queue" (every function export of `inject`, `terminals`, `orca`, `target` and `codex-queue` is recorded: zero calls across mint and two mentions; a real member's mention is the positive control); "R2: even a member that somehow holds the name is not woken by @name or @all" (backstop, with control) |
 | R3 no side effect | Handlers read a copy; no cursor is stored. | "R3: reading moves no other seat's cursor, presence or activity record" (another member's unread count, both members' `lastSeen`, the notification unread count and the high-water id unchanged after repeated reads) |
 | R4 scoped, revocable | One room per seat; operator routes; per-seat revoke. | "R4: operator-only minting, listing and revoking; revoking one seat leaves the others and every member alone"; unit "revocation is per seat and idempotent"; "R5 ... the seat survives a restart" (revocation persists) |
-| R5 unchanged | The gate passes every request without the seat header through untouched, unless it smuggles a seat token in another slot. | "R5: a seat reads under require with no agent key; web token and registrations behave as before"; the full existing suite (840 passing and 6 skipped on master, unchanged) |
+| R5 unchanged | The gate passes every request without the seat header through untouched, unless it smuggles a seat token in another slot. Minting checks owners case-insensitively, so a seat never blocks an existing registration. | "R5: a seat reads under require with no agent key; web token and registrations behave as before"; "R5: minting ignores case when it checks owners, so a case variant cannot lock out an existing peer human, hosted or local member"; the full existing suite (840 passing and 6 skipped on master, unchanged) |
 | Linked servers | Home only; peer registration refused. | "is minted only for a room whose home is this server, and a peer cannot register a member or human under the seat's name" |
 
 ## 8. Limits

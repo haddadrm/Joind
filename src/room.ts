@@ -664,6 +664,16 @@ export class ChatRoom extends EventEmitter {
     return h ? { peer: h.peer, human: true } : undefined;
   }
 
+  /** True when any spelling of `name` (case-insensitive) is a member (local
+   *  or hosted) or a linked peer's human here. A read-only seat's name is
+   *  held case-insensitively, so its mint checks owners the same way. */
+  holdsNameIgnoringCase(name: string): boolean {
+    const lower = name.toLowerCase();
+    for (const n of this.agents.keys()) if (n.toLowerCase() === lower) return true;
+    for (const n of this.peerHumans.keys()) if (n.toLowerCase() === lower) return true;
+    return false;
+  }
+
   /** The host's registration id of a hosted member (never served to clients). */
   hostedRegistrationOf(name: string): string | undefined {
     const agent = this.agents.get(name);

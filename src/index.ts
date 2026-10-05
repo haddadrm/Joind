@@ -966,13 +966,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!room || room instanceof MirrorRoom) { res.status(404).json({ error: "Conversation not found" }); return; }
     // The name must be nobody's here: not a member, a binding, a linked
     // peer's member or human, nor a human viewer under any name a browser
-    // socket still holds (a rename moves only one tab).
+    // socket still holds (a rename moves only one tab). Every check ignores
+    // case, as the seat's reservation does: a seat `reader` would otherwise
+    // lock out an existing `Reader` at its next re-registration.
     const lower = name.toLowerCase();
     const humans = [...CONFIG.humanNames, ...(registeredWebName ? [registeredWebName] : []), ...clientNames.values()].map((h) => h.toLowerCase());
     if (humans.includes(lower)) { res.status(409).json({ error: `${name} is a human viewer's name; pick another name` }); return; }
-    if (room.whoNames().some((n) => n.toLowerCase() === lower)
-      || manager.bindingsOf(name).some((e) => e.conversationId === convId)
-      || room.peerOwnerOf(name)) {
+    if (room.holdsNameIgnoringCase(name) || manager.hasBindingIgnoringCase(name, convId)) {
       res.status(409).json({ error: `${name} is a member of this room; pick another name, or mint after it leaves` });
       return;
     }
