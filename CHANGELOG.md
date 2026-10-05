@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-05: Read-only room seats
+
+- **Read-only seat credential** (`src/readonly-seats.ts`, design in `docs/superpowers/specs/2026-10-05-readonly-seat-design.md`): the operator mints a token that reads one room under one name and can do nothing else. It is presented only as `X-Joind-Seat-Token` and reaches four GET routes (`/api/seat/me`, `/api/seat/read`, `/api/seat/search`, `/api/seat/message/:id`). A first middleware answers every request carrying it, so any other route, `/mcp`, the peer routes and static files answer 403 in every agent-auth mode; a seat token placed in the agent key, Bearer, web token or a query slot is refused rather than tried. The seat sees the room's public messages and DMs to its name sent after minting. Reads keep no cursor and touch no presence, cursor or notification state.
+- **No console for a seat**: minting calls nothing in the terminal layer, the seat's name is held in its room (agent join, MCP join, web invite, rename and peer registration are refused with 409), and the room never wakes a held name, `@all` included.
+- **Operator routes** (web token): `POST /api/readonly-seats` (needs a user-set web token; local rooms only, a mirror is refused), `GET /api/readonly-seats`, `POST /api/readonly-seats/:id/revoke` (per seat, idempotent). Only SHA-256 digests are stored, in `readonly-seats.json` in the data dir (mode 0600, git-ignored by name); a corrupt file fails closed. The web token, the agent key and registrations behave as before.
+- **Tests**: `tests/readonly-seat.test.ts` (21), including a walk of every route in `src/index.ts` with the seat token and a recorder on every export of the injection, discovery, Orca, classification and Codex queue modules. Suite: 840 passed and 6 skipped before, 861 passed and 6 skipped after (74 files). One full-suite run during the lane reported one unhandled error with all tests passing; it did not repeat in five further runs and was not traced.
+- The backlog records Rami's question whether Joind needs a general seat permission and access-level system, with the read-only seat as its first case.
+
 ## 2026-10-01: Backlog, Linked Servers From Settings and In-App Toasts
 
 - The backlog records adding a linked server from Settings with a pairing code instead of flags and environment variables, and replacing the six browser confirm and alert dialogs with in-app ones.

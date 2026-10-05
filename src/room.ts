@@ -441,6 +441,10 @@ export class ChatRoom extends EventEmitter {
   displayName?: () => string | undefined;
   /** Carries wakes of hosted members to their host (set by the manager). */
   hostedWaker?: HostedWaker;
+  /** True for a name a read-only seat holds in this room (set by the server,
+   *  src/readonly-seats.ts). Such a name is never woken, whoever holds it,
+   *  and no member is renamed onto it. */
+  seatReserved?: (name: string) => boolean;
   /** The submit check's stores and timings; the defaults ($CODEX_HOME and
    *  ~/.codex, 2 s polls, 30 s window) when unset. Set by tests. */
   submitCheckOptions?: SubmitCheckOptions;
@@ -783,6 +787,9 @@ export class ChatRoom extends EventEmitter {
       // One entry per target per message, however often the text names it:
       // a message with thousands of "@A" is one mention of A.
       for (const target of new Set(targets)) {
+        // A read-only seat is never typed into a console: its mention waits
+        // to be read (docs/superpowers/specs/2026-10-05-readonly-seat-design.md).
+        if (this.seatReserved?.(target)) continue;
         const ids = this.pendingMentionIds.get(target) ?? [];
         // Ids only grow, so the list stays ascending: first is the earliest.
         if (ids.length === 0 || ids[ids.length - 1] < msg.id) ids.push(msg.id);
@@ -942,6 +949,7 @@ export class ChatRoom extends EventEmitter {
     if (this.destroyed) return;
     const queued = this.agents.get(name);
     if (!queued?.active || name === sender) return;
+    if (this.seatReserved?.(name)) return;
     // A hosted member's terminal is on its host: route, never inject here.
     if (queued.host) return this.wakeHostedMember(sender, name, queued);
     let moved = false;
@@ -1552,7 +1560,7 @@ export class ChatRoom extends EventEmitter {
     if (!agent) return null;
     // Never onto a name a linked peer owns here, and never a peer's member
     // (callers answer 409 first; this keeps every path honest).
-    if (agent.host || (oldName !== newName && this.peerOwnerOf(newName))) return null;
+    if (agent.host || (oldName !== newName && (this.peerOwnerOf(newName) || this.seatReserved?.(newName)))) return null;
     this.agents.delete(oldName);
     agent.name = newName;
     this.agents.set(newName, agent);

@@ -334,6 +334,9 @@ export class PeerHub {
       if (!roomId || !room) { res.status(404).json({ error: "Conversation not found" }); return; }
       if (!name || name.length > 64 || !hostedRegistration) { res.status(400).json({ error: "room, name, host and registration required" }); return; }
       if (str(body.host) !== peer) { res.status(403).json({ error: `host must be the calling server (${peer})` }); return; }
+      // A read-only seat's name is held in its room, for a peer's member and
+      // a peer's human alike.
+      if (room.seatReserved?.(name)) { res.status(409).json({ error: `${name} is a read-only seat in this room; pick another name`, code: "name-conflict", candidates: [] }); return; }
       const existing = room.getAgent(name);
       const human = room.peerHumanOf(name);
       // A name bound locally in this room (a member that timed out keeps its

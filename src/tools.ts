@@ -403,9 +403,13 @@ export function departureIsCurrent(
  * register during the join's terminal validation (finding 4).
  */
 export function peerOwnerRefusal(
-  room: { peerOwnerOf(name: string): { peer: string; human: boolean } | undefined },
+  room: { peerOwnerOf(name: string): { peer: string; human: boolean } | undefined; seatReserved?: (name: string) => boolean },
   convId: string, name: string,
 ): { error: string; candidates: Array<{ conversation: string; host: string; human?: true }> } | null {
+  // A read-only seat's name is held in its room: no member may take it, so
+  // a mention of the seat never reaches a console (every join and rename
+  // path asks here, before and again after its awaits).
+  if (room.seatReserved?.(name)) return { error: `${name} is a read-only seat in this room; pick another name`, candidates: [] };
   const owner = room.peerOwnerOf(name);
   if (!owner) return null;
   return {
