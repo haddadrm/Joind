@@ -131,12 +131,14 @@ const LIFTED_FUNCTIONS = [
   "noteRefusedAnswer", "showAuthBanner", "hideAuthBanner", "runBootReads", "reconnectWithToken",
   "promptWebToken", "ensureWebToken", "bootSession", "loadInstanceInfo", "registerWebName",
   "adoptRegisteredName", "startSession", "connect", "handleSocketClose", "myName", "setupYouPill",
-  "loadCrewRoster", "loadTemplates", "refreshSessionStatus",
+  "loadCrewRoster", "loadTemplates", "refreshSessionStatus", "signOut",
+  "forgetWebToken", "retireSocket", "closeTabSockets",
 ];
 const LIFTED_VARS = [
   "ws", "wsName", "pendingRename", "renameAttempt", "wsAuthFailures", "reconnectTimer",
   "injectedTokenStale", "TOKEN_RELOAD_KEY", "TOKEN_REFUSED_TEXT", "tokenPromptAfter",
   "bootTokenPrompted", "signedOut", "setMyName", "crewRoster", "sessionTemplates",
+  "typedWebToken", "authEpoch", "sessionAttempt", "tabSockets",
 ];
 
 // What the init handler and the rest touch, stubbed (counted where useful).
@@ -169,6 +171,16 @@ function openUserMenu() {}
 function loadNotifications() { count('loadNotifications'); }
 function refreshDecisionsBadge() { count('refreshDecisionsBadge'); }
 function fetchDmPartners() {}
+var notifyPanelOpen = false, decisionsPanelOpen = false, sessionStatusInterval = null, membersTick = null, autoScanInterval = null;
+function closePopover() {}
+function closeSettingsModal() {}
+function closeSidePanel() {}
+function closeNotifyPanel() {}
+function closeDecisionsPanel() {}
+function closeCrewPanel() {}
+function closeLaunchDialog() {}
+function closeMobileDrawer() {}
+function showSignedOut() { count('showSignedOut'); }
 `;
 
 interface FakeSocket {
@@ -195,7 +207,7 @@ interface Page {
   fetches: FetchCall[];
   timers: Timer[];
   reloads: number;
-  route: (url: string, method: string) => FakeAnswer;
+  route: (url: string, method: string) => FakeAnswer | Promise<FakeAnswer>;
   flush(): Promise<void>;
   runTimers(): Promise<void>;
   last(): FakeSocket;
@@ -206,7 +218,24 @@ interface Page {
   prompt(): HTMLElement | null;
 }
 
-interface PageOptions { injected?: string; sessionToken?: string; reloadFlag?: boolean; name?: string }
+type StorageFault = "throw-read" | "throw-write" | "throw-all";
+interface PageOptions { injected?: string; sessionToken?: string; reloadFlag?: boolean; name?: string; storage?: StorageFault }
+
+/** A sessionStorage whose reads, writes or both throw (storage blocked). */
+function faultyStorage(fault: StorageFault): Storage {
+  const data = new Map<string, string>();
+  const readFails = fault !== "throw-write";
+  const writeFails = fault !== "throw-read";
+  const blocked = (): never => { throw new Error("storage blocked"); };
+  return {
+    get length(): number { return data.size; },
+    key: (i: number): string | null => [...data.keys()][i] ?? null,
+    getItem: (k: string): string | null => (readFails ? blocked() : data.get(k) ?? null),
+    setItem: (k: string, v: string): void => { if (writeFails) blocked(); data.set(k, v); },
+    removeItem: (k: string): void => { if (writeFails) blocked(); data.delete(k); },
+    clear: (): void => { if (writeFails) blocked(); data.clear(); },
+  };
+}
 
 function makePage(opts: PageOptions = {}): Page {
   const dom = new JSDOM(
@@ -220,10 +249,11 @@ function makePage(opts: PageOptions = {}): Page {
   if (opts.reloadFlag) win.sessionStorage.setItem("joind-token-reload", "1");
   if (opts.name) win.localStorage.setItem("joind-sender-name", opts.name);
   if (opts.injected) win.__JOIND_TOKEN = opts.injected;
+  if (opts.storage) Object.defineProperty(win, "sessionStorage", { configurable: true, value: faultyStorage(opts.storage) });
 
   const page = {
     win, sockets: [] as FakeSocket[], fetches: [] as FetchCall[], timers: [] as Timer[], reloads: 0,
-    route: (_url: string, _method: string): FakeAnswer => ({ status: 200, body: [] }),
+    route: (_url: string, _method: string): FakeAnswer | Promise<FakeAnswer> => ({ status: 200, body: [] }),
   } as Page;
 
   let timerId = 0;
@@ -257,7 +287,7 @@ function makePage(opts: PageOptions = {}): Page {
     const method = init?.method ?? "GET";
     const token = init?.headers instanceof Headers ? init.headers.get("X-Joind-Token") : null;
     page.fetches.push({ url: input, method, token, body: init?.body ? JSON.parse(init.body) as unknown : undefined });
-    return Promise.resolve(answer(page.route(input, method)));
+    return Promise.resolve(page.route(input, method)).then(answer);
   }) as unknown as typeof fetch;
 
   win.eval(HELPERS);
@@ -538,5 +568,243 @@ describe("fix 5: boot reads run again after the boot prompt, and refusals are no
     expect(page.sockets).toHaveLength(1);
     expect(nameOf(page.last())).toBe("Rami");
     expect(tokenOf(page.last())).toBe(TOKEN);
+  });
+});
+
+// --- round 2 (gate 1 findings) -------------------------------------------
+
+function typeToken(page: Page, value: string): void {
+  const input = page.prompt()!.querySelector("input") as HTMLInputElement;
+  input.value = value;
+  (page.prompt()!.querySelector("button") as HTMLButtonElement).click();
+}
+const registerOk = (url: string): FakeAnswer =>
+  url === "/api/web/register" ? { status: 200, body: { ok: true, name: "Rami" } } : { status: 200, body: [] };
+const live = (page: Page): FakeSocket[] => page.sockets.filter((s) => s.readyState !== 3);
+
+describe("round 2, finding 1: sessionStorage is optional, a typed token lives in page memory", () => {
+  it("storage blocked entirely: a stale injected token prompts, and the typed token is used", async () => {
+    const page = makePage({ injected: "stale", name: "Rami", storage: "throw-all" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    page.open(); page.close(4401); await page.flush();
+    expect(page.reloads).toBe(0); // no guard can be stored: never reload
+    expect(page.prompt()).not.toBeNull();
+    typeToken(page, "correct");
+    await page.flush();
+    expect(page.api.run("webToken()")).toBe("correct");
+    expect(page.prompt()).toBeNull();
+    expect(tokenOf(page.last())).toBe("correct");
+    const reg = page.fetches.filter((f) => f.url === "/api/web/register").pop();
+    expect(reg?.body).toEqual({ token: "correct", name: "Rami" });
+  });
+
+  it("writes throw: the boot prompt's token still connects (user-set mode)", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-write" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    expect(page.prompt()).not.toBeNull();
+    typeToken(page, TOKEN);
+    await page.flush();
+    expect(page.prompt()).toBeNull();
+    expect(page.sockets).toHaveLength(1);
+    expect(tokenOf(page.last())).toBe(TOKEN);
+  });
+
+  it("reads throw: the boot prompt's token still connects (user-set mode)", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-read" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    expect(page.sockets).toHaveLength(1);
+    expect(tokenOf(page.last())).toBe(TOKEN);
+    expect(page.fetches.filter((f) => f.url === "/api/web/register").every((f) => f.token === TOKEN)).toBe(true);
+  });
+
+  it("the memory copy is dropped on a 4401 refusal and on sign out", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); page.close(4401); await page.flush();
+    expect(page.api.run("webToken()")).toBe("");
+    expect(page.prompt()).not.toBeNull();
+    typeToken(page, TOKEN);
+    await page.flush();
+    expect(page.api.run("webToken()")).toBe(TOKEN);
+    page.api.run("signOut()");
+    expect(page.api.run("webToken()")).toBe("");
+  });
+});
+
+describe("round 2, finding 2: one registration and connection attempt at a time", () => {
+  for (const order of ["in order", "in reverse"] as const) {
+    it(`a double Retry with a delayed register (replies ${order}) ends with one live socket; sign out leaves none`, async () => {
+      const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+      const held: Array<(a: FakeAnswer) => void> = [];
+      page.route = (url) => url === "/api/web/register"
+        ? new Promise<FakeAnswer>((resolve) => { held.push(resolve); })
+        : { status: 200, body: [] };
+      page.api.run("reconnectWithToken(); reconnectWithToken();");
+      await page.flush();
+      const replies = order === "in order" ? held.slice() : held.slice().reverse();
+      for (const resolve of replies) { resolve({ status: 200, body: { ok: true, name: "Rami" } }); await page.flush(); }
+      expect(live(page)).toHaveLength(1);
+      page.open(live(page)[0]); page.init(live(page)[0]);
+      page.api.run("signOut()");
+      expect(live(page)).toHaveLength(0);
+    });
+  }
+
+  it("a replaced socket is closed and its open, messages and close are ignored", () => {
+    const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+    page.api.run("connect(); connect();");
+    expect(page.sockets).toHaveLength(2);
+    const [old, cur] = page.sockets;
+    expect(old.readyState).toBe(3);
+    old.readyState = 1; old.onopen?.();
+    page.init(old);
+    expect(page.api.v("socketInitCount")).toBe(0);
+    expect((page.api.v("calls") as Record<string, number>).refreshDecisionsBadge).toBeUndefined();
+    old.readyState = 3; old.onclose?.({ code: 4401 });
+    expect(page.prompt()).toBeNull();
+    expect(page.timers).toHaveLength(0);
+    page.open(cur); page.init(cur);
+    expect(page.api.v("socketInitCount")).toBe(1);
+  });
+
+  it("sign out closes every socket the tab opened and cancels the pending reconnect", async () => {
+    const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    page.open(); page.init(); page.close(1006); await page.flush();
+    expect(page.timers).toHaveLength(1);
+    page.api.run("signOut()");
+    expect(page.timers).toHaveLength(0);
+    expect(live(page)).toHaveLength(0);
+  });
+});
+
+describe("round 2, finding 3: a refusal from an earlier auth episode does not bring the banner back", () => {
+  it("a 401 sent before recovery and answered after init is ignored", async () => {
+    const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+    const late: Array<(a: FakeAnswer) => void> = [];
+    page.route = (url) => url === "/api/dms"
+      ? new Promise<FakeAnswer>((resolve) => { late.push(resolve); })
+      : registerOk(url);
+    const pending = page.win.fetch("/api/dms");
+    page.api.run("showAuthBanner(TOKEN_REFUSED_TEXT, { token: true, retry: true })");
+    page.api.run("bootSession()");
+    await page.flush();
+    page.open(); page.init();
+    expect(page.banner()).toBeNull();
+    late[0]({ status: 401, body: { error: "Agent credential required" } });
+    await pending;
+    await page.flush();
+    expect(page.banner()).toBeNull();
+  });
+
+  it("a refusal whose body parses only after the banner cleared is ignored", async () => {
+    const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+    const bodies: Array<(b: unknown) => void> = [];
+    (page.api.run("noteRefusedAnswer") as (r: unknown) => void)({
+      status: 401,
+      clone: () => ({ json: () => new Promise((resolve) => { bodies.push(resolve); }) }),
+    });
+    page.api.run("hideAuthBanner()");
+    bodies[0]({ error: "unauthorized" });
+    await page.flush();
+    expect(page.banner()).toBeNull();
+  });
+
+  it("a refusal of a request sent after recovery still shows the banner", async () => {
+    const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    page.open(); page.init();
+    page.route = () => ({ status: 401, body: { error: "Agent credential required" } });
+    await page.win.fetch("/api/dms");
+    await page.flush();
+    expect(page.banner()).not.toBeNull();
+  });
+
+  it("the same banner state again keeps its buttons (and focus); a new state rebuilds", () => {
+    const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+    page.api.run("showAuthBanner(TOKEN_REFUSED_TEXT, { token: true, retry: true })");
+    const btn = page.win.document.getElementById("auth-banner-token") as HTMLButtonElement;
+    btn.focus();
+    page.api.run("showAuthBanner(TOKEN_REFUSED_TEXT, { token: true, retry: true })");
+    expect(page.win.document.getElementById("auth-banner-token")).toBe(btn);
+    expect(page.win.document.activeElement).toBe(btn);
+    page.api.run("showAuthBanner('Name refused', { retry: true })");
+    expect(page.win.document.getElementById("auth-banner-token")).toBeNull();
+    expect(page.banner()?.textContent).toContain("Name refused");
+  });
+});
+
+// The notification bell and the decisions badge: a refused read keeps what
+// the page shows instead of parsing the error body as data.
+function miniPage(src: string, ans: FakeAnswer): PageApi {
+  const dom = new JSDOM('<!doctype html><body><span id="notify-badge"></span><span id="decisions-badge"></span></body>', { runScripts: "outside-only", url: "http://joind.test/" });
+  const win = dom.window as unknown as Window & typeof globalThis & Record<string, unknown>;
+  win.fetch = ((): Promise<unknown> => Promise.resolve({
+    status: ans.status, ok: ans.status >= 200 && ans.status < 300,
+    json: (): Promise<unknown> => Promise.resolve(JSON.parse(JSON.stringify(ans.body ?? null))),
+  })) as unknown as typeof fetch;
+  win.eval("(function() {\nvar calls = {};\nfunction count(n) { calls[n] = (calls[n] || 0) + 1; }\n" + src +
+    "\nwindow.__page = { v: function(n) { return eval(n); }, run: function(s) { return eval(s); } };\n})();");
+  return win.__page as PageApi;
+}
+const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise<void>((r) => setImmediate(r)); };
+const REFUSED: FakeAnswer = { status: 401, body: { error: "Agent credential required" } };
+
+describe("round 2, gap: notifications and the decisions badge check r.ok", () => {
+  const NOTIFY = `
+var notifyEpoch = 0, notifyGeneration = 'g1', notifyItems = [{ id: 1, read: false }], notifyUnread = 1, notifyPanelOpen = false;
+function adoptNotifyGeneration() { count('adoptNotifyGeneration'); }
+function renderNotifyBadge() { count('renderNotifyBadge'); }
+function renderNotifyPanel() {}
+` + lift("loadNotifications");
+  const DECISIONS = `
+var decisionsSeq = 0, decisionsFetchId = 0, decisionsCache = [{ id: 'd1' }], decisionsPanelOpen = false, pageNow = '';
+function webToken() { return 'x'; }
+function renderDecisionsPanel() {}
+function refreshPalette() { count('refreshPalette'); }
+function loadDecisionsPage() {}
+` + lift("refreshDecisionsBadge");
+
+  it("a refused notifications read leaves the bell alone", async () => {
+    const api = miniPage(NOTIFY, REFUSED);
+    api.run("loadNotifications()");
+    await settle();
+    expect(api.v("notifyItems")).toEqual([{ id: 1, read: false }]);
+    expect((api.v("calls") as Record<string, number>).renderNotifyBadge).toBeUndefined();
+  });
+
+  it("a refused decisions read keeps the cache and the badge", async () => {
+    const api = miniPage(DECISIONS, REFUSED);
+    api.run("refreshDecisionsBadge()");
+    await settle();
+    expect(api.v("decisionsCache")).toEqual([{ id: "d1" }]);
+    expect((api.v("calls") as Record<string, number>).refreshPalette).toBeUndefined();
+  });
+
+  it("an accepted read still lands", async () => {
+    const n = miniPage(NOTIFY, { status: 200, body: { generation: "g1", notifications: [{ id: 2, read: false }] } });
+    n.run("loadNotifications()");
+    await settle();
+    expect((n.v("notifyItems") as Array<{ id: number }>).map((x) => x.id)).toEqual([2, 1]);
+    const d = miniPage(DECISIONS, { status: 200, body: { decisions: [] } });
+    d.run("refreshDecisionsBadge()");
+    await settle();
+    expect(d.v("decisionsCache")).toEqual([]);
   });
 });
