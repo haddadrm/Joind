@@ -8,7 +8,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 const injected: Array<{ pid: number; codexThread?: string; codexHome?: string; queueGuard: boolean }> = [];
 const prompts: string[] = [];
@@ -29,6 +28,7 @@ vi.mock("../src/terminals.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import type { JoindConfig } from "../src/config.js";
 import type { FetchLike } from "../src/link.js";
 
@@ -37,27 +37,19 @@ const WEB = "c".repeat(64);
 const PID = 999_983;
 const THREAD = "01a0e156-de0a-7bb0-909e-32d39d9b172f";
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
+// Each server binds port 0; its link names the peer by a placeholder URL that
+// resolves once the peer is up (tests/peer-routes.ts).
+const routes = new PeerRoutes();
 const fetchImpl: FetchLike = async (url, init) => {
   const res = await fetch(url, init);
   return { status: res.status, text: () => res.text() };
 };
-function config(dir: string, instance: string, port: number, peer: string, peerPort: number): JoindConfig {
+function config(dir: string, instance: string, peer: string): JoindConfig {
   return {
-    port, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
+    port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
     humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
     webToken: WEB, webTokenUserSet: true,
-    links: [{ name: peer, url: `http://127.0.0.1:${peerPort}`, token: TOKEN }],
+    links: [{ name: peer, url: routes.url(peer), token: TOKEN }],
   };
 }
 async function waitFor<T>(what: string, fn: () => T | undefined | false, ms = 12_000): Promise<T> {
@@ -94,10 +86,11 @@ describe("codexThread through the servers", { timeout: 20_000 }, () => {
     // A stand-in Codex home: an absolute directory with a sessions directory.
     home = join(dirB, "codex-home");
     mkdirSync(join(home, "sessions"), { recursive: true });
-    const [pa, pb] = [await freePort(), await freePort()];
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 60_000, fetchImpl };
-    A = await startJoind(config(dirA, "alpha", pa, "bravo", pb), { link: tuning });
-    B = await startJoind(config(dirB, "bravo", pb, "alpha", pa), { link: tuning });
+    A = await startJoind(config(dirA, "alpha", "bravo"), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("alpha", A.baseUrl);
+    B = await startJoind(config(dirB, "bravo", "alpha"), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("bravo", B.baseUrl);
     room = A.manager.createConversation("ops").id;
   }, 30_000);
 

@@ -8,7 +8,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 vi.mock("../src/inject.js", async () => {
   const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
@@ -25,18 +24,6 @@ import type { JoindConfig } from "../src/config.js";
 const WEB = "b".repeat(64);
 const PID_BIG = 999_971;
 const PID_SMALL = 999_973;
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
 
 async function call(base: string, method: "GET" | "POST", path: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(`${base}${path}`, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
@@ -57,9 +44,8 @@ describe("room-scoped cursors through the server", { timeout: 20_000 }, () => {
     mkdirSync(join(dir, "data"), { recursive: true });
     writeFileSync(join(dir, "data", "agent-cursors.json"), JSON.stringify({ Scotty: 10029 }));
     vi.spyOn(console, "log").mockImplementation((l: unknown) => { logs.push(String(l)); });
-    const port = await freePort();
     const config: JoindConfig = {
-      port, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "solo", crewHome: join(dir, "crew"),
+      port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "solo", crewHome: join(dir, "crew"),
       humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
       webToken: WEB, webTokenUserSet: true, links: [],
     };

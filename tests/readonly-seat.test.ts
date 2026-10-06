@@ -11,7 +11,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "fs";
 import { basename, join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 const terminalCalls: string[] = [];
 const injected: Array<{ pid: number; prompt: string }> = [];
@@ -56,6 +55,7 @@ vi.mock("../src/codex-queue.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import type { JoindConfig } from "../src/config.js";
 import type { AgentAuthMode } from "../src/agent-auth.js";
 import { ReadonlySeatStore, SEAT_ALLOWLIST, seatCanSee, seatsPath, normalizeSeatPath } from "../src/readonly-seats.js";
@@ -67,21 +67,14 @@ const LINK = "link-token-for-readonly-seat-tests";
 const PID = 999_961;
 const PID2 = 999_963;
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
+// Every server binds port 0. A link names its peer by a placeholder URL that
+// never resolves here (tests/peer-routes.ts), so the peer stays down for good
+// and no other test's server can ever answer in its place.
+const routes = new PeerRoutes();
 
-function config(dir: string, port: number, mode: AgentAuthMode, extra: Partial<JoindConfig> = {}): JoindConfig {
+function config(dir: string, mode: AgentAuthMode, extra: Partial<JoindConfig> = {}): JoindConfig {
   return {
-    port, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "solo", crewHome: join(dir, "crew"),
+    port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "solo", crewHome: join(dir, "crew"),
     humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
     webToken: WEB, webTokenUserSet: true, links: [], agentAuth: mode, agentKey: KEY,
     ...extra,
@@ -135,11 +128,10 @@ interface Server { dir: string; h: JoindHandle; base: string }
 
 async function start(mode: AgentAuthMode, extra: Partial<JoindConfig> = {}, dir?: string): Promise<Server> {
   const d = dir ?? mkdtempSync(join(tmpdir(), "joind-seat-"));
-  const port = await freePort();
-  const h = await startJoind(config(d, port, mode, extra), {
-    link: { discoverEveryMs: 600_000, backoffMinMs: 600_000, backoffMaxMs: 600_000, requestTimeoutMs: 500 },
+  const h = await startJoind(config(d, mode, extra), {
+    link: { discoverEveryMs: 600_000, backoffMinMs: 600_000, backoffMaxMs: 600_000, requestTimeoutMs: 500, fetchImpl: routes.wrap() },
   });
-  return { dir: d, h, base: `http://127.0.0.1:${port}` };
+  return { dir: d, h, base: h.baseUrl };
 }
 
 async function mint(base: string, name: string, conversation: string): Promise<{ token: string; id: string }> {
@@ -641,8 +633,7 @@ describe("read-only seat and human viewers (gate 1 on 6ab3e39)", () => {
 
 describe("read-only seat and linked servers", () => {
   it("is minted only for a room whose home is this server, and a peer cannot register a member or human under the seat's name", async () => {
-    const peerPort = await freePort();
-    const s = await start("warn", { links: [{ name: "peerx", url: `http://127.0.0.1:${peerPort}`, token: LINK }] });
+    const s = await start("warn", { links: [{ name: "peerx", url: routes.url("peerx"), token: LINK }] });
     try {
       const room = s.h.manager.createConversation("Ops").id;
       await mint(s.base, "Watcher", room);
@@ -662,8 +653,7 @@ describe("read-only seat and linked servers", () => {
   }, 30_000);
 
   it("R5: minting ignores case when it checks owners, so a case variant cannot lock out an existing peer human, hosted or local member (gate 2 on cd313e8)", async () => {
-    const peerPort = await freePort();
-    const s = await start("warn", { links: [{ name: "peerx", url: `http://127.0.0.1:${peerPort}`, token: LINK }] });
+    const s = await start("warn", { links: [{ name: "peerx", url: routes.url("peerx"), token: LINK }] });
     try {
       const room = s.h.manager.createConversation("Ops").id;
       const link = { Authorization: `Bearer ${LINK}` };

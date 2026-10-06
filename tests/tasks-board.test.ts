@@ -7,7 +7,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 vi.mock("../src/terminals.js", async () => {
   const actual = await vi.importActual<typeof import("../src/terminals.js")>("../src/terminals.js");
@@ -22,18 +21,6 @@ import { ConversationManager } from "../src/manager.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 const WEB = "a".repeat(64);
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
 
 describe("TaskStore states", () => {
   it("reads old files as they were, and an unknown state as open", () => {
@@ -113,9 +100,8 @@ describe("task routes for the board", { timeout: 30_000 }, () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     dir = mkdtempSync(join(tmpdir(), "joind-board-"));
-    const port = await freePort();
     const cfg: JoindConfig = {
-      port, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "board", crewHome: join(dir, "crew"),
+      port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "board", crewHome: join(dir, "crew"),
       humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
       webToken: WEB, webTokenUserSet: true, links: [],
     };

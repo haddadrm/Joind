@@ -9,7 +9,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from "fs";
 import { basename, join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 const injected: Array<{ pid: number; prompt: string }> = [];
 vi.mock("../src/inject.js", async () => {
@@ -26,6 +25,7 @@ vi.mock("../src/terminals.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import { loadConfig, webNamePath, webTokenPath, type JoindConfig } from "../src/config.js";
 import {
   AgentAuth, AgentKeyRotateError, classifyRoute, parseAgentAuthMode, presentedAgentKey, routeLabel, keyFingerprint, agentKeyPath,
@@ -39,21 +39,13 @@ const LINK = "link-token-for-agent-auth-tests";
 const PID = 999_971;
 const PID2 = 999_973;
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
+// Every server binds port 0. The linked pair names each peer by a placeholder
+// URL that resolves once that peer is up (tests/peer-routes.ts).
+const routes = new PeerRoutes();
 
-function config(dir: string, port: number, mode: AgentAuthMode, extra: Partial<JoindConfig> = {}): JoindConfig {
+function config(dir: string, mode: AgentAuthMode, extra: Partial<JoindConfig> = {}): JoindConfig {
   return {
-    port, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "solo", crewHome: join(dir, "crew"),
+    port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "solo", crewHome: join(dir, "crew"),
     humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
     webToken: WEB, webTokenUserSet: true, links: [], agentAuth: mode, agentKey: KEY,
     ...extra,
@@ -259,8 +251,7 @@ describe("agent-auth units", () => {
   it("mints a file key beside the data dir, not in it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-aa-file-"));
     try {
-      const port = await freePort();
-      const { agentKey: _omit, ...rest } = config(dir, port, "warn");
+      const { agentKey: _omit, ...rest } = config(dir, "warn");
       const h = await startJoind(rest as JoindConfig);
       try {
         const path = agentKeyPath(join(dir, "data"));
@@ -277,7 +268,7 @@ describe("agent-auth units", () => {
   it("with a served web token the key is neither revealed nor rotated from the page", async () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-aa-srv2-"));
     try {
-      const { agentKey: _k, ...rest } = config(dir, await freePort(), "warn", { webTokenUserSet: false });
+      const { agentKey: _k, ...rest } = config(dir, "warn", { webTokenUserSet: false });
       const h = await startJoind(rest as JoindConfig);
       try {
         const key = readFileSync(join(dir, "joind-agent-key"), "utf8").trim();
@@ -297,14 +288,14 @@ describe("agent-auth units", () => {
     try {
       // A directory where the key file should be: reading and writing both fail.
       mkdirSync(join(dir, "joind-agent-key"));
-      const { agentKey: _k, ...warnCfg } = config(dir, await freePort(), "warn");
+      const { agentKey: _k, ...warnCfg } = config(dir, "warn");
       const h = await startJoind(warnCfg as JoindConfig);
       try {
         const room = h.manager.createConversation("ops").id;
         expect((await post(h.baseUrl, "/api/agent/join", { name: "Nilani", pid: PID, conversation: room })).status).toBe(200);
         expect((await post(h.baseUrl, "/api/agent-auth/rotate", {}, webHdr)).status).toBe(409);
       } finally { await h.close(); }
-      const { agentKey: _k2, ...reqCfg } = config(dir, await freePort(), "require");
+      const { agentKey: _k2, ...reqCfg } = config(dir, "require");
       await expect(startJoind(reqCfg as JoindConfig)).rejects.toThrow(/cannot read or write/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -312,9 +303,9 @@ describe("agent-auth units", () => {
   it("require refuses to start with a served (generated) web token", async () => {
     const dir = mkdtempSync(join(tmpdir(), "joind-aa-served-"));
     try {
-      await expect(startJoind(config(dir, await freePort(), "require", { webTokenUserSet: false }))).rejects.toThrow(/user-set web token/);
+      await expect(startJoind(config(dir, "require", { webTokenUserSet: false }))).rejects.toThrow(/user-set web token/);
       // Nothing was locked or started: the same data dir starts in warn.
-      const h = await startJoind(config(dir, await freePort(), "warn", { webTokenUserSet: false }));
+      const h = await startJoind(config(dir, "warn", { webTokenUserSet: false }));
       await h.close();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -332,7 +323,7 @@ describe("require: one server", { timeout: 30_000 }, () => {
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "joind-aa-req-"));
     logSpy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
-    S = await startJoind(config(dir, await freePort(), "require"));
+    S = await startJoind(config(dir, "require"));
     room = S.manager.createConversation("ops").id;
     S.manager.setActive(room);
   });
@@ -564,7 +555,7 @@ describe("rotation with a file key", { timeout: 30_000 }, () => {
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "joind-aa-rot-"));
-    const { agentKey: _k, ...rest } = config(dir, await freePort(), "require");
+    const { agentKey: _k, ...rest } = config(dir, "require");
     S = await startJoind(rest as JoindConfig);
     room = S.manager.createConversation("ops").id;
     S.manager.setActive(room);
@@ -614,7 +605,7 @@ describe("warn and off never refuse", { timeout: 30_000 }, () => {
   for (const mode of ["warn", "off"] as const) {
     it(`${mode}: every agent route and fallback is served without a credential or with a wrong one`, async () => {
       const dir = mkdtempSync(join(tmpdir(), `joind-aa-${mode}-`));
-      const S = await startJoind(config(dir, await freePort(), mode));
+      const S = await startJoind(config(dir, mode));
       try {
         const room = S.manager.createConversation("ops").id;
         S.manager.setActive(room);
@@ -685,10 +676,11 @@ describe("linked servers, both in require", { timeout: 40_000 }, () => {
   beforeAll(async () => {
     dirA = mkdtempSync(join(tmpdir(), "joind-aa-la-"));
     dirB = mkdtempSync(join(tmpdir(), "joind-aa-lb-"));
-    const [pa, pb] = [await freePort(), await freePort()];
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 60_000 };
-    A = await startJoind(config(dirA, pa, "require", { instance: "alpha", agentKey: KEY_A, links: [{ name: "bravo", url: `http://127.0.0.1:${pb}`, token: LINK }] }), { link: tuning });
-    B = await startJoind(config(dirB, pb, "require", { instance: "bravo", agentKey: KEY_B, links: [{ name: "alpha", url: `http://127.0.0.1:${pa}`, token: LINK }] }), { link: tuning });
+    A = await startJoind(config(dirA, "require", { instance: "alpha", agentKey: KEY_A, links: [{ name: "bravo", url: routes.url("bravo"), token: LINK }] }), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("alpha", A.baseUrl);
+    B = await startJoind(config(dirB, "require", { instance: "bravo", agentKey: KEY_B, links: [{ name: "alpha", url: routes.url("alpha"), token: LINK }] }), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("bravo", B.baseUrl);
     room = A.manager.createConversation("ops").id;
     remote = `alpha:${room}`;
   }, 30_000);
