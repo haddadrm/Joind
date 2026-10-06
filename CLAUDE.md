@@ -120,16 +120,19 @@ it. The badge is a 1 to 2 character code on a colour: by default the first lette
 the server name on a palette colour picked by an FNV-1a hash of the lower-cased name (every
 palette colour carries white text at 4.5:1). An override (code, `#rrggbb` colour, favicon option)
 lives in `server-badge.json` in the data dir: `POST /api/instance/badge` (web token; a string
-sets, null or "" clears, absent keeps; 400 on a bad value) and Settings, Server badge.
-`/api/instance` adds `badge` (`{code, color, auto}`) and `faviconBadge`; a change is broadcast as
+sets, null or "" clears, absent keeps; 400 on a bad value) and Settings, Server badge. As for
+minting a seat, only a user-set web token may change it: a served (auto) token gets 409, and
+Settings shows the editor disabled with a one-line reason (`badgeEditable` false).
+`/api/instance` adds `badge` (`{code, color, auto}`), `faviconBadge` and `badgeEditable`; a change is broadcast as
 an `instance` socket event. A home sends its badge with `GET /api/peer/rooms` (`badge`); the peer
 validates it (`peerBadge`) and shows it in `LinkInfo.badge` (init `links`, `link` events), so a
 server's linked peers show its own badge. An older home sends none and the page falls back to
 the default rule, which `public/marks.js` repeats (`tests/marks.test.ts` holds the two in step).
 Member avatars carry the badge of the server their terminal lives on (`host`, or the home of a
 remote room) on the top corner; remote room headings carry it too. The favicon is an outlined
-hexagon in the accent (an SVG data URI with its own colour-scheme query), with the badge when
-the favicon option is on.
+hexagon in the accent, with the badge when the favicon option is on. The page regenerates the
+SVG data URI from its own theme (`data-theme`, on load and in `setTheme`); only the static icon
+in `index.html`, before the page runs, uses the SVG's own colour-scheme query.
 
 ## Web viewer: token, name lock and reconnect
 
