@@ -243,6 +243,21 @@ function noteRefusedAnswer(r, epoch, held) {
 
 var TOKEN_REFUSED_TEXT = 'This server refused the web token: it changed, or it was mistyped.';
 
+// A refused answer (not r.ok) as { error }: the server's own message when its
+// body has one, else the HTTP status. For handlers that already read `.error`.
+function refusalBody(r) {
+  return r.json().catch(function() { return null; }).then(function(b) {
+    return { error: (b && typeof b.error === 'string' && b.error) || ('HTTP ' + r.status) };
+  });
+}
+
+// The body of an accepted answer. A refusal rejects with its message, so the
+// caller's own catch (its error state) handles it and its body is never data.
+function okJson(r) {
+  if (r.ok) return r.json();
+  return refusalBody(r).then(function(b) { throw new Error(b.error); });
+}
+
 // One visible banner for auth trouble: the token refused or the name
 // refused. Buttons: enter the token again, and retry. Cleared on `init`.
 // The same state again leaves the banner as it is (its buttons, and the
@@ -2619,7 +2634,7 @@ function exitHistoryView() {
   renderHistoryChrome();
   var mySeq = ++historyExitSeq;
   fetch('/api/messages?conversation=' + encodeURIComponent(conv) + '&token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
+    .then(okJson) // a refusal is the catch's notice, never an empty page
     .then(function(list) {
       if (mySeq !== historyExitSeq || historyView) return;
       if (!activeConversation || activeConversation.id !== conv) return;
@@ -3765,9 +3780,11 @@ var autoScanRunning = false;
 function scanTerminals() {
   var btn = document.getElementById('scan-btn');
   btn.textContent = '...'; btn.disabled = true;
-  fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
+  fetch('/api/terminals').then(function(r) { return r.ok ? r.json() : null; }).then(function(t) {
+    btn.textContent = 'Scan'; btn.disabled = false;
+    if (!Array.isArray(t)) return; // refused: the list on screen stays
     lastScanResults = t;
-    renderTerminals(t); btn.textContent = 'Scan'; btn.disabled = false;
+    renderTerminals(t);
     // Start auto-scan after first manual scan
     if (!autoScanInterval) startAutoScan();
   }).catch(function() { lastScanResults = []; renderTerminals([]); btn.textContent = 'Scan'; btn.disabled = false; });
@@ -3781,9 +3798,9 @@ function startAutoScan() {
 function autoScanTerminals() {
   if (autoScanRunning || signedOut) return;
   autoScanRunning = true;
-  fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
+  fetch('/api/terminals').then(function(r) { return r.ok ? r.json() : null; }).then(function(t) {
     autoScanRunning = false;
-    if (signedOut) return;
+    if (signedOut || !Array.isArray(t)) return; // refused: keep the last scan
     // Only re-render if something changed (compare by pid+paneId+tabTitle fingerprint)
     var oldFp = lastScanResults.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
     var newFp = t.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
@@ -6565,14 +6582,16 @@ function loadConversations() {
   var seqAtStart = nextPendingSeq();
   // no-store: a live list never comes from a cache, and identical GETs are
   // not serialized behind the browser's cache lock
-  fetch('/api/conversations?token=' + encodeURIComponent(webToken()), { cache: 'no-store' }).then(function(r) { return r.json(); }).then(function(data) {
+  fetch('/api/conversations?token=' + encodeURIComponent(webToken()), { cache: 'no-store' }).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
+    // A refused read keeps the list and the active room as they are.
+    if (!data || !Array.isArray(data.conversations)) return;
     if (myFetch < convFetchApplied) return; // a newer fetch already landed
     convFetchApplied = myFetch;
     activeConversation = data.active;
     conversationList = data.conversations || [];
     applyLinkPayload(data, false, genAtStart !== pendingGeneration, seqAtStart);
     renderConversationList();
-  });
+  }).catch(function() { /* unreachable server: keep the list */ });
 }
 
 // Last-CALL-wins guard for conversation selection: without it, a slow
@@ -6625,8 +6644,9 @@ function selectConversation(id, after) {
   var seqAtStart = nextPendingSeq();
   var initsAtStart = socketInitCount;
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.json(); }).then(function(data) {
+    body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
       if (mySelect !== convSelectSeq) return; // superseded by a newer selection
+      if (!data) { showRoomLoadError(); return; } // refused: say so, not an endless Loading
       // A reconnect during the request re-sent init for this same room: the
       // screen already holds newer messages and queue than this response.
       // Only the snapshot is stale: room-scoped state that init does not
@@ -6652,16 +6672,32 @@ function selectConversation(id, after) {
         resetRoomTasks(activeConversation.id);
         if (typeof after === 'function' && activeConversation.id === id) after();
       }
-    });
+    }).catch(function() { if (mySelect === convSelectSeq) showRoomLoadError(); });
+}
+
+// The room's messages could not be loaded (refused, or no server): replace
+// the Loading line with a plain error line in the same style.
+function showRoomLoadError() {
+  var c = document.getElementById('messages');
+  if (!c) return;
+  c.textContent = '';
+  var err = document.createElement('div');
+  err.className = 'empty-state';
+  err.style.textAlign = 'center';
+  err.style.padding = '24px';
+  err.textContent = 'Could not load this room. Select it again to retry.';
+  c.appendChild(err);
 }
 
 function newConversation() {
   fetch('/api/conversations/new', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}) }).then(function(r) { return r.json(); }).then(function(data) {
-      if (data.conversation) {
+    body: JSON.stringify({}) }).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
+      if (data && data.conversation) {
         selectConversation(data.conversation.id);
+      } else {
+        showRefNotice('Could not create a conversation.');
       }
-    });
+    }).catch(function() { showRefNotice('Could not create a conversation.'); });
 }
 
 function showNoConversation() {
@@ -6799,8 +6835,9 @@ function messageInCurrentView(m) {
 var dmPartnersCache = [];
 function fetchDmPartners() {
   fetch('/api/dms?token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(d) {
+      if (!d || !Array.isArray(d.partners)) return; // refused: keep the list
       // Union with partners discovered over the socket while this was in flight
       var fetched = (d && d.partners) ? d.partners.map(function(p) { return p.partner; }) : [];
       dmPartnersCache.forEach(function(p) { if (fetched.indexOf(p) < 0) fetched.push(p); });
@@ -6947,7 +6984,9 @@ function refreshDmThread(name) {
   c.appendChild(loader);
   var mySeq = ++dmFetchSeq;
   fetch('/api/dms?with=' + encodeURIComponent(name) + '&token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
+    // A refused read repaints the thread the page holds (no new messages, the
+    // route unknown) instead of reading the error body as a thread.
+    .then(function(r) { return r.ok ? r.json() : {}; })
     .then(function(data) {
       if (mySeq !== dmFetchSeq || activeDm !== name) return; // superseded
       dmRoute = { partner: name, remote: typeof data.routesToRemote === 'boolean' ? data.routesToRemote : null };
@@ -7812,7 +7851,8 @@ function showConvMenu(evt, conv) {
     { label: '\u2715 Delete', danger: true, action: function() {
       if (confirm('Delete "' + conv.name + '"? This cannot be undone.')) {
         fetch('/api/conversations/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: conv.id }) }).then(function() {
+          body: JSON.stringify({ id: conv.id }) }).then(function(r) {
+            if (!r.ok) { showRefNotice('Could not delete "' + conv.name + '".'); return; }
             if (activeConversation && activeConversation.id === conv.id) {
               activeConversation = null;
               showNoConversation();
@@ -7997,7 +8037,7 @@ function startSessionUI(template) {
         goal: goalInput.value.trim(),
         startedBy: sender
       })
-    }).then(function(r) { return r.json(); }).then(function(session) {
+    }).then(function(r) { return r.ok ? r.json() : refusalBody(r); }).then(function(session) {
       overlay.remove();
       if (session.error) {
         alert('Error: ' + session.error);
@@ -8102,8 +8142,9 @@ function resetRoomTasks(convId) {
 
 function loadTaskCount(convId) {
   fetch('/api/tasks/count?conversation=' + encodeURIComponent(convId))
-    .then(function(r) { return r.json(); })
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
+      if (!data) return; // refused: leave the badge as it is
       if (!taskRoomIsCurrent(convId)) return; // the room changed meanwhile
       renderTaskBadgeFromCount(data.count || 0, data.hasUrgent || false);
     })
@@ -8113,14 +8154,15 @@ function loadTaskCount(convId) {
 function loadTasks(convId) {
   var status = taskFilter === 'all' ? 'all' : taskFilter;
   fetch('/api/tasks?conversation=' + encodeURIComponent(convId) + '&status=' + status)
-    .then(function(r) { return r.json(); })
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
+      if (!Array.isArray(data)) return; // refused: the list and panel stay
       if (!taskRoomIsCurrent(convId)) return; // the room changed meanwhile
-      tasks = data || [];
+      tasks = data;
       tasksConvId = convId;
       renderTaskBadge();
       renderTaskPanel();
-    });
+    }).catch(function() { /* unreachable server: keep the list */ });
 }
 
 function toggleTaskPanel() {
@@ -8291,12 +8333,12 @@ function submitTaskResponse(taskId, response) {
       respondedBy: senderName,
       conversation: activeConversation.id
     })
-  }).then(function(r) { return r.json(); }).then(function(task) {
-    if (task.error) return;
+  }).then(function(r) { return r.ok ? r.json() : null; }).then(function(task) {
+    if (!task || task.error) return; // refused: the card stays as it was
     tasks = tasks.map(function(t) { return t.id === task.id ? task : t; });
     renderTaskBadge();
     renderTaskPanel();
-  });
+  }).catch(function() { /* unreachable server: the card stays */ });
 }
 
 function showCreateTaskForm() {
@@ -8669,18 +8711,23 @@ function openLaunchDialog(preselectCrewName) {
   document.body.appendChild(overlay);
   launchDialogOverlay = overlay;
 
-  // Fetch all data in parallel
+  // Fetch all data in parallel. A refused or failed read falls back to what
+  // the page already holds (the crew roster, the room list) or to the
+  // existing defaults; an error body is never read as data.
+  var noTerminals = { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } };
   Promise.all([
-    fetch('/api/crew').then(function(r) { return r.json(); }).catch(function() { return []; }),
-    fetch('/api/harnesses').then(function(r) { return r.json(); }).catch(function() { return []; }),
-    fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).catch(function() { return { conversations: [] }; }),
-    fetch('/api/launcher/terminals').then(function(r) { return r.json(); }).catch(function() { return { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } }; })
+    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function() { return crewRoster.slice(); }),
+    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function() { return []; }),
+    fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(okJson).then(function(d) {
+      return d && Array.isArray(d.conversations) ? d : { conversations: conversationList.slice() };
+    }).catch(function() { return { conversations: conversationList.slice() }; }),
+    fetch('/api/launcher/terminals').then(okJson).then(function(t) { return t && typeof t === 'object' ? t : noTerminals; }).catch(function() { return noTerminals; })
   ]).then(function(results) {
     var crewList = results[0];
     var harnesses = results[1];
     var convData = results[2];
     var terminalsInfo = results[3];
-    var convList = convData.conversations || convData || [];
+    var convList = convData.conversations;
     content.textContent = '';
     footer.textContent = '';
     buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo, preselectCrewName);
@@ -8762,7 +8809,8 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
   // Add folder inline form (hidden by default)
   var addCrewForm = buildAddCrewForm(function(newCrew) {
     // Reload after adding
-    fetch('/api/crew').then(function(r) { return r.json(); }).then(function(updated) {
+    fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(updated) {
+      if (!Array.isArray(updated)) return; // refused: the select keeps its options
       // Rebuild options preserving add
       while (crewSelect.options.length > 1) crewSelect.remove(1);
       updated.forEach(function(c) {
@@ -8967,7 +9015,8 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
     var url = '/api/launcher/sessions?harness=' +
       encodeURIComponent(selectedHarness.id) +
       '&cwd=' + encodeURIComponent(selectedCrew.path);
-    fetch(url).then(function(r) { return r.json(); }).then(function(sessions) {
+    // A refusal is the catch's "(failed to load)", not "no sessions found".
+    fetch(url).then(okJson).then(function(sessions) {
       resumeSelect.textContent = '';
       if (!Array.isArray(sessions) || sessions.length === 0) {
         var opt = document.createElement('option');
@@ -9500,7 +9549,7 @@ function buildAddCrewForm(onAdd, onCancel) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name, path: path })
-    }).then(function(r) { return r.json(); }).then(function(crew) {
+    }).then(function(r) { return r.ok ? r.json() : refusalBody(r); }).then(function(crew) {
       addBtn.disabled = false;
       addBtn.textContent = 'Add';
       if (crew.error) {
@@ -9583,7 +9632,10 @@ function executeLaunch(harnesses, crewList, onResult) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
-  }).then(function(r) { return r.json(); }).then(function(result) {
+  }).then(function(r) {
+    // A refusal is a failed launch with the server's reason, as a network error is.
+    return r.ok ? r.json() : refusalBody(r).then(function(b) { return { error: b.error, status: 'failed' }; });
+  }).then(function(result) {
     onResult(result);
   }).catch(function(err) {
     if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Launch \u2192'; }
@@ -9746,7 +9798,7 @@ function doInject(launchId, view, convId, joinAs) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
-  }).then(function(r) { return r.json(); }).then(function(res) {
+  }).then(okJson).then(function(res) { // a refusal is the catch's "Inject failed"
     doingEl.remove();
     if (res.status === 'done' || res.status === 'injected') {
       var doneLine = document.createElement('div');
@@ -9805,9 +9857,10 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
     copyBtn.textContent = 'Copy command';
     copyBtn.addEventListener('click', function() {
       fetch('/api/launch/' + encodeURIComponent(launchId))
-        .then(function(r) { return r.json(); })
+        .then(function(r) { return r.ok ? r.json() : null; })
         .then(function(res) {
-          navigator.clipboard.writeText(res.command || '').then(function() {
+          if (!res || !res.command) return; // refused: copy nothing, claim nothing
+          navigator.clipboard.writeText(res.command).then(function() {
             copyBtn.textContent = '\u2713 Copied';
             copyBtn.classList.add('copied');
             setTimeout(function() {
@@ -9815,7 +9868,7 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
               copyBtn.classList.remove('copied');
             }, 1500);
           });
-        });
+        }).catch(function() { /* unreachable server: nothing copied */ });
     });
 
     actions.appendChild(retryBtn);
@@ -9833,8 +9886,9 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
       return;
     }
     fetch('/api/launch/' + encodeURIComponent(launchId))
-      .then(function(r) { return r.json(); })
+      .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(res) {
+        if (!res) return; // refused: keep polling, as on a network error
         if (res.status === 'done' || res.status === 'injected') {
           clearInterval(launchPollInterval); launchPollInterval = null;
           pollIndicator.remove();
@@ -9922,12 +9976,14 @@ function openCrewPanel() {
   document.body.appendChild(overlay);
   crewPanelOverlay = overlay;
 
+  // A refused or failed read falls back to the crew roster the page holds, or
+  // to empty meta and harnesses; an error body is never read as data.
   Promise.all([
-    fetch('/api/crew').then(function(r) { return r.json(); }).catch(function() { return []; }),
-    fetch('/api/crew/meta').then(function(r) { return r.json(); }).catch(function() { return {}; }),
-    fetch('/api/harnesses').then(function(r) { return r.json(); }).catch(function() { return []; })
+    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function() { return crewRoster.slice(); }),
+    fetch('/api/crew/meta').then(okJson).then(function(m) { return m && typeof m === 'object' && !Array.isArray(m) ? m : {}; }).catch(function() { return {}; }),
+    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function() { return []; })
   ]).then(function(results) {
-    buildCrewPanel(content, results[0] || [], results[1] || {}, results[2] || []);
+    buildCrewPanel(content, results[0], results[1], results[2]);
   }).catch(function(err) {
     content.textContent = '';
     var errMsg = document.createElement('div');
@@ -9958,8 +10014,9 @@ function buildCrewPanel(content, crewList, meta, harnesses) {
   list.className = 'crew-panel-list';
 
   function refreshList() {
-    fetch('/api/crew').then(function(r) { return r.json(); }).then(function(updated) {
-      renderCrewRows(list, updated || [], refreshList);
+    fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(updated) {
+      if (!Array.isArray(updated)) return; // refused: the rows on screen stay
+      renderCrewRows(list, updated, refreshList);
     }).catch(function() {
       renderCrewRows(list, [], refreshList);
     });
@@ -10109,7 +10166,7 @@ function buildCrewRow(crew, onChanged) {
     deleteBtn.disabled = true;
     deleteBtn.textContent = 'Deleting...';
     fetch('/api/crew/' + encodeURIComponent(crew.name), { method: 'DELETE' })
-      .then(function(r) { return r.json(); })
+      .then(function(r) { return r.ok ? r.json() : refusalBody(r); })
       .then(function(res) {
         if (res && res.error) {
           deleteBtn.disabled = false;
@@ -10200,7 +10257,7 @@ function buildCrewEditForm(row, crew, onChanged) {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
-    }).then(function(r) { return r.json(); }).then(function(res) {
+    }).then(function(r) { return r.ok ? r.json() : refusalBody(r); }).then(function(res) {
       saveBtn.disabled = false;
       saveBtn.textContent = 'Save';
       if (res && res.error) {
@@ -10917,7 +10974,7 @@ function toggleNotifyPanel() {
     var cutoff = notifyItems.length > 0 ? notifyItems[0].id : 0;
     if (cutoff === 0) return;
     fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ upToId: cutoff }) })
-      .then(function(r) { return r.json(); })
+      .then(okJson) // refused: nothing is marked read here
       .then(function(d) {
         notifyItems.forEach(function(n) { if (n.id <= cutoff) n.read = true; });
         notifyUnread = notifyItems.reduce(function(acc, n) { return acc + (n.read ? 0 : 1); }, 0);
@@ -10981,8 +11038,8 @@ function renderNotifyPanel() {
     row.appendChild(body);
     row.addEventListener('click', function() {
       fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ upToId: n.id }) })
-        .then(function(r) { return r.json(); })
-        .then(function(d) { notifyUnread = d.unread || 0; renderNotifyBadge(); })
+        .then(okJson) // refused: the unread count is not zeroed
+        .then(function(d) { if (d && typeof d.unread === 'number') { notifyUnread = d.unread; renderNotifyBadge(); } })
         .catch(function() {});
       n.read = true;
       row.classList.remove('unread');
@@ -11039,7 +11096,7 @@ function resolveAsk(messageId, conversationId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token: webToken(), conversation: conversationId || (activeConversation && activeConversation.id) })
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  }).then(okJson).then(function(d) { // refused: nothing resolved, nothing refreshed
     if (d && d.ask) applyAskResolution(messageId, d.ask, conversationId);
     // The resolution is the new truth: invalidate anything in flight, then
     // start a fresh (and by construction latest) refresh.
