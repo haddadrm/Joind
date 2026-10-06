@@ -54,7 +54,8 @@ const routes = new PeerRoutes();
 // The link closes its connections too. Both servers share this process's
 // connection pool with call() below, so a link request left idle on a
 // keep-alive socket while a fill blocks the loop could be handed to call()
-// after the server timed it out, and read ECONNRESET.
+// after the server timed it out, and read ECONNRESET. So this test does not
+// cover production's default keep-alive link transport under that load.
 const fetchImpl: FetchLike = async (url, init) => {
   const res = await fetch(url, { ...init, headers: { ...init.headers, Connection: "close" } });
   return { status: res.status, text: () => res.text() };
