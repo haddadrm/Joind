@@ -1240,8 +1240,8 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   /** The badge and favicon option, as /api/instance and the `instance`
    *  socket event carry them. */
-  function instanceMarks(): { badge: ReturnType<ServerBadgeStore["effective"]>; faviconBadge: boolean } {
-    return { badge: badgeStore.effective(), faviconBadge: badgeStore.faviconBadge() };
+  function instanceMarks(): { badge: ReturnType<ServerBadgeStore["effective"]>; faviconBadge: boolean; badgeEditable: boolean } {
+    return { badge: badgeStore.effective(), faviconBadge: badgeStore.faviconBadge(), badgeEditable: CONFIG.webTokenUserSet };
   }
 
   // Set or clear the manual badge (code, color) and the favicon option. Web
@@ -1250,6 +1250,9 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // pick it up with their next room discovery (at most a minute).
   app.post("/api/instance/badge", express.json(), (req, res) => {
     if (!requireWebToken(req, res)) return;
+    // The rule for minting a seat: a served (auto) token reaches every
+    // requester of /, so it cannot change what this server shows its peers.
+    if (!CONFIG.webTokenUserSet) { res.status(409).json({ error: "The web token is served to every requester of /, so it cannot change the server badge. Set JOIND_WEB_TOKEN (or --web-token) and restart." }); return; }
     const body = (req.body ?? {}) as { code?: unknown; color?: unknown; faviconBadge?: unknown };
     try {
       badgeStore.update({ code: body.code, color: body.color, faviconBadge: body.faviconBadge });

@@ -163,6 +163,7 @@ describe("server badge on a server", { timeout: 30_000 }, () => {
     expect(r.json.name).toBe("ramiy530");
     expect(r.json.badge).toEqual({ ...defaultBadge("ramiy530"), auto: true });
     expect(r.json.faviconBadge).toBe(false);
+    expect(r.json.badgeEditable).toBe(true);
   });
 
   it("only a web token holder sets it: no token and the agent key are refused", async () => {
@@ -189,7 +190,7 @@ describe("server badge on a server", { timeout: 30_000 }, () => {
     expect(r.json.badge).toEqual({ code: "y5", color: "#be123c", auto: false });
     expect(r.json.faviconBadge).toBe(true);
     const ev = await waitFor("instance event", () => of(sock, "instance")[0]);
-    expect(ev.data).toEqual({ name: "ramiy530", badge: { code: "y5", color: "#be123c", auto: false }, faviconBadge: true });
+    expect(ev.data).toEqual({ name: "ramiy530", badge: { code: "y5", color: "#be123c", auto: false }, faviconBadge: true, badgeEditable: true });
     const saved = JSON.parse(readFileSync(badgeSettingsPath(join(dir, "data")), "utf8")) as Record<string, unknown>;
     expect(saved).toEqual({ code: "y5", color: "#be123c", faviconBadge: true });
     // An absent field is kept.
@@ -205,6 +206,45 @@ describe("server badge on a server", { timeout: 30_000 }, () => {
     await S.close();
     S = await startJoind(config(dir, "ramiy530", 0));
     expect((await call(S.baseUrl, "GET", "/api/instance")).json.badge).toEqual({ code: "R5", color: "#0e7490", auto: false });
+  });
+});
+
+describe("server badge with a served (auto) web token", { timeout: 30_000 }, () => {
+  let dir: string;
+  let S: JoindHandle;
+
+  beforeAll(async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    dir = mkdtempSync(join(tmpdir(), "joind-marks-served-"));
+    S = await startJoind(config(dir, "ramiy530", 0, { webTokenUserSet: false }));
+  }, 30_000);
+  afterAll(async () => {
+    await S?.close().catch(() => undefined);
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("/api/instance says the badge is not editable", async () => {
+    const r = await call(S.baseUrl, "GET", "/api/instance");
+    expect(r.json.badgeEditable).toBe(false);
+    expect(r.json.badge).toEqual({ ...defaultBadge("ramiy530"), auto: true });
+  });
+
+  it("the served token is refused (409, nothing saved, no event), as for minting a seat", async () => {
+    const sock = await socket(S.baseUrl);
+    await waitFor("init", () => of(sock, "init").length > 0);
+    for (const body of [{ code: "X", color: "#1d4ed8" }, { code: null, color: null }, { faviconBadge: true }]) {
+      const r = await call(S.baseUrl, "POST", "/api/instance/badge", body, webHdr);
+      expect(r.status, JSON.stringify(body)).toBe(409);
+      expect(String(r.json.error)).toMatch(/JOIND_WEB_TOKEN/);
+    }
+    // The ordinary token rules still come first.
+    expect((await call(S.baseUrl, "POST", "/api/instance/badge", { code: "X" })).status).toBe(403);
+    expect(existsSync(badgeSettingsPath(join(dir, "data")))).toBe(false);
+    expect((await call(S.baseUrl, "GET", "/api/instance")).json.badge).toEqual({ ...defaultBadge("ramiy530"), auto: true });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(of(sock, "instance")).toHaveLength(0);
+    sock.close();
   });
 });
 
