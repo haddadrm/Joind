@@ -9,6 +9,7 @@
 
 import type { Agent, ChatMessage, JoinRoute } from "./room.js";
 import { SUBMIT_CHECK_CAP_MS, SUBMIT_CHECK_GRACE_MS } from "./submit-check.js";
+import type { ServerBadge } from "./server-badge.js";
 
 /** How long a home waits for its host to answer a hosted wake. It bounds the
  *  home's wait only: work still running on the host after it (the typing,
@@ -74,6 +75,10 @@ export interface PeerMessagesResult {
 export interface PeerRoomsResult {
   server: string;
   rooms: Array<{ id: string; name: string; createdAt: number; messageCount: number; starred: boolean }>;
+  /** The home's own server badge (src/server-badge.ts), so a peer shows the
+   *  same badge for it. Absent from older homes: the peer then shows the
+   *  default badge for the name. */
+  badge?: ServerBadge;
 }
 
 export interface PeerRegisterBody {

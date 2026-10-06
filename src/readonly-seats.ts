@@ -14,6 +14,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { EventEmitter } from "events";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import type { IncomingHttpHeaders } from "http";
@@ -69,6 +70,23 @@ export interface SeatView {
   lastUsedAt: number | null;
 }
 
+/** A seat as the member list shows it to web token holders: an active seat
+ *  only, with no token, digest or fingerprint. */
+export interface SeatMemberView {
+  id: string;
+  name: string;
+  conversationId: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+/** A seat that read within this window shows a green dot ("read recently"). */
+export const SEAT_RECENT_READ_MS = 10 * 60_000;
+/** A seat's reads are told to the page at most this often (a polling seat
+ *  would otherwise send one socket event per poll). The page's "read Nm
+ *  ago" is accurate to this. */
+export const SEAT_USE_NOTICE_MS = 60_000;
+
 interface SeatFile {
   version: 1;
   seats: SeatRecord[];
@@ -90,16 +108,24 @@ function isSeatRecord(v: unknown): v is SeatRecord {
     && typeof r.createdAt === "number" && (r.revokedAt === null || typeof r.revokedAt === "number");
 }
 
-export class ReadonlySeatStore {
+/**
+ * Emits "changed" (no argument) when the member-list view of the seats
+ * changes: a mint, a revoke, or a read (at most once per SEAT_USE_NOTICE_MS
+ * per seat). The server pushes `activeSeats()` to web sockets on it.
+ */
+export class ReadonlySeatStore extends EventEmitter {
   private readonly file: string;
   private readonly now: () => number;
   private seats: SeatRecord[] = [];
   private readonly lastUsed = new Map<string, number>();
+  /** When a read of each seat was last told ("changed"). */
+  private readonly lastUseNoticed = new Map<string, number>();
   /** The file exists but could not be read: no seat is valid, and nothing is
    *  written over it (mint and revoke refuse) until a person looks. */
   readonly broken: boolean = false;
 
   constructor(dataDir: string, opts: { now?: () => number; log?: (line: string) => void } = {}) {
+    super();
     this.file = seatsPath(dataDir);
     this.now = opts.now ?? Date.now;
     const log = opts.log ?? ((line: string) => console.log(line));
@@ -180,6 +206,7 @@ export class ReadonlySeatStore {
       this.seats.pop();
       throw new SeatError(500, `could not write the read-only seat file (${(err as Error).message})`);
     }
+    this.emit("changed");
     return { seat: this.view(record), token };
   }
 
@@ -196,12 +223,25 @@ export class ReadonlySeatStore {
         r.revokedAt = null;
         throw new SeatError(500, `could not write the read-only seat file (${(err as Error).message})`);
       }
+      this.emit("changed");
     }
     return this.view(r);
   }
 
   list(): SeatView[] {
     return this.seats.map((r) => this.view(r));
+  }
+
+  /** The active seats as the member list shows them (every room; the page
+   *  keeps the room on screen). Never a token, digest or fingerprint. */
+  activeSeats(): SeatMemberView[] {
+    return this.seats.filter((r) => r.revokedAt === null).map((r) => ({
+      id: r.id,
+      name: r.name,
+      conversationId: r.conversationId,
+      createdAt: r.createdAt,
+      lastUsedAt: this.lastUsed.get(r.id) ?? null,
+    }));
   }
 
   /** The record whose token this is (active or revoked), compared in
@@ -228,7 +268,13 @@ export class ReadonlySeatStore {
   }
 
   noteUse(id: string): void {
-    this.lastUsed.set(id, this.now());
+    const now = this.now();
+    this.lastUsed.set(id, now);
+    const told = this.lastUseNoticed.get(id);
+    if (told === undefined || now - told >= SEAT_USE_NOTICE_MS) {
+      this.lastUseNoticed.set(id, now);
+      this.emit("changed");
+    }
   }
 }
 
