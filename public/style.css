@@ -4798,3 +4798,148 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
   .snippet-row { flex-wrap: wrap; }
   .msg-images.multi .msg-image { width: calc(50% - 3px); height: 96px; }
 }
+
+/* --- Marks (6 Oct 2026: logo variant B, member variant M1) ---
+   The server mark is an outlined hexagon on the accent tile with this
+   server's badge on its top corner. A server badge is a 1 to 2 character
+   code on its own colour (white text clears 4.5:1 on every palette colour;
+   a custom colour is checked in Settings). Badges sit on the top corner of a
+   tile or avatar; the presence dot keeps the bottom corner. Each context
+   rings the badge in its own background so it reads as cut out. */
+.rail-brand { position: relative; }
+.rail-brand .brand-hex, .side-brand .brand-hex, .badge-preview .brand-hex { display: inline-flex; line-height: 0; }
+.sbadge {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: #fff;
+  font-size: var(--fs-meta);
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0;
+  transform-origin: top right;
+  box-shadow: 0 0 0 2px var(--bg-sidebar);
+  pointer-events: none;
+  z-index: 1;
+}
+.sbadge[hidden] { display: none; }
+.sbadge.brand { top: -6px; right: -7px; min-width: 18px; height: 18px; box-shadow: 0 0 0 2px var(--bg-rail); }
+/* Badge text stays on the type scale (--fs-meta); smaller avatars scale the
+   whole badge down instead. */
+.mav .sbadge { top: -5px; right: -5px; transform: scale(0.85); }
+.mav.sm .sbadge, .mav.xs .sbadge, .mav.head .sbadge { top: -4px; right: -5px; transform: scale(0.68); box-shadow: 0 0 0 2px var(--bg); }
+.mav.xs .sbadge { box-shadow: 0 0 0 2px var(--bg-sidebar); }
+.crew-card .mav .sbadge, .pill-popover .sbadge { box-shadow: 0 0 0 2px var(--bg-elevated); }
+.sbadge.inline {
+  position: static;
+  transform: none;
+  box-shadow: none;
+  flex-shrink: 0;
+}
+.pop-info-value .sbadge.inline { margin-right: 6px; vertical-align: -2px; }
+
+/* The phone drawer head carries the mark when the rail brand is hidden. */
+.side-brand { display: none; }
+.side-server { display: none; }
+@media (max-width: 560px) {
+  .side-brand {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    margin-right: var(--s3);
+    flex-shrink: 0;
+    border-radius: var(--radius-md);
+    background: var(--accent);
+    color: #fff;
+  }
+  .side-brand .sbadge.brand { top: -5px; right: -6px; min-width: 16px; height: 16px; box-shadow: 0 0 0 2px var(--bg-sidebar); }
+  .side-server {
+    display: block;
+    font-size: var(--fs-meta);
+    line-height: var(--lh-label);
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .side-server:empty { display: none; }
+}
+
+/* Member popover facts: server, join route, status. */
+.pop-info-block { padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+.pop-info label { width: 64px; }
+.pop-info-value { flex: 1; min-width: 0; font-size: var(--fs-label); color: var(--text); overflow-wrap: anywhere; }
+
+/* Read-only seats: a dashed hollow tile with an eye badge, never dimmed.
+   The dot is green when the seat read recently, gray otherwise. */
+.mav.seat {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1.5px dashed var(--border-strong);
+  box-sizing: border-box;
+}
+.mav.sm.seat { box-shadow: 0 0 0 2px var(--bg); }
+.kbadge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+  box-sizing: border-box;
+  box-shadow: 0 0 0 2px var(--bg-sidebar);
+  pointer-events: none;
+}
+.mav.sm .kbadge, .mav.xs .kbadge { top: -4px; right: -5px; width: 11px; height: 11px; box-shadow: 0 0 0 2px var(--bg); }
+.crew-card .kbadge { box-shadow: 0 0 0 2px var(--bg-elevated); }
+.crew-card .mav.seat .mdot { border-color: var(--bg-elevated); }
+.crew-card.seat { align-items: center; }
+.crew-card.seat .seat-revoke { flex-shrink: 0; align-self: center; }
+
+/* Settings: the server badge. */
+.badge-preview {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-right: var(--s3);
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: #fff;
+  flex-shrink: 0;
+}
+.badge-preview .sbadge.brand { top: -5px; right: -6px; min-width: 16px; height: 16px; box-shadow: 0 0 0 2px var(--bg-elevated); }
+.badge-code-input { width: 4.5em; text-transform: uppercase; text-align: center; }
+.badge-swatches { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.badge-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+.badge-swatch[aria-pressed="true"] { border-color: var(--text-bright); box-shadow: inset 0 0 0 2px var(--bg-elevated); }
+.badge-swatch:focus-visible, .badge-color-input:focus-visible { outline: none; box-shadow: var(--ring-tight); }
+.badge-color-input { width: 30px; height: 24px; padding: 0; border: 1px solid var(--border-bright); border-radius: 6px; background: none; cursor: pointer; }
+.badge-status { margin: var(--s2) 0 0; }
+.badge-status:empty { display: none; }

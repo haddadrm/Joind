@@ -469,8 +469,8 @@ function loadInstanceInfo() {
     if (!info || !info.name) return;
     var el = document.getElementById('instance-name');
     if (el) el.textContent = info.name;
-    var brand = document.getElementById('rail-brand');
-    if (brand) { brand.title = info.name; brand.textContent = info.name.charAt(0).toUpperCase(); }
+    // The rail tile, the phone drawer mark and the favicon (Marks block).
+    if (typeof applyInstanceMarks === 'function') applyInstanceMarks(info);
     document.title = info.name === 'Joind' ? 'Joind' : info.name + ' \u2014 Joind';
   }).catch(function() { /* ignore */ });
 }
@@ -634,6 +634,7 @@ function connect() {
         bumpPendingGeneration();
         socketInitCount += 1;
         applyLinkPayload(event.data, true);
+        if (typeof applySeatPayload === 'function') applySeatPayload(event.data.readonlySeats);
         initTaskCount = event.data.openTaskCount || 0;
         initHasUrgent = event.data.hasUrgentTask || false;
         if (event.data.turnGuard) initTurnGuard(event.data.turnGuard);
@@ -925,6 +926,14 @@ function connect() {
       case 'link':
         onLinkEvent(event.data);
         break;
+      // Marks: this server's badge changed in Settings (any tab), and the
+      // read-only seats changed (mint, revoke, a read). Token holders only.
+      case 'instance':
+        if (typeof applyInstanceMarks === 'function') applyInstanceMarks(event.data);
+        break;
+      case 'readonly-seats':
+        if (typeof applySeatPayload === 'function') { applySeatPayload(event.data); renderPills(); }
+        break;
       case 'pending':
         onPendingEvent(event);
         break;
@@ -1023,7 +1032,8 @@ function pillInfo(a, nowMs) {
     : '';
   var title = (a.name || '') +
     (a.role ? ' · ' + a.role : '') +
-    (a.host ? ' · hosted on ' + a.host : '') +
+    // M1: the server, the join route and the status (Marks block).
+    (typeof memberMarkTitle === 'function' ? memberMarkTitle(a) : (a.host ? ' · hosted on ' + a.host : '')) +
     (stale ? ' · stale' : '') +
     (quietText ? ' · ' + quietText : '') +
     (seenAge != null ? ' · seen ' + formatAge(seenAge) + ' ago' : '') +
@@ -1063,6 +1073,9 @@ function memberAvatar(name, cls) {
   av.className = 'mav' + (cls ? ' ' + cls : '');
   av.style.background = getSenderColor(name);
   av.textContent = (name || '?').charAt(0).toUpperCase();
+  // M1: a member on another server carries that server's badge on the top
+  // corner (Marks block); the presence dot keeps the bottom corner.
+  if (typeof addMemberServerBadge === 'function') addMemberServerBadge(av, name);
   return av;
 }
 
@@ -1091,11 +1104,16 @@ function renderMembersButton(m) {
   var summary = window.joindUi
     ? window.joindUi.membersSummary(m.infos.length, m.offline.length)
     : { count: m.infos.length, label: 'Members: ' + m.infos.length + ' connected' };
+  // Read-only seats are listed too (their own group), so they count.
+  var seats = typeof roomSeats === 'function' ? roomSeats() : [];
+  if (window.joindMarks) summary = window.joindMarks.seatSummary(summary, seats.length);
   stack.textContent = '';
   var faces = m.infos.map(function(x) { return { name: x.a.name, dim: x.presence !== 'online', working: typingNames.has(x.a.name) }; })
     .concat(m.offline.map(function(o) { return { name: o.name, dim: true, working: false }; }))
+    .concat(seats.map(function(s) { return { seat: s }; }))
     .slice(0, STACK_MAX);
   faces.forEach(function(f) {
+    if (f.seat) { stack.appendChild(seatAvatar(f.seat, 'sm', false)); return; }
     stack.appendChild(memberAvatar(f.name, 'sm' + (f.dim ? ' dim' : '') + (f.working ? ' working' : '')));
   });
   stack.hidden = faces.length === 0;
@@ -1158,7 +1176,7 @@ function syncSidePanelTabs(m) {
   var mc = document.getElementById('side-tab-members-count');
   if (mc) {
     var mm = m || roomMembers();
-    var n = mm.infos.length + mm.offline.length;
+    var n = mm.infos.length + mm.offline.length + (typeof roomSeats === 'function' ? roomSeats().length : 0);
     mc.textContent = n > 0 ? String(n) : '';
   }
   var pc = document.getElementById('side-tab-pins-count');
@@ -1194,6 +1212,7 @@ function renderMembersList(body, m) {
     empty.className = 'side-empty';
     empty.textContent = 'No members yet. Agents appear here when they join this room or post in it.';
     body.appendChild(empty);
+    if (typeof appendSeatGroup === 'function') appendSeatGroup(body, m.now);
     return;
   }
   // You first under Active now, as in A (not counted on the button).
@@ -1208,6 +1227,8 @@ function renderMembersList(body, m) {
       body.appendChild(g[0] === 'offline' ? buildOfflineRow(item, m.now) : buildMemberRow(item));
     });
   });
+  // Read-only seats last, in their own group (Marks block).
+  if (typeof appendSeatGroup === 'function') appendSeatGroup(body, m.now);
 }
 
 function buildMemberRow(x) {
@@ -1563,6 +1584,8 @@ function showPopover(anchor, agent) {
   pid.textContent = agent.host ? 'via ' + agent.host : 'PID ' + agent.pid;
   hdr.appendChild(hdrName); hdr.appendChild(pid);
   pop.appendChild(hdr);
+  // M1: server, join route and status (Marks block).
+  if (typeof memberInfoBlock === 'function') pop.appendChild(memberInfoBlock(agent));
 
   // Rename
   var renameRow = document.createElement('div');
@@ -3645,6 +3668,11 @@ function openSettingsModal(section, opener) {
   body.className = 'settings-body';
   [buildProfileSection(), buildAppearanceSection(), buildSoundsSection(), buildAgentsSection(), buildRolesSection(), buildSnippetsSection(), buildTokenSection(), buildAgentKeySection(), buildViewSection()]
     .forEach(function(s) { body.appendChild(s); });
+  // The server badge, after Appearance (Marks block).
+  if (typeof buildServerBadgeSection === 'function') {
+    var appearance = body.querySelector('#settings-appearance');
+    body.insertBefore(buildServerBadgeSection(), appearance ? appearance.nextSibling : null);
+  }
 
   var foot = document.createElement('div');
   foot.className = 'settings-foot';
@@ -4251,10 +4279,9 @@ function initRail() {
   setRailView(readRailView(), false);
   syncRailPanels();
   renderRailDmBadge();
-  // The instance name titles the rail brand as well as the sidebar head.
-  var brand = document.getElementById('rail-brand');
-  var inst = document.getElementById('instance-name');
-  if (brand && inst) brand.title = inst.textContent;
+  // The rail brand: the hexagon now, the server's name and badge once
+  // /api/instance answers (Marks block).
+  if (typeof renderBrandMarks === 'function') renderBrandMarks();
 }
 
 // --- Fidelity to mockup A (redesign lane 3b) ---
@@ -4604,6 +4631,7 @@ function renderCrewPage() {
     if (a && a.role) parts.push(a.role);
     var card = crewCard(name, parts.join(' · ') || (a ? 'connected' : 'not connected'), st.short, st.cls, '');
     if (a) {
+      card.title = pillInfo(a, now).title;
       card.tabIndex = 0;
       card.setAttribute('role', 'button');
       card.setAttribute('data-key', 'm:' + name);
@@ -4613,6 +4641,8 @@ function renderCrewPage() {
     members.grid.appendChild(card);
   });
   body.appendChild(members.sec);
+  // Read-only seats of every room, with Revoke (Marks block).
+  if (typeof appendCrewSeats === 'function') appendCrewSeats(body);
 
   var terms = lastScanResults.filter(function(t) { return t.pid > 0; });
   var tsec = pageSection('Terminals', terms.length || null);
@@ -6403,6 +6433,7 @@ function setTheme(t) {
   document.querySelectorAll('[data-theme-choice]').forEach(function(b) {
     b.setAttribute('aria-pressed', b.getAttribute('data-theme-choice') === theme ? 'true' : 'false');
   });
+  if (typeof applyFavicon === 'function') applyFavicon();
 }
 function toggleTheme() { setTheme(currentTheme() === 'light' ? 'dark' : 'light'); }
 
@@ -7568,6 +7599,8 @@ function renderRemoteSections() {
     arrow.appendChild(chev);
     h2.appendChild(arrow);
     h2.appendChild(icon);
+    // The server's badge, as its members carry it (Marks block).
+    if (typeof serverBadgeNode === 'function') h2.appendChild(serverBadgeNode(server, true));
     h2.appendChild(label);
     h2.appendChild(linkBadge(link.state));
     heading.appendChild(h2);
@@ -7655,6 +7688,8 @@ function syncLinkHint() {
 function onLinkEvent(data) {
   if (!data || !data.name) return;
   var next = { name: data.name, state: data.state === 'up' ? 'up' : 'down', since: data.since };
+  // The badge the linked server sent for itself (absent from older peers).
+  if (data.badge) next.badge = data.badge;
   var found = false;
   links = links.map(function(l) {
     if (l.name !== data.name) return l;
@@ -7664,6 +7699,7 @@ function onLinkEvent(data) {
   if (!found) links.push(next);
   remoteConversations.forEach(function(c) { if (c.server === data.name) c.state = next.state; });
   renderConversationList(); // also refreshes the header and the composer hint
+  renderPills(); // a member's server badge may have changed
 }
 
 // Pending payloads carry conversationId in data; the envelope's
@@ -11398,3 +11434,504 @@ function scrollToMessageWhenReady(id, tries, conv, navSeq) {
 
 refreshDecisionsBadge();
 // dm partners load on ws.onopen, after viewer registration settles
+
+// --- Marks (6 Oct 2026: logo variant B, member variant M1) ---
+// One block for the server mark, member marks and read-only seats in the
+// member list; the rest of the page calls in through typeof-guarded hooks.
+// Pure helpers and the badge rule live in public/marks.js (joindMarks).
+//
+// The server mark: an outlined hexagon on the accent rail tile, with this
+// server's badge (a 1 to 2 character code on a colour) on its top corner and
+// "<name> (this server)" as the tooltip. At phone width the rail brand is
+// hidden, so the drawer head carries the same mark and the server name.
+// A member whose terminal lives on another server carries that server's
+// badge on its avatar's top corner (the presence dot keeps the bottom one).
+// Read-only seats (token holders only, from the socket) get their own group:
+// a dashed hollow tile with an eye badge, never dimmed; the dot is green when
+// the seat read within the server's window (recentReadMs, 10 minutes).
+var selfServerName = '';
+var selfServerBadge = null;     // { code, color } as /api/instance sent it
+var faviconWithBadge = false;
+var badgeEditable = true;       // false while the web token is served (auto): the server refuses badge edits
+var readonlySeats = [];         // [{ id, name, conversationId, createdAt, lastUsedAt }]
+var seatRecentReadMs = 10 * 60000;
+
+// /api/instance or the `instance` socket event: { name, badge, faviconBadge }.
+function applyInstanceMarks(info) {
+  if (!info) return;
+  if (typeof info.name === 'string' && info.name) selfServerName = info.name;
+  var M = window.joindMarks;
+  if (M && info.badge) selfServerBadge = M.validBadge(info.badge) || selfServerBadge;
+  if (typeof info.faviconBadge === 'boolean') faviconWithBadge = info.faviconBadge;
+  if (typeof info.badgeEditable === 'boolean') badgeEditable = info.badgeEditable;
+  renderBrandMarks();
+  applyFavicon();
+  // Members of this server shown in a remote room, and the badge settings.
+  if (activeConversation) renderPills();
+  if (settingsOverlay) refreshServerBadgeSettings();
+}
+
+// This server's badge: the one it sent, else the default for its name.
+function ownServerBadge() {
+  var M = window.joindMarks;
+  if (!M) return null;
+  return M.validBadge(selfServerBadge) || (selfServerName ? M.defaultBadge(selfServerName) : null);
+}
+
+// The badge for any server name: this one, a linked one (its own badge, sent
+// over the link), else the default (an older peer, an unknown host).
+function serverBadgeOf(server) {
+  var M = window.joindMarks;
+  if (!M || !server) return null;
+  return M.badgeFor(server, { selfName: selfServerName, selfBadge: ownServerBadge(), links: links });
+}
+
+function serverBadgeNode(server, inline) {
+  var M = window.joindMarks;
+  if (!M) { var none = document.createElement('span'); none.hidden = true; return none; }
+  var el = M.badgeEl(document, serverBadgeOf(server), inline);
+  if (server && !el.hidden) el.title = server === selfServerName ? server + ' (this server)' : server;
+  return el;
+}
+
+function renderBrandMarks() {
+  var M = window.joindMarks;
+  var inst = document.getElementById('instance-name');
+  var name = selfServerName || (inst && inst.textContent) || 'Joind';
+  var badge = selfServerName ? ownServerBadge() : null;
+  [['rail-brand', 'rail-brand-hex', 'rail-brand-badge', 20], ['side-brand', 'side-brand-hex', 'side-brand-badge', 18]].forEach(function(ids) {
+    var tile = document.getElementById(ids[0]);
+    if (!tile) return;
+    tile.title = name + ' (this server)';
+    var hex = document.getElementById(ids[1]);
+    if (hex && M && !hex.firstChild) hex.appendChild(M.hexIcon(document, ids[3]));
+    var b = document.getElementById(ids[2]);
+    if (b) {
+      b.hidden = !badge;
+      b.textContent = badge ? badge.code : '';
+      b.style.background = badge ? badge.color : '';
+    }
+  });
+  var server = document.getElementById('side-server');
+  if (server) server.textContent = selfServerName;
+}
+
+function applyFavicon() {
+  var M = window.joindMarks;
+  var link = document.getElementById('favicon');
+  if (!M || !link) return;
+  // The tab icon follows the app's theme (data-theme), not only the system's.
+  var theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  var href = M.faviconHref(faviconWithBadge ? ownServerBadge() : null, theme);
+  if (link.getAttribute('href') !== href) link.setAttribute('href', href);
+}
+applyFavicon();
+
+// --- Member marks (M1) ---
+
+function marksAgentByName(name) {
+  for (var i = 0; i < agents.length; i++) { if (agents[i].name === name) return agents[i]; }
+  return null;
+}
+
+// The server a member's terminal lives on when it is not this one.
+function memberHostOf(a) {
+  var M = window.joindMarks;
+  if (!M || !a) return null;
+  var roomServer = activeConversation ? remoteServerOf(activeConversation.id) : null;
+  return M.memberHost(a, roomServer, selfServerName);
+}
+
+function addMemberServerBadge(av, name) {
+  var host = memberHostOf(marksAgentByName(name));
+  if (!host) return;
+  var b = serverBadgeNode(host, false);
+  if (b.hidden) return;
+  av.classList.add('has-sbadge');
+  av.appendChild(b);
+}
+
+// The server line: the member's own server, or "<name> (this server)".
+function memberServerText(a) {
+  var host = memberHostOf(a);
+  if (host) return host;
+  return selfServerName ? selfServerName + ' (this server)' : 'this server';
+}
+
+// The tooltip's part for a member: server, join route, status.
+function memberMarkTitle(a) {
+  var M = window.joindMarks;
+  if (!a) return '';
+  var parts = [' · server: ' + memberServerText(a)];
+  if (M) parts.push(' · joined by ' + M.joinRouteLabel(a.joinRoute));
+  if (a.status) parts.push(' · status: ' + a.status);
+  return parts.join('');
+}
+
+function popInfoRow(label, value, extra) {
+  var row = document.createElement('div');
+  row.className = 'pop-row pop-info';
+  var l = document.createElement('label');
+  l.textContent = label;
+  var v = document.createElement('span');
+  v.className = 'pop-info-value';
+  if (extra && !extra.hidden) v.appendChild(extra);
+  v.appendChild(document.createTextNode(value));
+  row.appendChild(l);
+  row.appendChild(v);
+  return row;
+}
+
+// The member popover's facts: server (with its badge), join route, status.
+function memberInfoBlock(agent) {
+  var M = window.joindMarks;
+  var box = document.createElement('div');
+  box.className = 'pop-info-block';
+  var host = memberHostOf(agent);
+  box.appendChild(popInfoRow('Server', memberServerText(agent), serverBadgeNode(host || selfServerName, true)));
+  box.appendChild(popInfoRow('Joined', 'by ' + (M ? M.joinRouteLabel(agent.joinRoute) : (agent.joinRoute || 'not stated'))));
+  var st = presenceOf(agent.name);
+  box.appendChild(popInfoRow('Status', agent.status ? agent.status + ' (' + st.short + ')' : st.short));
+  return box;
+}
+
+// --- Read-only seats in the member list ---
+// The socket carries every unrevoked seat (init and `readonly-seats`); only
+// web token holders hold a socket, so agents and visitors never see them.
+// No token, digest or fingerprint is in the payload.
+function applySeatPayload(p) {
+  if (!p || !Array.isArray(p.seats)) return;
+  readonlySeats = p.seats.filter(function(s) { return s && typeof s.id === 'string' && typeof s.name === 'string'; });
+  if (typeof p.recentReadMs === 'number' && p.recentReadMs > 0) seatRecentReadMs = p.recentReadMs;
+}
+
+// The seats of the room on screen (none in a DM or a remote room: a seat
+// belongs to its home server and is never mirrored over a link).
+function roomSeats() {
+  var M = window.joindMarks;
+  if (!M || !activeConversation || activeDm) return [];
+  return M.seatsForRoom(readonlySeats, activeConversation.id);
+}
+
+function seatReadNow(seat, nowMs) {
+  var M = window.joindMarks;
+  return !!(M && M.seatReadRecently(seat, nowMs, seatRecentReadMs));
+}
+
+function seatLastReadText(seat, nowMs) {
+  if (!seat || typeof seat.lastUsedAt !== 'number') return 'not since the server started';
+  return formatAge(Math.max(0, nowMs - seat.lastUsedAt)) + ' ago';
+}
+
+// The dashed hollow tile with the eye badge; `dot` adds the read dot.
+function seatAvatar(seat, size, dot) {
+  var M = window.joindMarks;
+  var av = document.createElement('span');
+  av.className = 'mav seat' + (size ? ' ' + size : '');
+  av.textContent = (seat.name || '?').charAt(0).toUpperCase();
+  if (M) av.appendChild(M.eyeBadgeEl(document, size === 'sm' || size === 'xs' ? 8 : 9));
+  if (dot) {
+    var d = document.createElement('span');
+    d.className = 'mdot ' + (seatReadNow(seat, serverNow()) ? 'online' : 'offline');
+    av.appendChild(d);
+  }
+  return av;
+}
+
+function seatTitle(seat, nowMs) {
+  return seat.name + ' · read only · posts never · woken never · last read ' + seatLastReadText(seat, nowMs);
+}
+
+function seatStateText(seat, nowMs) {
+  if (typeof seat.lastUsedAt !== 'number') return 'not read yet';
+  return (seatReadNow(seat, nowMs) ? 'read ' : 'last read ') + seatLastReadText(seat, nowMs);
+}
+
+function buildSeatRow(seat, nowMs) {
+  var row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'member-row seat';
+  row.setAttribute('data-key', 'seat:' + seat.id);
+  row.title = seatTitle(seat, nowMs);
+  row.appendChild(seatAvatar(seat, '', true));
+  var text = document.createElement('span');
+  text.className = 'mtext';
+  var nameLine = document.createElement('span');
+  nameLine.className = 'mname';
+  var nm = document.createElement('span');
+  nm.textContent = seat.name;
+  nameLine.appendChild(nm);
+  text.appendChild(nameLine);
+  var sub = document.createElement('span');
+  sub.className = 'msub';
+  sub.textContent = 'read only · ' + seatStateText(seat, nowMs);
+  text.appendChild(sub);
+  row.appendChild(text);
+  row.addEventListener('click', function(e) { e.stopPropagation(); showSeatPopover(row, seat); });
+  return row;
+}
+
+function appendSeatGroup(body, nowMs) {
+  var seats = roomSeats();
+  if (seats.length === 0) return;
+  var head = document.createElement('div');
+  head.className = 'mgroup';
+  head.textContent = 'Read only · ' + seats.length;
+  body.appendChild(head);
+  seats.forEach(function(s) { body.appendChild(buildSeatRow(s, nowMs || serverNow())); });
+}
+
+function placePopover(anchor, pop) {
+  document.body.appendChild(pop);
+  if (isMobileView()) return;
+  var rect = anchor.getBoundingClientRect();
+  var popRect = pop.getBoundingClientRect();
+  var top = rect.bottom + 6;
+  var left = rect.left;
+  if (left + popRect.width > window.innerWidth - 8) left = window.innerWidth - popRect.width - 8;
+  if (top + popRect.height > window.innerHeight - 8) top = rect.top - popRect.height - 6;
+  pop.style.top = Math.max(8, top) + 'px';
+  pop.style.left = Math.max(8, left) + 'px';
+}
+
+// The seat's popover: what it is and what it can do (read, nothing else).
+function showSeatPopover(anchor, seat) {
+  closePopover();
+  popoverAnchor = anchor;
+  var now = serverNow();
+  var pop = document.createElement('div');
+  pop.className = 'pill-popover seat-popover';
+  pop.addEventListener('click', function(e) { e.stopPropagation(); });
+  var hdr = document.createElement('div');
+  hdr.className = 'pop-header';
+  var n = document.createElement('span');
+  n.textContent = seat.name;
+  n.style.fontWeight = '700';
+  var kind = document.createElement('span');
+  kind.className = 'pop-pid';
+  kind.textContent = 'read-only seat';
+  hdr.appendChild(n);
+  hdr.appendChild(kind);
+  pop.appendChild(hdr);
+  var meta = findConversationMeta(seat.conversationId);
+  pop.appendChild(popInfoRow('Room', '# ' + (meta ? meta.name : seat.conversationId)));
+  pop.appendChild(popInfoRow('Posts', 'never'));
+  pop.appendChild(popInfoRow('Woken', 'never'));
+  pop.appendChild(popInfoRow('Last read', seatLastReadText(seat, now)));
+  placePopover(anchor, pop);
+  openPopover = pop;
+}
+
+// The Crew page: every room's seats, each with Revoke (the REST route
+// POST /api/readonly-seats/:id/revoke; the page had no control before).
+function appendCrewSeats(body) {
+  if (!window.joindMarks || readonlySeats.length === 0) return;
+  var seats = readonlySeats.slice().sort(function(a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
+  var now = serverNow();
+  var sec = pageSection('Read-only seats', seats.length);
+  seats.forEach(function(seat) {
+    var card = document.createElement('div');
+    card.className = 'crew-card seat';
+    card.title = seatTitle(seat, now);
+    card.appendChild(seatAvatar(seat, '', true));
+    var text = document.createElement('div');
+    text.className = 'crew-card-text';
+    var nm = document.createElement('div');
+    nm.className = 'crew-card-name';
+    nm.textContent = seat.name;
+    var meta = findConversationMeta(seat.conversationId);
+    var sub = document.createElement('div');
+    sub.className = 'crew-card-sub';
+    sub.textContent = 'read only · # ' + (meta ? meta.name : seat.conversationId);
+    var st = document.createElement('div');
+    st.className = 'crew-card-state';
+    st.textContent = seatStateText(seat, now);
+    text.appendChild(nm);
+    text.appendChild(sub);
+    text.appendChild(st);
+    card.appendChild(text);
+    var revoke = document.createElement('button');
+    revoke.type = 'button';
+    revoke.className = 'btn btn-sm seat-revoke';
+    revoke.setAttribute('data-key', 'seat:' + seat.id);
+    revoke.textContent = 'Revoke';
+    revoke.setAttribute('aria-label', 'Revoke the read-only seat ' + seat.name);
+    revoke.addEventListener('click', function(e) { e.stopPropagation(); revokeSeat(seat, revoke); });
+    card.appendChild(revoke);
+    sec.grid.appendChild(card);
+  });
+  body.appendChild(sec.sec);
+}
+
+function revokeSeat(seat, btn) {
+  if (!confirm('Revoke the read-only seat "' + seat.name + '"? Its token stops working at once. This cannot be undone.')) return;
+  if (btn) btn.disabled = true;
+  fetch('/api/readonly-seats/' + encodeURIComponent(seat.id) + '/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    .then(function(r) {
+      if (!r.ok) throw new Error('revoke ' + r.status);
+      // The socket's `readonly-seats` event repaints too; dropping it here
+      // keeps a slow socket from leaving the card standing.
+      readonlySeats = readonlySeats.filter(function(s) { return s.id !== seat.id; });
+      renderPills();
+    })
+    .catch(function() {
+      if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = 'Retry revoke'; }
+    });
+}
+
+// --- Settings: the server badge ---
+// The code and colour this server shows for itself (and its linked peers
+// show for it); "Use default" goes back to the first letter on its palette
+// colour. Saved on the server (data dir), so every browser and every peer
+// sees the same badge.
+function buildServerBadgeSection() {
+  var sec = settingsSection('server-badge', 'Server badge');
+  var part = document.createElement('div');
+  part.id = 'settings-server-badge-part';
+  renderServerBadgeSettings(part);
+  sec.appendChild(part);
+  return sec;
+}
+
+function refreshServerBadgeSettings() {
+  var part = document.getElementById('settings-server-badge-part');
+  if (!part) return;
+  // A field being edited keeps its text; the next open shows the change.
+  if (part.contains(document.activeElement) && document.activeElement.tagName === 'INPUT' && document.activeElement.type !== 'checkbox') return;
+  var focusId = part.contains(document.activeElement) ? document.activeElement.id : null;
+  part.textContent = '';
+  renderServerBadgeSettings(part);
+  if (focusId) { var f = document.getElementById(focusId); if (f) f.focus(); }
+}
+
+function renderServerBadgeSettings(part) {
+  var M = window.joindMarks;
+  if (!M) return;
+  var auto = M.defaultBadge(selfServerName || 'Joind');
+  var current = ownServerBadge() || auto;
+  var draft = { code: current.code, color: current.color };
+
+  var tile = document.createElement('span');
+  tile.className = 'badge-preview';
+  tile.setAttribute('aria-hidden', 'true');
+  var hex = document.createElement('span');
+  hex.className = 'brand-hex';
+  hex.appendChild(M.hexIcon(document, 18));
+  var pBadge = document.createElement('span');
+  pBadge.className = 'sbadge brand';
+  tile.appendChild(hex);
+  tile.appendChild(pBadge);
+
+  var status = document.createElement('p');
+  status.className = 'setting-hint badge-status';
+  status.setAttribute('role', 'status');
+
+  function paint() {
+    var b = M.validBadge(draft);
+    pBadge.hidden = !b;
+    pBadge.textContent = b ? b.code : '';
+    pBadge.style.background = b ? b.color : '';
+    var ratio = M.whiteContrast(draft.color);
+    if (!b) status.textContent = 'A code is one or two letters or digits; a colour is #rrggbb.';
+    else if (ratio < 4.5) status.textContent = 'White text on ' + draft.color + ' is ' + ratio.toFixed(1) + ':1, under 4.5:1. A darker colour reads better.';
+    else status.textContent = '';
+  }
+
+  var code = document.createElement('input');
+  code.type = 'text';
+  code.id = 'settings-badge-code';
+  code.className = 'setting-input badge-code-input';
+  code.maxLength = 2;
+  code.value = draft.code;
+  code.setAttribute('autocomplete', 'off');
+  code.setAttribute('spellcheck', 'false');
+  code.addEventListener('input', function() { draft.code = code.value.trim().toUpperCase(); paint(); });
+  var codeRow = settingsRow('Code', 'One or two letters or digits (default ' + auto.code + ')', null, 'settings-badge-code');
+  codeRow.control.appendChild(tile);
+  codeRow.control.appendChild(code);
+  part.appendChild(codeRow.row);
+
+  var swatches = document.createElement('div');
+  swatches.className = 'badge-swatches';
+  swatches.setAttribute('role', 'group');
+  swatches.setAttribute('aria-label', 'Badge colour');
+  var colorInput = document.createElement('input');
+  colorInput.type = 'color';
+  colorInput.id = 'settings-badge-color';
+  colorInput.className = 'badge-color-input';
+  colorInput.value = draft.color;
+  colorInput.title = 'Any colour';
+  colorInput.setAttribute('aria-label', 'Any colour');
+  function markSwatches() {
+    Array.prototype.forEach.call(swatches.querySelectorAll('.badge-swatch'), function(s) {
+      s.setAttribute('aria-pressed', s.getAttribute('data-color') === draft.color ? 'true' : 'false');
+    });
+  }
+  M.PALETTE.forEach(function(c) {
+    var s = document.createElement('button');
+    s.type = 'button';
+    s.className = 'badge-swatch';
+    s.setAttribute('data-color', c);
+    s.style.background = c;
+    s.title = c;
+    s.setAttribute('aria-label', 'Colour ' + c);
+    s.addEventListener('click', function() { draft.color = c; colorInput.value = c; markSwatches(); paint(); });
+    swatches.appendChild(s);
+  });
+  colorInput.addEventListener('input', function() { draft.color = colorInput.value.toLowerCase(); markSwatches(); paint(); });
+  swatches.appendChild(colorInput);
+  part.appendChild(settingsRow('Colour', 'White text must read on it (4.5:1)', swatches).row);
+
+  var actions = document.createElement('div');
+  actions.className = 'setting-control';
+  var reset = document.createElement('button');
+  reset.type = 'button';
+  reset.className = 'btn btn-sm';
+  reset.textContent = 'Use default';
+  reset.title = auto.code + ' on ' + auto.color;
+  var save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn btn-sm btn-primary';
+  save.textContent = 'Save';
+  actions.appendChild(reset);
+  actions.appendChild(save);
+  part.appendChild(settingsRow('Badge', 'On the rail tile, on members from this server, and what linked servers show', actions).row);
+
+  function send(body) {
+    save.disabled = true;
+    reset.disabled = true;
+    fetch('/api/instance/badge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function(r) { return r.json().catch(function() { return null; }).then(function(j) { return { ok: r.ok, j: j }; }); })
+      .then(function(res) {
+        save.disabled = false;
+        reset.disabled = false;
+        if (!res.ok) { status.textContent = res.j && res.j.error ? res.j.error : 'Not saved.'; return; }
+        applyInstanceMarks(res.j);
+        var again = document.querySelector('#settings-server-badge-part .badge-status');
+        if (again) again.textContent = 'Saved. Linked servers pick it up within a minute.';
+      })
+      .catch(function() { save.disabled = false; reset.disabled = false; status.textContent = 'Not saved: the server did not answer.'; });
+  }
+  save.addEventListener('click', function() {
+    if (!M.validBadge(draft)) { paint(); return; }
+    send({ code: draft.code, color: draft.color });
+  });
+  reset.addEventListener('click', function() { send({ code: null, color: null }); });
+
+  part.appendChild(settingsRow('Badge on the tab icon', 'Adds the badge to the hexagon in the browser tab', settingsSwitch('settings-badge-favicon', faviconWithBadge, function(on) {
+    send({ faviconBadge: on });
+  }), 'settings-badge-favicon').row);
+  part.appendChild(status);
+  markSwatches();
+  paint();
+  if (!badgeEditable) {
+    // The same rule as minting a read-only seat: a served (auto) web token
+    // reaches every visitor of /, so it cannot change what peers are shown.
+    Array.prototype.forEach.call(part.querySelectorAll('input, button'), function(el) { el.disabled = true; });
+    var why = document.createElement('p');
+    why.className = 'setting-hint badge-locked';
+    why.id = 'settings-badge-locked';
+    why.textContent = 'Read only: this server hands its web token to every visitor. Set JOIND_WEB_TOKEN (or --web-token) and restart to change the badge.';
+    part.insertBefore(why, part.firstChild);
+  }
+}

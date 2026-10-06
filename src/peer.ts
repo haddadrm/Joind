@@ -33,12 +33,15 @@ import { tokensEqual } from "./config.js";
 import { newRegistrationId, type ConversationManager } from "./manager.js";
 import { visibleToViewer, parseJoinRoute, type ChatMessage, type ChatRoom, type RoomEvent } from "./room.js";
 import type { LinkRegistry } from "./link.js";
+import type { ServerBadge } from "./server-badge.js";
 import { WAKE_ID_PATTERN, type PeerAction, type PeerEvent, type PeerSubscribeResult, type PeerWakeVerdictResult } from "./peer-types.js";
 
 export interface PeerHubOptions {
   manager: ConversationManager;
   /** The server's own name. */
   selfName: string;
+  /** The server's own badge, sent with its room list (src/server-badge.ts). */
+  selfBadge?: () => ServerBadge;
   /** Where conversation JSONL lives (the .peerseq files go beside it). */
   conversationsDir: string;
   links: LinkConfig[];
@@ -288,7 +291,8 @@ export class PeerHub {
     };
 
     r.get("/rooms", (_req: Req, res) => {
-      res.json({ server: this.opts.selfName, rooms: manager.listConversations() });
+      const badge = this.opts.selfBadge?.();
+      res.json({ server: this.opts.selfName, rooms: manager.listConversations(), ...(badge ? { badge: { code: badge.code, color: badge.color } } : {}) });
     });
 
     r.get("/subscribe", async (req: Req, res) => {
