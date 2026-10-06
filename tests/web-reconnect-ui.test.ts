@@ -134,6 +134,8 @@ const LIFTED_FUNCTIONS = [
   "loadCrewRoster", "loadTemplates", "refreshSessionStatus", "signOut",
   "forgetWebToken", "retireSocket", "closeTabSockets", "showSignedOut", "resumeSession", "tickMembers",
   "reconcileVisibleViews", "renderPage", "loadBoard", "loadTasks", "taskRoomIsCurrent",
+  "postComposerSend", "uploadFile", "addImageFiles", "clearImagePreview", "scanTerminals", "startAutoScan", "autoScanTerminals",
+  "newSessionAbort", "sessionSignal", "abortError", "isAbortError", "sameSession", "releaseSessionLocks",
 ];
 const LIFTED_VARS = [
   "ws", "wsName", "pendingRename", "renameAttempt", "wsAuthFailures", "reconnectTimer",
@@ -141,6 +143,8 @@ const LIFTED_VARS = [
   "bootTokenPrompted", "signedOut", "setMyName", "crewRoster", "sessionTemplates",
   "typedWebToken", "authEpoch", "sessionAttempt", "tabSockets", "sessionGeneration", "reconcileOnInit",
   "pageNow", "PAGES", "board", "tasks", "taskFilter", "taskPanelOpen",
+  "composerSendInFlight", "pendingImages", "imageUploadsInFlight", "MAX_COMPOSER_IMAGES", "MAX_UPLOAD_BYTES",
+  "replyingTo", "pendingGeneration", "lastScanResults", "autoScanRunning", "sessionAbort",
 ];
 
 // What the init handler and the rest touch, stubbed (counted where useful).
@@ -189,6 +193,17 @@ function closeDecisionsPanel() {}
 function closeCrewPanel() {}
 function closeLaunchDialog() {}
 function closeMobileDrawer() {}
+var composerErrorText = '', composerNoteText = '';
+function showComposerError(t) { composerErrorText = t; if (t) count('showComposerError'); }
+function showComposerNote(t) { composerNoteText = t; count('showComposerNote'); }
+function renderImageStrip() { count('renderImageStrip'); }
+function clearReply() {}
+function updateSendBtn() {}
+function syncHighlight() {}
+function onComposerQueued() { count('onComposerQueued'); }
+function nextPendingSeq() { return 1; }
+function attachmentsRefusedHere() { return false; }
+function renderTerminals() { count('renderTerminals'); }
 `;
 
 interface FakeSocket {
@@ -202,8 +217,9 @@ interface FakeSocket {
   sent: string[];
 }
 
-interface FakeAnswer { status: number; body?: unknown }
-interface FetchCall { url: string; method: string; token: string | null; body: unknown }
+/** `bodyGate`: the headers arrive at once, the body only once the gate opens. */
+interface FakeAnswer { status: number; body?: unknown; bodyGate?: Promise<void> }
+interface FetchCall { url: string; method: string; token: string | null; body: unknown; signal: AbortSignal | null }
 interface Timer { id: number; fn: () => void; ms: number }
 interface Interval { id: number; fn: () => void; ms: number }
 
@@ -218,6 +234,8 @@ interface Page {
   intervals: Interval[];
   reloads: number;
   route: (url: string, method: string) => FakeAnswer | Promise<FakeAnswer>;
+  /** False: the fake fetch ignores init.signal (a fetch that cannot be cancelled). */
+  honourSignal: boolean;
   flush(): Promise<void>;
   runTimers(): Promise<void>;
   last(): FakeSocket;
@@ -251,7 +269,8 @@ function makePage(opts: PageOptions = {}): Page {
   const dom = new JSDOM(
     '<!doctype html><html><body><div id="connection-dot"></div><div id="you-pill"></div><span id="you-name-display"></span>' +
     '<span id="you-avatar"></span><input id="sender-name" type="hidden" value="human"><div id="template-list"></div>' +
-    '<div id="session-status"></div><span id="instance-name"></span><div id="rail-brand"></div><div class="app"></div></body></html>',
+    '<div id="session-status"></div><span id="instance-name"></span><div id="rail-brand"></div><div class="app"></div>' +
+    '<textarea id="message-input"></textarea><button id="scan-btn">Scan</button></body></html>',
     { runScripts: "outside-only", url: "http://joind.test/" },
   );
   const win = dom.window as unknown as Window & typeof globalThis & Record<string, unknown>;
@@ -264,6 +283,7 @@ function makePage(opts: PageOptions = {}): Page {
   const page = {
     win, sockets: [] as FakeSocket[], fetches: [] as FetchCall[], timers: [] as Timer[], intervals: [] as Interval[], reloads: 0,
     route: (_url: string, _method: string): FakeAnswer | Promise<FakeAnswer> => ({ status: 200, body: [] }),
+    honourSignal: true,
   } as Page;
 
   let timerId = 0;
@@ -286,20 +306,39 @@ function makePage(opts: PageOptions = {}): Page {
   }
   win.__FakeWS = FakeWS;
 
-  const answer = (a: FakeAnswer): unknown => {
+  // As a browser does: an aborted signal rejects the fetch, or the body read
+  // when the headers are already in, with an AbortError.
+  const abortError = (): Error => new win.DOMException("The operation was aborted.", "AbortError");
+  const answer = (a: FakeAnswer, signal: AbortSignal | null): unknown => {
+    const cut = (): boolean => page.honourSignal && !!signal && signal.aborted;
     const make = (): unknown => ({
       status: a.status, ok: a.status >= 200 && a.status < 300,
-      json: (): Promise<unknown> => (a.body === undefined ? Promise.reject(new Error("no body")) : Promise.resolve(JSON.parse(JSON.stringify(a.body)))),
+      json: (): Promise<unknown> => (a.bodyGate ?? Promise.resolve()).then(() => {
+        if (cut()) throw abortError();
+        if (a.body === undefined) throw new Error("no body");
+        return JSON.parse(JSON.stringify(a.body)) as unknown;
+      }),
       clone: (): unknown => make(),
     });
     return make();
   };
+  const parseBody = (b: unknown): unknown => {
+    if (typeof b !== "string") return b;
+    try { return JSON.parse(b) as unknown; } catch { return b; }
+  };
   win.Headers = Headers;
-  win.fetch = ((input: string, init?: { method?: string; headers?: Headers; body?: string }): Promise<unknown> => {
+  win.fetch = ((input: string, init?: { method?: string; headers?: Headers; body?: unknown; signal?: AbortSignal }): Promise<unknown> => {
     const method = init?.method ?? "GET";
     const token = init?.headers instanceof Headers ? init.headers.get("X-Joind-Token") : null;
-    page.fetches.push({ url: input, method, token, body: init?.body ? JSON.parse(init.body) as unknown : undefined });
-    return Promise.resolve(page.route(input, method)).then(answer);
+    const signal = init?.signal ?? null;
+    page.fetches.push({ url: input, method, token, body: init?.body ? parseBody(init.body) : undefined, signal });
+    return new Promise<unknown>((resolve, reject) => {
+      if (page.honourSignal && signal) {
+        if (signal.aborted) { reject(abortError()); return; }
+        signal.addEventListener("abort", () => reject(abortError()));
+      }
+      Promise.resolve(page.route(input, method)).then((a) => resolve(answer(a, signal)), reject);
+    });
   }) as unknown as typeof fetch;
 
   win.eval(HELPERS);
@@ -1049,5 +1088,245 @@ describe("round 2 (gate 1 finding 1): a resumed session reconciles the view left
     initInRoom(page);
     await page.flush();
     expect(page.fetches.filter((f) => f.url.indexOf("/api/tasks?scope=all") === 0).length).toBe(n);
+  });
+});
+
+// --- round 3 (gate 2): sign out cancels the old session's requests --------
+
+describe("round 3 (gate 2): sign out cancels the old session's requests and releases its locks", () => {
+  interface Task { id: number; status: string }
+  const BEFORE: Task[] = [{ id: 1, status: "open" }];
+  const AFTER: Task[] = [{ id: 1, status: "done" }, { id: 2, status: "open" }];
+  type Held = (a: FakeAnswer) => void;
+
+  /** Answers every read; the URLs in `hold` wait until the test answers them. */
+  function server(page: Page, store: { list: Task[] }, held: Map<string, Held[]>): void {
+    page.route = (url: string): FakeAnswer | Promise<FakeAnswer> => {
+      for (const [prefix, queue] of held) {
+        if (url.indexOf(prefix) === 0) return new Promise<FakeAnswer>((r) => { queue.push(r); });
+      }
+      if (url === "/api/web/register") return { status: 200, body: { ok: true, name: "Rami" } };
+      if (url.indexOf("/api/tasks?") === 0) return { status: 200, body: store.list };
+      return { status: 200, body: [] };
+    };
+  }
+  function initInRoom(page: Page): void {
+    page.last().onmessage?.({ data: JSON.stringify({ type: "init", data: {
+      agents: [], messages: [], conversations: [{ id: "c1", name: "ops" }], activeConversation: { id: "c1", name: "ops" },
+    } }) });
+  }
+  async function signedIn(page: Page): Promise<void> {
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); initInRoom(page);
+    await page.flush();
+  }
+  async function signOutAndResume(page: Page, after?: () => void): Promise<void> {
+    signOutAndPressSignIn(page);
+    await page.flush();
+    after?.();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); initInRoom(page);
+    await page.flush();
+  }
+  const calls = (page: Page): Record<string, number> => page.api.v("calls") as Record<string, number>;
+  const input = (page: Page): HTMLTextAreaElement => page.win.document.getElementById("message-input") as HTMLTextAreaElement;
+  const scanBtn = (page: Page): HTMLButtonElement => page.win.document.getElementById("scan-btn") as HTMLButtonElement;
+  const sends = (page: Page): number => page.fetches.filter((f) => f.url === "/api/send").length;
+  const send = (page: Page, text: string): void => {
+    input(page).value = text;
+    page.api.run(`postComposerSend('/api/send', { text: ${JSON.stringify(text)} }, { text: ${JSON.stringify(text)}, images: [], reply: null })`);
+  };
+  const MODES = [["cancellable", true], ["uncancellable", false]] as const;
+
+  it("every /api/ request carries the session's signal; sign out aborts it and the next session gets a fresh one", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    server(page, { list: BEFORE }, new Map());
+    await signedIn(page);
+    page.api.run("loadBoard()");
+    const before = page.fetches[page.fetches.length - 1].signal;
+    expect(before).not.toBeNull();
+    expect(before!.aborted).toBe(false);
+    await signOutAndResume(page);
+    expect(before!.aborted).toBe(true);
+    page.api.run("loadBoard()");
+    const after = page.fetches[page.fetches.length - 1].signal;
+    expect(after).not.toBeNull();
+    expect(after!.aborted).toBe(false);
+  });
+
+  it("a caller's own signal still cancels its request (composed with the session's)", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    server(page, { list: BEFORE }, new Map([["/api/slow", []]]));
+    await signedIn(page);
+    page.api.run("window.__own = new AbortController(); window.__outcome = 'pending'; fetch('/api/slow', { signal: window.__own.signal }).then(function() { window.__outcome = 'answered'; }, function(e) { window.__outcome = e.name; })");
+    page.api.run("window.__own.abort()");
+    await page.flush();
+    expect(page.api.v("window.__outcome")).toBe("AbortError");
+  });
+
+  for (const [mode, honour] of MODES) {
+    it(`finding 1 (${mode}): a send pending at sign out releases the lock; the resumed composer sends, and the old answer never touches it`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      const held = new Map<string, Held[]>([["/api/send", []]]);
+      server(page, { list: BEFORE }, held);
+      await signedIn(page);
+      send(page, "hello");
+      expect(page.api.v("composerSendInFlight")).toBe(true);
+      await signOutAndResume(page);
+      expect(page.api.v("composerSendInFlight")).toBe(false);
+      expect(page.api.v("composerErrorText")).toBe(""); // no "Not sent" for a cancelled send
+      // The resumed composer sends at once, and that send holds the lock.
+      send(page, "after");
+      expect(sends(page)).toBe(2);
+      expect(page.api.v("composerSendInFlight")).toBe(true);
+      // The old send's answer lands late (if it was not cancelled): it must
+      // not release the new lock, clear the box or paint anything.
+      const notes = calls(page).showComposerNote ?? 0;
+      held.get("/api/send")![0]({ status: 200, body: { ok: true } });
+      await page.flush();
+      expect(page.api.v("composerSendInFlight")).toBe(true);
+      expect(input(page).value).toBe("after");
+      expect(calls(page).showComposerNote ?? 0).toBe(notes);
+      expect(page.api.v("composerErrorText")).toBe("");
+    });
+
+    it(`finding 2 (${mode}): an upload pending at sign out is dropped; text sends again, and the old completion never moves the new count`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      const held = new Map<string, Held[]>([["/api/upload", []]]);
+      server(page, { list: BEFORE }, held);
+      await signedIn(page);
+      page.api.run("addImageFiles([{ type: 'image/png', size: 10, name: 'old.png' }])");
+      expect(page.api.v("imageUploadsInFlight")).toBe(1);
+      await signOutAndResume(page);
+      expect(page.api.v("imageUploadsInFlight")).toBe(0);
+      expect(page.api.v("pendingImages")).toEqual([]);
+      expect(page.api.v("composerErrorText")).toBe(""); // no "Could not upload" for a cancelled upload
+      // A new upload in the resumed session counts from zero.
+      page.api.run("addImageFiles([{ type: 'image/png', size: 10, name: 'new.png' }])");
+      expect(page.api.v("imageUploadsInFlight")).toBe(1);
+      held.get("/api/upload")![0]({ status: 200, body: { url: "/uploads/old.png" } }); // the old one, late
+      await page.flush();
+      expect(page.api.v("imageUploadsInFlight")).toBe(1);
+      expect((page.api.v("pendingImages") as Array<{ name: string; url: string | null }>)).toEqual([{ name: "new.png", url: null }]);
+      held.get("/api/upload")![1]({ status: 200, body: { url: "/uploads/new.png" } });
+      await page.flush();
+      expect(page.api.v("imageUploadsInFlight")).toBe(0);
+      expect((page.api.v("pendingImages") as Array<{ name: string; url: string | null }>)).toEqual([{ name: "new.png", url: "/uploads/new.png" }]);
+      expect(page.api.v("composerErrorText")).toBe("");
+    });
+
+    it(`finding 3 (${mode}): a task read whose headers came before sign out and whose body comes after never overwrites the fresh list`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      const store = { list: BEFORE };
+      server(page, store, new Map());
+      await signedIn(page);
+      page.api.run("taskPanelOpen = true; tasks = " + JSON.stringify(BEFORE) + "; tasksConvId = 'c1'");
+      let openBody: () => void = () => undefined;
+      const route = page.route;
+      page.route = (url: string, method: string): FakeAnswer | Promise<FakeAnswer> =>
+        url.indexOf("/api/tasks?conversation=") === 0
+          ? { status: 200, body: BEFORE, bodyGate: new Promise<void>((r) => { openBody = r; }) }
+          : route(url, method);
+      page.api.run("loadTasks('c1')");
+      await page.flush(); // the headers are in; the body is not
+      page.route = route;
+      await signOutAndResume(page, () => { store.list = AFTER; });
+      expect(page.api.v("tasks")).toEqual(AFTER);
+      const paints = calls(page).renderTaskPanel ?? 0;
+      openBody();
+      await page.flush();
+      expect(page.api.v("tasks")).toEqual(AFTER);
+      expect(calls(page).renderTaskPanel ?? 0).toBe(paints);
+    });
+
+    it(`finding 3 (${mode}): a send whose body comes after the resume never clears the kept draft or runs its completion`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      server(page, { list: BEFORE }, new Map());
+      await signedIn(page);
+      let openBody: () => void = () => undefined;
+      const route = page.route;
+      page.route = (url: string, method: string): FakeAnswer | Promise<FakeAnswer> =>
+        url === "/api/send"
+          ? { status: 202, body: { ok: true, queued: true }, bodyGate: new Promise<void>((r) => { openBody = r; }) }
+          : route(url, method);
+      send(page, "hello");
+      await page.flush(); // the headers are in; the body is not
+      page.route = route;
+      await signOutAndResume(page);
+      expect(input(page).value).toBe("hello"); // the draft survives sign out
+      const before = { ...calls(page) };
+      openBody();
+      await page.flush();
+      expect(input(page).value).toBe("hello");
+      expect(calls(page).showComposerNote ?? 0).toBe(before.showComposerNote ?? 0);
+      expect(calls(page).onComposerQueued ?? 0).toBe(before.onComposerQueued ?? 0);
+      expect(page.api.v("composerErrorText")).toBe("");
+    });
+
+    it(`finding 4 (${mode}): scans pending at sign out leave no busy flag or disabled sidebar button, and their answers never paint`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      const held = new Map<string, Held[]>([["/api/terminals", []]]);
+      server(page, { list: BEFORE }, held);
+      await signedIn(page);
+      page.api.run("scanTerminals(); autoScanTerminals()");
+      expect(scanBtn(page).disabled).toBe(true);
+      expect(page.api.v("autoScanRunning")).toBe(true);
+      await signOutAndResume(page);
+      expect(page.api.v("autoScanRunning")).toBe(false);
+      expect(scanBtn(page).disabled).toBe(false);
+      expect(scanBtn(page).textContent).toBe("Scan");
+      const paints = calls(page).renderTerminals ?? 0; // nothing painted the list for the cancelled scans
+      // The resumed session scans again, and its scan holds the flag.
+      page.api.run("autoScanTerminals()");
+      expect(held.get("/api/terminals")!).toHaveLength(3);
+      expect(page.api.v("autoScanRunning")).toBe(true);
+      held.get("/api/terminals")![0]({ status: 200, body: [{ pid: 1 }] }); // the old answers, late
+      held.get("/api/terminals")![1]({ status: 200, body: [{ pid: 1 }] });
+      await page.flush();
+      expect(page.api.v("autoScanRunning")).toBe(true);
+      expect(page.api.v("lastScanResults")).toEqual([]);
+      expect(calls(page).renderTerminals ?? 0).toBe(paints);
+      held.get("/api/terminals")![2]({ status: 200, body: [{ pid: 2 }] });
+      await page.flush();
+      expect(page.api.v("autoScanRunning")).toBe(false);
+      expect(page.api.v("lastScanResults")).toEqual([{ pid: 2 }]);
+    });
+  }
+});
+
+describe("round 3 (gate 2): a cancelled request is silent", () => {
+  it("a board read cancelled by sign out repaints nothing and empties nothing", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    page.route = (url: string): FakeAnswer | Promise<FakeAnswer> =>
+      url.indexOf("/api/tasks?scope=all") === 0 ? new Promise<FakeAnswer>(() => undefined) : registerOk(url);
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); page.init();
+    await page.flush();
+    page.api.run("board.tasks = [{ id: 7 }]; loadBoard()");
+    const paints = (page.api.v("calls") as Record<string, number>).renderBoard ?? 0;
+    page.api.run("signOut()");
+    await page.flush();
+    expect((page.api.v("calls") as Record<string, number>).renderBoard ?? 0).toBe(paints);
+    expect((page.api.v("board") as { tasks: unknown[] }).tasks).toEqual([{ id: 7 }]);
+  });
+
+  it("a request to another origin gets no session signal and no token", async () => {
+    const page = makePage({ sessionToken: TOKEN, name: "Rami" });
+    page.api.run("fetch('https://elsewhere.test/x')");
+    const f = page.fetches[page.fetches.length - 1];
+    expect(f.signal).toBeNull();
+    expect(f.token).toBeNull();
   });
 });
