@@ -133,12 +133,14 @@ const LIFTED_FUNCTIONS = [
   "adoptRegisteredName", "startSession", "connect", "handleSocketClose", "myName", "setupYouPill",
   "loadCrewRoster", "loadTemplates", "refreshSessionStatus", "signOut",
   "forgetWebToken", "retireSocket", "closeTabSockets", "showSignedOut", "resumeSession", "tickMembers",
+  "reconcileVisibleViews", "renderPage", "loadBoard", "loadTasks", "taskRoomIsCurrent",
 ];
 const LIFTED_VARS = [
   "ws", "wsName", "pendingRename", "renameAttempt", "wsAuthFailures", "reconnectTimer",
   "injectedTokenStale", "TOKEN_RELOAD_KEY", "TOKEN_REFUSED_TEXT", "tokenPromptAfter",
   "bootTokenPrompted", "signedOut", "setMyName", "crewRoster", "sessionTemplates",
-  "typedWebToken", "authEpoch", "sessionAttempt", "tabSockets",
+  "typedWebToken", "authEpoch", "sessionAttempt", "tabSockets", "sessionGeneration", "reconcileOnInit",
+  "pageNow", "PAGES", "board", "tasks", "taskFilter", "taskPanelOpen",
 ];
 
 // What the init handler and the rest touch, stubbed (counted where useful).
@@ -171,6 +173,13 @@ function openUserMenu() {}
 function loadNotifications() { count('loadNotifications'); }
 function refreshDecisionsBadge() { count('refreshDecisionsBadge'); }
 function fetchDmPartners() {}
+function renderBoardSide() {}
+function renderBoard() { count('renderBoard'); }
+function renderTaskBadge() {}
+function renderTaskPanel() { count('renderTaskPanel'); }
+function renderCrewPage() { count('renderCrewPage'); }
+function renderDecisionsPage() {}
+function loadDecisionsPage() { count('loadDecisionsPage'); }
 var notifyPanelOpen = false, decisionsPanelOpen = false, sessionStatusInterval = null, membersTick = null, autoScanInterval = null;
 function closePopover() {}
 function closeSettingsModal() {}
@@ -909,5 +918,136 @@ describe("follow-up 1: Sign in after sign out resumes in place, so a typed token
     signOutAndPressSignIn(page);
     expect(page.reloads).toBe(1);
     expect(page.prompt()).toBeNull();
+  });
+});
+
+describe("round 2 (gate 1 finding 1): a resumed session reconciles the view left on screen", () => {
+  interface Task { id: number; status: string }
+  const BEFORE: Task[] = [{ id: 1, status: "open" }];
+  const AFTER: Task[] = [{ id: 1, status: "done" }, { id: 2, status: "open" }];
+
+  /** The server's task store, changed by the test while the tab is signed out. */
+  function taskServer(page: Page, store: { list: Task[] }): void {
+    page.route = (url: string): FakeAnswer => {
+      if (url === "/api/web/register") return { status: 200, body: { ok: true, name: "Rami" } };
+      if (url.indexOf("/api/tasks?") === 0) return { status: 200, body: store.list };
+      return { status: 200, body: [] };
+    };
+  }
+  /** An init that lands in room c1 (the room the task panel belongs to). */
+  function initInRoom(page: Page): void {
+    page.last().onmessage?.({ data: JSON.stringify({ type: "init", data: {
+      agents: [], messages: [], conversations: [{ id: "c1", name: "ops" }], activeConversation: { id: "c1", name: "ops" },
+    } }) });
+  }
+  async function signedIn(page: Page): Promise<void> {
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); initInRoom(page);
+    await page.flush();
+  }
+  async function signOutChangeSignIn(page: Page, store: { list: Task[] }): Promise<void> {
+    signOutAndPressSignIn(page);
+    store.list = AFTER; // an agent completes task 1 and adds task 2 meanwhile
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); initInRoom(page);
+    await page.flush();
+  }
+  const calls = (page: Page): Record<string, number> => page.api.v("calls") as Record<string, number>;
+
+  for (const storage of ["blocked", "working"] as const) {
+    it(`storage ${storage}: the Tasks board shows the tasks changed during sign out`, async () => {
+      const page = makePage(storage === "blocked" ? { name: "Rami", storage: "throw-all" } : { name: "Rami" });
+      const store = { list: BEFORE };
+      taskServer(page, store);
+      await signedIn(page);
+      page.api.run("pageNow = 'tasks'; board.tasks = " + JSON.stringify(BEFORE));
+      await signOutChangeSignIn(page, store);
+      expect((page.api.v("board") as { tasks: Task[] }).tasks).toEqual(AFTER);
+      expect(page.reloads).toBe(0);
+    });
+  }
+
+  it("an open task panel shows the tasks changed during sign out (init keeps a same-room list)", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    const store = { list: BEFORE };
+    taskServer(page, store);
+    await signedIn(page);
+    page.api.run("taskPanelOpen = true; tasks = " + JSON.stringify(BEFORE) + "; tasksConvId = 'c1'");
+    await signOutChangeSignIn(page, store);
+    expect(page.api.v("tasks")).toEqual(AFTER);
+    expect(page.api.v("taskPanelOpen")).toBe(true);
+  });
+
+  it("requests sent before sign out never paint after the resume", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    const store = { list: BEFORE };
+    taskServer(page, store);
+    await signedIn(page);
+    // A board reload and a panel reload go out, and stay unanswered, before sign out.
+    let answerOld: (a: FakeAnswer) => void = () => undefined;
+    const held: Array<(a: FakeAnswer) => void> = [];
+    const route = page.route;
+    page.route = (url: string, method: string): FakeAnswer | Promise<FakeAnswer> =>
+      url.indexOf("/api/tasks?") === 0 ? new Promise<FakeAnswer>((r) => { held.push(r); }) : route(url, method);
+    page.api.run("pageNow = 'tasks'; taskPanelOpen = true; tasksConvId = 'c1'; loadBoard(); loadTasks('c1')");
+    expect(held).toHaveLength(2);
+    answerOld = (a) => { for (const r of held) r(a); };
+    page.route = route;
+    await signOutChangeSignIn(page, store);
+    expect((page.api.v("board") as { tasks: Task[] }).tasks).toEqual(AFTER);
+    expect(page.api.v("tasks")).toEqual(AFTER);
+    const boardPaints = calls(page).renderBoard ?? 0;
+    const panelPaints = calls(page).renderTaskPanel ?? 0;
+    answerOld({ status: 200, body: BEFORE }); // the old session's answers arrive late
+    await page.flush();
+    expect((page.api.v("board") as { tasks: Task[] }).tasks).toEqual(AFTER);
+    expect(page.api.v("tasks")).toEqual(AFTER);
+    expect(calls(page).renderBoard ?? 0).toBe(boardPaints);
+    expect(calls(page).renderTaskPanel ?? 0).toBe(panelPaints);
+  });
+
+  it("a request sent before sign out that fails late is silent too", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    taskServer(page, { list: BEFORE });
+    await signedIn(page);
+    let failOld: () => void = () => undefined;
+    const route = page.route;
+    page.route = (url: string, method: string): FakeAnswer | Promise<FakeAnswer> =>
+      url.indexOf("/api/tasks?scope=all") === 0 ? new Promise<FakeAnswer>((_r, reject) => { failOld = () => reject(new TypeError("Failed to fetch")); }) : route(url, method);
+    page.api.run("pageNow = 'tasks'; loadBoard()");
+    page.route = route;
+    await signOutChangeSignIn(page, { list: AFTER });
+    const paints = calls(page).renderBoard ?? 0;
+    failOld();
+    await page.flush();
+    expect(calls(page).renderBoard ?? 0).toBe(paints);
+  });
+
+  it("the Decisions page reloads, and the Crew page repaints once its roster and templates are back", async () => {
+    for (const p of ["decisions", "crew"] as const) {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      taskServer(page, { list: BEFORE });
+      await signedIn(page);
+      page.api.run(`pageNow = '${p}'`);
+      const before = { ...calls(page) };
+      await signOutChangeSignIn(page, { list: AFTER });
+      if (p === "decisions") expect((calls(page).loadDecisionsPage ?? 0) - (before.loadDecisionsPage ?? 0)).toBe(1);
+      else expect((calls(page).renderCrewPage ?? 0) - (before.renderCrewPage ?? 0)).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("an ordinary reconnect init (no sign out) does not reload the board", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    taskServer(page, { list: BEFORE });
+    await signedIn(page);
+    page.api.run("pageNow = 'tasks'");
+    const n = page.fetches.filter((f) => f.url.indexOf("/api/tasks?scope=all") === 0).length;
+    initInRoom(page);
+    await page.flush();
+    expect(page.fetches.filter((f) => f.url.indexOf("/api/tasks?scope=all") === 0).length).toBe(n);
   });
 });

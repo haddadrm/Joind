@@ -161,6 +161,13 @@ var authEpoch = 0;
 var sessionAttempt = 0;
 // Every socket this tab opened that has not closed yet: sign out closes all.
 var tabSockets = [];
+// Signed-in sessions of this tab, bumped on sign out. An /api/ answer (or
+// failure) to a request sent in an earlier session never settles, so nothing
+// the old session asked for can paint after Sign in resumes in place.
+var sessionGeneration = 0;
+// Set when Sign in resumes in place: the first init after it reconciles the
+// page or panel left on screen (reconcileVisibleViews).
+var reconcileOnInit = false;
 
 // Server-issued token: injected into index.html when generated, otherwise the
 // browser supplies it once per tab session via a prompt (page memory, and
@@ -209,13 +216,21 @@ function clearTokenReload() {
         init = Object.assign({}, init, { headers: headers });
       }
     }
-    var held = typeof input === 'string' && input.indexOf('/api/') === 0 ? webToken() : '';
+    var ours = typeof input === 'string' && input.indexOf('/api/') === 0;
+    var held = ours ? webToken() : '';
     var epoch = authEpoch;
+    var generation = sessionGeneration;
+    // Sent before a sign out: the caller never hears back (see sessionGeneration).
+    function fromOldSession() { return ours && generation !== sessionGeneration; }
     return nativeFetch.call(window, input, init).then(function(r) {
+      if (fromOldSession()) return new Promise(function() {});
       // A refused token while one is held means it is stale or wrong: say
       // so on the page instead of leaving an empty list and a spinner.
       if (held && !signedOut && (r.status === 401 || r.status === 403)) noteRefusedAnswer(r, epoch, held);
       return r;
+    }, function(err) {
+      if (fromOldSession()) return new Promise(function() {});
+      throw err;
     });
   };
 })();
@@ -603,6 +618,7 @@ function connect() {
         }
         renderConversationList();
         renderDmList();
+        if (reconcileOnInit) { reconcileOnInit = false; reconcileVisibleViews(); }
         break;
       case 'conversation-created':
       case 'conversation-renamed':
@@ -6474,6 +6490,8 @@ function signOut() {
   var served = !!window.__JOIND_TOKEN;
   signedOut = true;
   authEpoch++; // a refusal still in flight cannot raise the banner
+  sessionGeneration++; // no answer to a request sent so far reaches the page
+  reconcileOnInit = false;
   forgetWebToken();
   window.__JOIND_TOKEN = '';
   closePopover();
@@ -6560,8 +6578,23 @@ function resumeSession() {
   membersTick = setInterval(tickMembers, 60000);
   clearInterval(sessionStatusInterval);
   sessionStatusInterval = setInterval(refreshSessionStatus, 3000);
+  reconcileOnInit = true;
   runBootReads();
   startSession();
+}
+
+// The first init after a resume repaints rooms, messages and the task badge.
+// What the old reload also rebuilt is refetched here, so nothing on screen
+// is left as it was at sign out: the page open on the rail (the Tasks board,
+// Decisions, Crew once its roster and templates are back) and an open task
+// panel (init keeps a same-room task list as it is). The bell reloads on
+// every socket open.
+function reconcileVisibleViews() {
+  if (pageNow) renderPage(pageNow);
+  if (pageNow === 'crew') {
+    Promise.all([loadCrewRoster(), loadTemplates()]).then(function() { renderCrewPage(); });
+  }
+  if (taskPanelOpen && activeConversation) loadTasks(activeConversation.id);
 }
 
 // --- Conversations ---
