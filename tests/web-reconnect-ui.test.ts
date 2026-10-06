@@ -132,7 +132,7 @@ const LIFTED_FUNCTIONS = [
   "promptWebToken", "ensureWebToken", "bootSession", "loadInstanceInfo", "registerWebName",
   "adoptRegisteredName", "startSession", "connect", "handleSocketClose", "myName", "setupYouPill",
   "loadCrewRoster", "loadTemplates", "refreshSessionStatus", "signOut",
-  "forgetWebToken", "retireSocket", "closeTabSockets",
+  "forgetWebToken", "retireSocket", "closeTabSockets", "showSignedOut", "resumeSession", "tickMembers",
 ];
 const LIFTED_VARS = [
   "ws", "wsName", "pendingRename", "renameAttempt", "wsAuthFailures", "reconnectTimer",
@@ -180,7 +180,6 @@ function closeDecisionsPanel() {}
 function closeCrewPanel() {}
 function closeLaunchDialog() {}
 function closeMobileDrawer() {}
-function showSignedOut() { count('showSignedOut'); }
 `;
 
 interface FakeSocket {
@@ -197,6 +196,7 @@ interface FakeSocket {
 interface FakeAnswer { status: number; body?: unknown }
 interface FetchCall { url: string; method: string; token: string | null; body: unknown }
 interface Timer { id: number; fn: () => void; ms: number }
+interface Interval { id: number; fn: () => void; ms: number }
 
 interface PageApi { v(name: string): unknown; run(src: string): unknown }
 
@@ -206,6 +206,7 @@ interface Page {
   sockets: FakeSocket[];
   fetches: FetchCall[];
   timers: Timer[];
+  intervals: Interval[];
   reloads: number;
   route: (url: string, method: string) => FakeAnswer | Promise<FakeAnswer>;
   flush(): Promise<void>;
@@ -241,7 +242,7 @@ function makePage(opts: PageOptions = {}): Page {
   const dom = new JSDOM(
     '<!doctype html><html><body><div id="connection-dot"></div><div id="you-pill"></div><span id="you-name-display"></span>' +
     '<span id="you-avatar"></span><input id="sender-name" type="hidden" value="human"><div id="template-list"></div>' +
-    '<div id="session-status"></div><span id="instance-name"></span><div id="rail-brand"></div></body></html>',
+    '<div id="session-status"></div><span id="instance-name"></span><div id="rail-brand"></div><div class="app"></div></body></html>',
     { runScripts: "outside-only", url: "http://joind.test/" },
   );
   const win = dom.window as unknown as Window & typeof globalThis & Record<string, unknown>;
@@ -252,13 +253,15 @@ function makePage(opts: PageOptions = {}): Page {
   if (opts.storage) Object.defineProperty(win, "sessionStorage", { configurable: true, value: faultyStorage(opts.storage) });
 
   const page = {
-    win, sockets: [] as FakeSocket[], fetches: [] as FetchCall[], timers: [] as Timer[], reloads: 0,
+    win, sockets: [] as FakeSocket[], fetches: [] as FetchCall[], timers: [] as Timer[], intervals: [] as Interval[], reloads: 0,
     route: (_url: string, _method: string): FakeAnswer | Promise<FakeAnswer> => ({ status: 200, body: [] }),
   } as Page;
 
   let timerId = 0;
   win.__fakeSetTimeout = (fn: () => void, ms: number): number => { timerId += 1; page.timers.push({ id: timerId, fn, ms }); return timerId; };
   win.__fakeClearTimeout = (id: number): void => { page.timers = page.timers.filter((t) => t.id !== id); };
+  win.__fakeSetInterval = (fn: () => void, ms: number): number => { timerId += 1; page.intervals.push({ id: timerId, fn, ms }); return timerId; };
+  win.__fakeClearInterval = (id: number): void => { page.intervals = page.intervals.filter((t) => t.id !== id); };
   win.__fakeLocation = { protocol: "http:", host: "joind.test", reload: (): void => { page.reloads += 1; } };
 
   class FakeWS implements FakeSocket {
@@ -294,10 +297,10 @@ function makePage(opts: PageOptions = {}): Page {
   const prelude = LIFTED_VARS.map(liftVar).join("\n");
   const body = LIFTED_FUNCTIONS.map(lift).join("\n");
   win.eval(
-    "(function(location, setTimeout, clearTimeout, WebSocket) {\n" +
+    "(function(location, setTimeout, clearTimeout, WebSocket, setInterval, clearInterval) {\n" +
     prelude + "\n" + STUBS + "\n" + liftFetchWrapper() + "\n" + body + "\n" +
     "window.__page = { v: function(n) { return eval(n); }, run: function(src) { return eval(src); } };\n" +
-    "})(window.__fakeLocation, window.__fakeSetTimeout, window.__fakeClearTimeout, window.__FakeWS);",
+    "})(window.__fakeLocation, window.__fakeSetTimeout, window.__fakeClearTimeout, window.__FakeWS, window.__fakeSetInterval, window.__fakeClearInterval);",
   );
   page.api = win.__page as PageApi;
   page.api.run("setupYouPill()");
@@ -806,5 +809,105 @@ function loadDecisionsPage() {}
     d.run("refreshDecisionsBadge()");
     await settle();
     expect(d.v("decisionsCache")).toEqual([]);
+  });
+});
+
+// --- follow-ups from the web-reconnect gate (round 2, Medium 1) ----------
+
+/** Sign out, then press Sign in on the signed-out screen. */
+function signOutAndPressSignIn(page: Page): void {
+  page.api.run("signOut()");
+  const btn = page.win.document.querySelector("#signed-out button") as HTMLButtonElement | null;
+  expect(btn).not.toBeNull();
+  btn!.click();
+}
+
+describe("follow-up 1: Sign in after sign out resumes in place, so a typed token is asked for once", () => {
+  for (const storage of ["blocked", "working"] as const) {
+    it(`storage ${storage}: one token entry, no reload, exactly one live socket`, async () => {
+      const page = makePage(storage === "blocked" ? { name: "Rami", storage: "throw-all" } : { name: "Rami" });
+      page.route = registerOk;
+      page.api.run("bootSession()");
+      await page.flush();
+      typeToken(page, TOKEN);
+      await page.flush();
+      page.open(); page.init();
+      const before = page.sockets.slice();
+      expect(live(page)).toHaveLength(1);
+
+      signOutAndPressSignIn(page);
+      expect(live(page)).toHaveLength(0);
+      expect(page.prompt()).not.toBeNull(); // the token was dropped on sign out: asked once
+      let entries = 0;
+      typeToken(page, TOKEN); entries += 1;
+      await page.flush();
+
+      expect(page.reloads).toBe(0);
+      expect(page.prompt()).toBeNull(); // not asked a second time
+      expect(entries).toBe(1);
+      expect(page.api.v("signedOut")).toBe(false);
+      expect(page.win.document.getElementById("signed-out")).toBeNull();
+      expect((page.win.document.querySelector(".app") as HTMLElement & { inert?: boolean }).inert).toBe(false);
+      expect(live(page)).toHaveLength(1);
+      expect(tokenOf(page.last())).toBe(TOKEN);
+      const reg = page.fetches.filter((f) => f.url === "/api/web/register").pop();
+      expect(reg?.body).toEqual({ token: TOKEN, name: "Rami" });
+      page.open(); page.init();
+      expect(live(page)).toHaveLength(1);
+
+      // A close event of a socket from before sign out arriving late opens nothing.
+      for (const old of before) old.onclose?.({ code: 1006 });
+      await page.flush();
+      expect(page.timers).toHaveLength(0);
+      expect(live(page)).toHaveLength(1);
+      if (storage === "working") expect(page.win.sessionStorage.getItem("joind-web-token")).toBe(TOKEN);
+    });
+  }
+
+  it("the boot reads run again and the polls that sign out stopped restart, once each", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); page.init();
+    signOutAndPressSignIn(page);
+    const reads = (page.api.v("calls") as Record<string, number>).loadNotifications ?? 0;
+    expect(page.intervals).toHaveLength(0);
+    typeToken(page, TOKEN);
+    await page.flush();
+    expect((page.api.v("calls") as Record<string, number>).loadNotifications).toBe(reads + 1);
+    expect(page.intervals.map((i) => i.ms).sort((a, b) => a - b)).toEqual([3000, 60000]);
+    // A second resume (a stray call) changes nothing: still one socket, two polls.
+    page.api.run("resumeSession()");
+    await page.flush();
+    expect(live(page)).toHaveLength(1);
+    expect(page.intervals).toHaveLength(2);
+  });
+
+  it("sign out again after a resume still closes everything", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); page.init();
+    signOutAndPressSignIn(page);
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); page.init();
+    page.api.run("signOut()");
+    expect(live(page)).toHaveLength(0);
+    expect(page.intervals).toHaveLength(0);
+    expect(page.api.run("webToken()")).toBe("");
+  });
+
+  it("a served (injected) token still reloads on Sign in: the server hands the token to the new page", () => {
+    const page = makePage({ injected: TOKEN, name: "Rami" });
+    signOutAndPressSignIn(page);
+    expect(page.reloads).toBe(1);
+    expect(page.prompt()).toBeNull();
   });
 });

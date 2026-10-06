@@ -489,6 +489,9 @@ function closeTabSockets() {
   tabSockets.slice().forEach(retireSocket);
   tabSockets = [];
   if (ws) retireSocket(ws);
+  // No current socket: a late close of a retired one is ignored (ws !== sock)
+  // and cannot schedule a reconnect after a sign in resumes the session.
+  ws = null;
 }
 
 function connect() {
@@ -912,7 +915,8 @@ function formatAge(ms) {
 }
 
 // Ages drift while nothing else re-renders; keep them honest once a minute.
-var membersTick = setInterval(function() { if (activeConversation && !signedOut) renderPills(); }, 60000);
+function tickMembers() { if (activeConversation && !signedOut) renderPills(); }
+var membersTick = setInterval(tickMembers, 60000);
 
 // --- Members: the toolbar button and the right side panel (redesign lane 2) ---
 // The header no longer carries a pill per agent. The members button shows
@@ -6500,14 +6504,17 @@ function showSignedOut(served) {
   btn.addEventListener('click', function() {
     if (served) { location.reload(); return; }
     overlay.remove();
-    promptWebToken(function() { location.reload(); });
+    // Resume in place, never reload: the typed token lives in page memory
+    // too, and with sessionStorage blocked a reload would lose it and ask
+    // for it a second time.
+    promptWebToken(resumeSession);
   });
   box.appendChild(title);
   box.appendChild(text);
   box.appendChild(btn);
   overlay.appendChild(box);
   // The app behind is out of reach (inert: no focus, no clicks) until the
-  // page reloads, and Tab stays on the one control here.
+  // session resumes (or the page reloads), and Tab stays on the one control here.
   var app = document.querySelector('.app');
   if (app) app.inert = true;
   overlay.addEventListener('keydown', function(e) {
@@ -6515,6 +6522,27 @@ function showSignedOut(served) {
   });
   document.body.appendChild(overlay);
   btn.focus();
+}
+
+// Sign in after sign out, in place: the boot path again, deliberately. Undo
+// what signOut stopped (the signed-out screen, the inert app, the polls),
+// re-run the boot reads, then register and connect once (sessionAttempt and
+// connect keep it to one socket). The socket's init repaints rooms and
+// messages. Does nothing unless the tab is signed out.
+function resumeSession() {
+  if (!signedOut) return;
+  signedOut = false;
+  wsAuthFailures = 0;
+  var screen = document.getElementById('signed-out');
+  if (screen) screen.remove();
+  var app = document.querySelector('.app');
+  if (app) app.inert = false;
+  clearInterval(membersTick);
+  membersTick = setInterval(tickMembers, 60000);
+  clearInterval(sessionStatusInterval);
+  sessionStatusInterval = setInterval(refreshSessionStatus, 3000);
+  runBootReads();
+  startSession();
 }
 
 // --- Conversations ---
