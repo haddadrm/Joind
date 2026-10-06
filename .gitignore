@@ -29,6 +29,9 @@ data/**
 **/scratchpads.json
 **/state-blocks.json
 **/turn-guard.json
+# Read-only seat digests (src/readonly-seats.ts)
+**/readonly-seats.json
+**/readonly-seats.json.tmp
 **/files/
 **/images/
 

@@ -91,6 +91,20 @@ Web-token routes: `GET /api/agent-auth` (status, no key), `POST /api/agent-auth/
 `POST /api/agent-auth/rotate` (new key, revokes every current registration; 409 for a flag key).
 Settings has an Agent key section.
 
+## Read-only seats
+
+`src/readonly-seats.ts`; design in `docs/superpowers/specs/2026-10-05-readonly-seat-design.md`.
+A seat token (`jrs_...`, header `X-Joind-Seat-Token` only) reads one local room through four GET
+routes (`/api/seat/me`, `read`, `search`, `message/:id`) and nothing else: `seatGate` is the
+first middleware and answers every request carrying the header itself (403 off the allowlist,
+in every agent-auth mode; a `/ws` upgrade carrying a seat token is refused). Reads are stateless
+(the seat passes `since`) and public only: a seat never reads a DM, and no human viewer may share
+a seat's name. The seat's name is
+held in its room (`ChatRoom.seatReserved`): no join, rename or peer registration may take it,
+and the room never wakes it. Web-token routes: `GET /api/readonly-seats`,
+`POST /api/readonly-seats` (needs a user-set web token), `POST /api/readonly-seats/:id/revoke`.
+Digests only, in `readonly-seats.json` in the data dir.
+
 ## REST API
 
 Agent endpoints accept optional `pid` and `paneId` params for disambiguation.

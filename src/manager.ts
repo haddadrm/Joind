@@ -627,6 +627,17 @@ export class ConversationManager extends EventEmitter {
     return (this.agentBindings.get(agentName) ?? []).map((e) => ({ ...e }));
   }
 
+  /** True when any spelling of `agentName` (case-insensitive) has a binding
+   *  in `conversationId`. A read-only seat's name is held case-insensitively,
+   *  so its mint must check owners the same way. */
+  hasBindingIgnoringCase(agentName: string, conversationId: string): boolean {
+    const lower = agentName.toLowerCase();
+    for (const [name, entries] of this.agentBindings) {
+      if (name.toLowerCase() === lower && entries.some((e) => e.conversationId === conversationId)) return true;
+    }
+    return false;
+  }
+
   /** The conversation of this name's registration made from exactly this
    *  terminal, preferring `conversationId` when given; no fallback to a
    *  lone binding (a session must not be re-pointed at another terminal's
