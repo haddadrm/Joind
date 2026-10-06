@@ -10,7 +10,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 // Fake pids and no pane: nothing here types into a terminal.
 vi.mock("../src/terminals.js", async () => {
@@ -19,30 +18,23 @@ vi.mock("../src/terminals.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import type { JoindConfig } from "../src/config.js";
 import type { ChatMessage } from "../src/room.js";
 
 const TOKEN = "link-token-for-tests-0123456789";
 const WEB = "c".repeat(64);
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
+// Each server binds port 0; its link names the peer by a placeholder URL that
+// resolves once the peer is up (tests/peer-routes.ts).
+const routes = new PeerRoutes();
 
-function config(dir: string, instance: string, port: number, peer: string, peerPort: number): JoindConfig {
+function config(dir: string, instance: string, peer: string): JoindConfig {
   return {
-    port, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
+    port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
     humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
     webToken: WEB, webTokenUserSet: true,
-    links: [{ name: peer, url: `http://127.0.0.1:${peerPort}`, token: TOKEN }],
+    links: [{ name: peer, url: routes.url(peer), token: TOKEN }],
   };
 }
 
@@ -77,10 +69,11 @@ describe("message links and room search over the web routes", { timeout: 30_000 
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     dirA = mkdtempSync(join(tmpdir(), "joind-links-a-"));
     dirB = mkdtempSync(join(tmpdir(), "joind-links-b-"));
-    const [pa, pb] = [await freePort(), await freePort()];
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 60_000 };
-    A = await startJoind(config(dirA, "alpha", pa, "bravo", pb), { link: tuning });
-    B = await startJoind(config(dirB, "bravo", pb, "alpha", pa), { link: tuning });
+    A = await startJoind(config(dirA, "alpha", "bravo"), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("alpha", A.baseUrl);
+    B = await startJoind(config(dirB, "bravo", "alpha"), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("bravo", B.baseUrl);
     for (const s of [A, B]) expect((await post(s.baseUrl, "/api/web/register", { token: WEB, name: "Rami" })).status).toBe(200);
 
     ops = A.manager.createConversation("ops").id;

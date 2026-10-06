@@ -10,7 +10,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 const injected: Array<{ pid: number; prompt: string }> = [];
 vi.mock("../src/inject.js", async () => {
@@ -27,6 +26,7 @@ vi.mock("../src/terminals.js", async () => {
 
 import { ChatRoom, parseJoinRoute, type Agent } from "../src/room.js";
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import type { JoindConfig } from "../src/config.js";
 import type { FetchLike } from "../src/link.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -34,17 +34,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 const TOKEN = "link-token-for-tests-hygiene-0123";
 const WEB = "d".repeat(64);
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
+// Each server binds port 0; its link names the peer by a placeholder URL that
+// resolves once the peer is up (tests/peer-routes.ts).
+const routes = new PeerRoutes();
 
 async function waitFor<T>(what: string, fn: () => T | undefined | false | Promise<T | undefined | false>, ms = 12_000): Promise<T> {
   const until = Date.now() + ms;
@@ -151,7 +143,6 @@ describe("the wake prompt follows the join route (servers)", { timeout: 30_000 }
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     dirA = mkdtempSync(join(tmpdir(), "joind-route-a-"));
     dirB = mkdtempSync(join(tmpdir(), "joind-route-b-"));
-    const [pa, pb] = [await freePort(), await freePort()];
     let down = false;
     netB = {
       fetchImpl: async (url, init) => {
@@ -163,14 +154,16 @@ describe("the wake prompt follows the join route (servers)", { timeout: 30_000 }
     };
     const plain: FetchLike = async (url, init) => { const res = await fetch(url, init); return { status: res.status, text: () => res.text() }; };
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 60_000 };
-    const cfg = (dir: string, instance: string, port: number, peer: string, peerPort: number): JoindConfig => ({
-      port, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
+    const cfg = (dir: string, instance: string, peer: string): JoindConfig => ({
+      port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
       humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
       webToken: WEB, webTokenUserSet: true,
-      links: [{ name: peer, url: `http://127.0.0.1:${peerPort}`, token: TOKEN }],
+      links: [{ name: peer, url: routes.url(peer), token: TOKEN }],
     });
-    A = await startJoind(cfg(dirA, "alpha", pa, "bravo", pb), { link: { ...tuning, fetchImpl: plain } });
-    B = await startJoind(cfg(dirB, "bravo", pb, "alpha", pa), { link: { ...tuning, fetchImpl: netB.fetchImpl } });
+    A = await startJoind(cfg(dirA, "alpha", "bravo"), { link: { ...tuning, fetchImpl: routes.wrap(plain) } });
+    routes.set("alpha", A.baseUrl);
+    B = await startJoind(cfg(dirB, "bravo", "alpha"), { link: { ...tuning, fetchImpl: routes.wrap(netB.fetchImpl) } });
+    routes.set("bravo", B.baseUrl);
     room = A.manager.createConversation("ops").id;
     A.manager.setActive(room);
     remote = `alpha:${room}`;

@@ -211,16 +211,16 @@ describe("favicon", () => {
     expect(css).toMatch(/--accent:\s*#7330e3;/);
     expect(css).toMatch(/--accent-bright:\s*#a78bfa;/);
   });
-  it("index.html ships the same icon, and every asset carries v=34", () => {
+  it("index.html ships the same icon, and every asset carries v=35", () => {
     const html = readFileSync(join(pub, "index.html"), "utf8");
     expect(html).toContain('id="favicon" type="image/svg+xml" href="' + m.faviconHref(null) + '"');
     expect(html).not.toContain("&#x2B22;");
     const versions = html.match(/\?v=\d+/g) ?? [];
     expect(versions.length).toBeGreaterThanOrEqual(5);
-    for (const v of versions) expect(v).toBe("?v=34");
+    for (const v of versions) expect(v).toBe("?v=35");
     // marks.js loads before app.js, which calls into it.
-    expect(html.indexOf("marks.js?v=34")).toBeGreaterThan(0);
-    expect(html.indexOf("marks.js?v=34")).toBeLessThan(html.indexOf("app.js?v=34"));
+    expect(html.indexOf("marks.js?v=35")).toBeGreaterThan(0);
+    expect(html.indexOf("marks.js?v=35")).toBeLessThan(html.indexOf("app.js?v=35"));
   });
   it("takes one theme's accent when the page names its theme", () => {
     const light = m.faviconSvg(null, "light");

@@ -150,7 +150,18 @@ a token is held shows the banner, unless the request went out before the banner 
 (`authEpoch`) or with a token since replaced. A typed token is kept in page memory too, so blocked
 storage cannot lose it. One register-and-connect attempt at a time (`sessionAttempt`): a newer one
 supersedes, a replaced socket is closed and ignored, and sign out closes every socket the tab
-opened. Entering a token re-runs the boot reads. Browser smoke:
+opened; Sign in then resumes in place (`resumeSession`, no reload) unless the token was served
+in the page. The first init after a resume reloads the page or task panel left on
+screen (`reconcileVisibleViews`). Sign out aborts every `/api/` request still in flight (one
+`AbortController` per session, `sessionAbort`, attached by the fetch wrapper and composed with a
+caller's signal), releases what they held at once (`releaseSessionLocks`: send lock, image uploads,
+scanner flag and button), and bumps `sessionGeneration`; a cancelled request rejects with an
+`AbortError` that callers treat as silent (`isAbortError`), and completions check `sameSession`
+before they touch the page. The wrapper also fences body reads (`fenceBody`: a body arriving after
+sign out rejects as cancelled), `jsonOr` never turns a cancellation into fallback data, sign out
+aborts pending file reads (`sessionReaders`) and request timers, fire-and-forget writes end in
+`.catch(quietAbort)`, and without `AbortController` Sign in reloads instead of resuming. Entering a token re-runs the boot reads. Reads check `r.ok` (`okJson`, `refusalBody`) and
+keep what the page holds on a refusal. Browser smoke:
 `tools/web-smoke/` (Playwright, ephemeral port, see its README).
 
 ## REST API

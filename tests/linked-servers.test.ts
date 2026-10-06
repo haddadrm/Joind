@@ -8,7 +8,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 const injected: Array<{ pid: number; prompt: string }> = [];
 const injectFailures: string[] = [];
@@ -33,6 +32,7 @@ vi.mock("../src/terminals.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import type { JoindConfig } from "../src/config.js";
 import type { FetchLike } from "../src/link.js";
 import type { MirrorNotice } from "../src/mirror.js";
@@ -43,17 +43,9 @@ const WEB = "a".repeat(64);
 const PID = 999_991;      // odd fake pids no Windows process can have
 const PID_JADZIA = 999_993;
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
+// Each server binds port 0; its link names the peer by a placeholder URL that
+// resolves once the peer is up (tests/peer-routes.ts).
+const routes = new PeerRoutes();
 
 /** A fetch whose network can be cut, standing in for a dropped link. */
 function switchableFetch(): { fetchImpl: FetchLike; cut: (v: boolean) => void } {
@@ -66,12 +58,12 @@ function switchableFetch(): { fetchImpl: FetchLike; cut: (v: boolean) => void } 
   return { fetchImpl, cut: (v) => { down = v; } };
 }
 
-function config(dir: string, instance: string, port: number, peer: string, peerPort: number): JoindConfig {
+function config(dir: string, instance: string, peer: string): JoindConfig {
   return {
-    port, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
+    port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
     humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
     webToken: WEB, webTokenUserSet: true,
-    links: [{ name: peer, url: `http://127.0.0.1:${peerPort}`, token: TOKEN }],
+    links: [{ name: peer, url: routes.url(peer), token: TOKEN }],
   };
 }
 
@@ -111,12 +103,13 @@ describe("linked servers: two servers in one process", { timeout: 20_000 }, () =
   beforeAll(async () => {
     dirA = mkdtempSync(join(tmpdir(), "joind-link-a-"));
     dirB = mkdtempSync(join(tmpdir(), "joind-link-b-"));
-    const [pa, pb] = [await freePort(), await freePort()];
     netA = switchableFetch();
     netB = switchableFetch();
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 60_000 };
-    A = await startJoind(config(dirA, "alpha", pa, "bravo", pb), { link: { ...tuning, fetchImpl: netA.fetchImpl }, peerGraceMs: 6_000, peerMonitorEveryMs: 200 });
-    B = await startJoind(config(dirB, "bravo", pb, "alpha", pa), { link: { ...tuning, fetchImpl: netB.fetchImpl } });
+    A = await startJoind(config(dirA, "alpha", "bravo"), { link: { ...tuning, fetchImpl: routes.wrap(netA.fetchImpl) }, peerGraceMs: 6_000, peerMonitorEveryMs: 200 });
+    routes.set("alpha", A.baseUrl);
+    B = await startJoind(config(dirB, "bravo", "alpha"), { link: { ...tuning, fetchImpl: routes.wrap(netB.fetchImpl) } });
+    routes.set("bravo", B.baseUrl);
     B.links.on("notice", (n: MirrorNotice) => noticesB.push(n));
     room = A.manager.createConversation("ops").id;
     remote = `alpha:${room}`;

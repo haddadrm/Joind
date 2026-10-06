@@ -10,7 +10,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 vi.mock("../src/terminals.js", async () => {
   const actual = await vi.importActual<typeof import("../src/terminals.js")>("../src/terminals.js");
@@ -22,18 +21,6 @@ import type { JoindConfig } from "../src/config.js";
 import type { ChatMessage } from "../src/room.js";
 
 const WEB = "e".repeat(64);
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
 
 interface Answer { status: number; body: unknown }
 
@@ -56,9 +43,8 @@ describe("GET /api/pins?conversation=", { timeout: 30_000 }, () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     dir = mkdtempSync(join(tmpdir(), "joind-pins-"));
-    const port = await freePort();
     const cfg: JoindConfig = {
-      port, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "pins", crewHome: join(dir, "crew"),
+      port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance: "pins", crewHome: join(dir, "crew"),
       humanNames: ["Rami"], presenceGraceMs: 1_800_000, logFile: "none",
       webToken: WEB, webTokenUserSet: true, links: [],
     };

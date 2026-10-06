@@ -161,6 +161,23 @@ var authEpoch = 0;
 var sessionAttempt = 0;
 // Every socket this tab opened that has not closed yet: sign out closes all.
 var tabSockets = [];
+// File reads (FileReader) this session started that have not loaded yet:
+// sign out aborts them, so no old read starts a request in the next session.
+var sessionReaders = [];
+// Signed-in sessions of this tab, bumped on sign out. Sign out also aborts
+// every /api/ request the session still has in flight (sessionAbort): each
+// one rejects with an AbortError, so its catch and finally paths release
+// their locks, and callers treat that error as silent (isAbortError). A
+// completion that still runs after a resume (a body read the browser could
+// not cancel) checks the generation it started in (sameSession) before it
+// touches the page, so nothing the old session asked for paints over the new.
+// Every /api/ body read is fenced the same way (the fetch wrapper): a body
+// that arrives after a sign out rejects as cancelled instead of resolving.
+var sessionGeneration = 0;
+var sessionAbort = newSessionAbort();
+// Set when Sign in resumes in place: the first init after it reconciles the
+// page or panel left on screen (reconcileVisibleViews).
+var reconcileOnInit = false;
 
 // Server-issued token: injected into index.html when generated, otherwise the
 // browser supplies it once per tab session via a prompt (page memory, and
@@ -193,29 +210,117 @@ function clearTokenReload() {
   try { sessionStorage.removeItem(TOKEN_RELOAD_KEY); } catch (e) { /* storage unavailable */ }
 }
 
+// One AbortController per signed-in session. Null only where the browser
+// has none: Sign in then reloads the page instead of resuming in place
+// (showSignedOut), so no request of an old session outlives it.
+function newSessionAbort() {
+  return typeof AbortController === 'function' ? new AbortController() : null;
+}
+
+// The signal an /api/ request goes out with: the session's, composed with
+// the caller's own when it passed one (either one aborting cancels it).
+function sessionSignal(own) {
+  var session = sessionAbort ? sessionAbort.signal : null;
+  if (!session) return own || null;
+  if (!own) return session;
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') return AbortSignal.any([session, own]);
+  var both = new AbortController();
+  if (session.aborted || own.aborted) { both.abort(); return both.signal; }
+  var stop = function() { both.abort(); };
+  session.addEventListener('abort', stop, { once: true });
+  own.addEventListener('abort', stop, { once: true });
+  return both.signal;
+}
+
+// The rejection of a request cancelled by sign out (or by its caller).
+function abortError() {
+  try { return new DOMException('The request belongs to a signed-out session.', 'AbortError'); } catch (e) {
+    var err = new Error('The request belongs to a signed-out session.');
+    err.name = 'AbortError';
+    return err;
+  }
+}
+
+// A cancelled request: no error banner, notice or empty list for it.
+function isAbortError(err) {
+  return !!err && err.name === 'AbortError';
+}
+
+// True while the session a request started in (its generation) is still
+// the current one. Checked after a body is read, before the page changes.
+function sameSession(generation) {
+  return generation === sessionGeneration;
+}
+
+// An answer's JSON body, or `fallback` when the body is not JSON. A read
+// cancelled by sign out stays a cancellation (AbortError): it never turns
+// into empty data a caller would paint or act on.
+function jsonOr(r, fallback) {
+  return r.json().catch(function(err) {
+    if (isAbortError(err)) throw err;
+    return fallback;
+  });
+}
+
+// The last catch of a request nobody waits on: a cancellation is silent,
+// any other failure still surfaces.
+function quietAbort(err) {
+  if (!isAbortError(err)) throw err;
+}
+
+// Fence an /api/ answer's body reads to the session it was sent in: a body
+// that arrives after a sign out rejects as cancelled (see sessionGeneration).
+function fenceBody(r, generation) {
+  ['json', 'text'].forEach(function(k) {
+    var read = r && r[k];
+    if (typeof read !== 'function') return;
+    r[k] = function() {
+      return read.call(r).then(function(v) {
+        if (!sameSession(generation)) throw abortError();
+        return v;
+      }, function(err) {
+        if (!sameSession(generation)) throw abortError();
+        throw err;
+      });
+    };
+  });
+  return r;
+}
+
 // Every request this page makes to its own /api/ carries the web token in
 // the X-Joind-Token header: the server refuses web writes without it. Only
-// same-origin relative URLs get it, never another host.
+// same-origin relative URLs get it, never another host. It also carries the
+// session's abort signal, so sign out cancels it (see sessionGeneration).
 (function() {
   var nativeFetch = window.fetch;
   if (typeof nativeFetch !== 'function') return;
   window.fetch = function(input, init) {
-    if (typeof input === 'string' && input.indexOf('/api/') === 0) {
-      var token = webToken();
-      if (token) {
-        init = init || {};
+    var ours = typeof input === 'string' && input.indexOf('/api/') === 0;
+    var held = ours ? webToken() : '';
+    if (ours) {
+      init = Object.assign({}, init || {});
+      if (held) {
         var headers = new Headers(init.headers || {});
-        if (!headers.has('X-Joind-Token')) headers.set('X-Joind-Token', token);
-        init = Object.assign({}, init, { headers: headers });
+        if (!headers.has('X-Joind-Token')) headers.set('X-Joind-Token', held);
+        init.headers = headers;
       }
+      var signal = sessionSignal(init.signal);
+      if (signal) init.signal = signal;
     }
-    var held = typeof input === 'string' && input.indexOf('/api/') === 0 ? webToken() : '';
     var epoch = authEpoch;
+    var generation = sessionGeneration;
+    // Answered (or failed) after a sign out the browser could not cancel
+    // it for: reject as cancelled all the same, so the caller unwinds.
+    function fromOldSession() { return ours && !sameSession(generation); }
     return nativeFetch.call(window, input, init).then(function(r) {
+      if (fromOldSession()) throw abortError();
       // A refused token while one is held means it is stale or wrong: say
       // so on the page instead of leaving an empty list and a spinner.
       if (held && !signedOut && (r.status === 401 || r.status === 403)) noteRefusedAnswer(r, epoch, held);
-      return r;
+      return ours ? fenceBody(r, generation) : r;
+    }, function(err) {
+      if (fromOldSession()) throw abortError();
+      throw err;
     });
   };
 })();
@@ -242,6 +347,21 @@ function noteRefusedAnswer(r, epoch, held) {
 }
 
 var TOKEN_REFUSED_TEXT = 'This server refused the web token: it changed, or it was mistyped.';
+
+// A refused answer (not r.ok) as { error }: the server's own message when its
+// body has one, else the HTTP status. For handlers that already read `.error`.
+function refusalBody(r) {
+  return jsonOr(r, null).then(function(b) {
+    return { error: (b && typeof b.error === 'string' && b.error) || ('HTTP ' + r.status) };
+  });
+}
+
+// The body of an accepted answer. A refusal rejects with its message, so the
+// caller's own catch (its error state) handles it and its body is never data.
+function okJson(r) {
+  if (r.ok) return r.json();
+  return refusalBody(r).then(function(b) { throw new Error(b.error); });
+}
 
 // One visible banner for auth trouble: the token refused or the name
 // refused. Buttons: enter the token again, and retry. Cleared on `init`.
@@ -386,7 +506,9 @@ function bootSession() {
 
 // The instance name in the header and the page title.
 function loadInstanceInfo() {
+  var generation = sessionGeneration;
   fetch('/api/instance').then(function(r) { return r.ok ? r.json() : null; }).then(function(info) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     if (!info || !info.name) return;
     var el = document.getElementById('instance-name');
     if (el) el.textContent = info.name;
@@ -409,7 +531,7 @@ function registerWebName(after) {
   fetch('/api/web/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token: webToken(), name: name }) })
     .then(function(r) {
-      return r.json().catch(function() { return null; }).then(function(body) {
+      return jsonOr(r, null).then(function(body) {
         if (attempt !== sessionAttempt || signedOut) return; // superseded
         var out = window.joindUi ? window.joindUi.registerOutcome(r.status, body, name) : { kind: r.ok ? 'ok' : 'error', name: name };
         if (out.kind === 'adopt') adoptRegisteredName(out.name);
@@ -489,6 +611,9 @@ function closeTabSockets() {
   tabSockets.slice().forEach(retireSocket);
   tabSockets = [];
   if (ws) retireSocket(ws);
+  // No current socket: a late close of a retired one is ignored (ws !== sock)
+  // and cannot schedule a reconnect after a sign in resumes the session.
+  ws = null;
 }
 
 function connect() {
@@ -586,6 +711,7 @@ function connect() {
         }
         renderConversationList();
         renderDmList();
+        if (reconcileOnInit) { reconcileOnInit = false; reconcileVisibleViews(); }
         break;
       case 'conversation-created':
       case 'conversation-renamed':
@@ -921,7 +1047,8 @@ function formatAge(ms) {
 }
 
 // Ages drift while nothing else re-renders; keep them honest once a minute.
-var membersTick = setInterval(function() { if (activeConversation && !signedOut) renderPills(); }, 60000);
+function tickMembers() { if (activeConversation && !signedOut) renderPills(); }
+var membersTick = setInterval(tickMembers, 60000);
 
 // --- Members: the toolbar button and the right side panel (redesign lane 2) ---
 // The header no longer carries a pill per agent. The members button shows
@@ -1516,7 +1643,7 @@ function showPopover(anchor, agent) {
       var newName = renameInput.value.trim();
       if (newName && newName !== agent.name) {
         fetch('/api/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(Object.assign({ oldName: agent.name, newName: newName }, activeConversation && activeConversation.id ? { conversation: activeConversation.id } : {})) });
+          body: JSON.stringify(Object.assign({ oldName: agent.name, newName: newName }, activeConversation && activeConversation.id ? { conversation: activeConversation.id } : {})) }).catch(quietAbort);
       }
       closePopover();
     }
@@ -1553,7 +1680,7 @@ function showPopover(anchor, agent) {
     btn.addEventListener('click', function() {
       var newRole = r.label === 'clear' ? '' : r.label;
       fetch('/api/role', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: agent.name, role: newRole }) });
+        body: JSON.stringify({ name: agent.name, role: newRole }) }).catch(quietAbort);
       closePopover();
     });
     roleGrid.appendChild(btn);
@@ -1572,7 +1699,7 @@ function showPopover(anchor, agent) {
   customInput.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') {
       fetch('/api/role', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: agent.name, role: customInput.value.trim() }) });
+        body: JSON.stringify({ name: agent.name, role: customInput.value.trim() }) }).catch(quietAbort);
       closePopover();
     }
   });
@@ -1911,7 +2038,7 @@ function appendMessage(msg, scroll) {
         headers: { 'Content-Type': 'application/json' },
         // The message's own room: a DM pane mixes rooms.
         body: JSON.stringify({ id: msg.id, conversation: el.dataset.conv || undefined })
-      });
+      }).catch(quietAbort);
     });
     actions.appendChild(delBtn);
 
@@ -2187,14 +2314,19 @@ function addImageFiles(files) {
   list.slice(0, fit.take).forEach(function(file) {
     if (file.size > MAX_UPLOAD_BYTES) { notes.push('"' + (file.name || 'image') + '" is over 25 MB.'); return; }
     var slot = { url: null, name: file.name || 'image' };
+    var generation = sessionGeneration;
     pendingImages.push(slot);
     imageUploadsInFlight++;
     renderImageStrip();
+    // Sign out drops the slot and resets the count: an old upload's
+    // completion leaves the new session's count and strip alone.
     uploadFile(file).then(function(url) {
+      if (!sameSession(generation)) return;
       imageUploadsInFlight--;
       slot.url = url;
       renderImageStrip();
-    }).catch(function() {
+    }).catch(function(err) {
+      if (!sameSession(generation) || isAbortError(err)) return;
       imageUploadsInFlight--;
       var at = pendingImages.indexOf(slot);
       if (at >= 0) pendingImages.splice(at, 1);
@@ -2264,9 +2396,12 @@ function addFiles(files) {
   showComposerError('');
   list.forEach(function(file) {
     if (file.size > MAX_UPLOAD_BYTES) { showComposerError('"' + (file.name || 'file') + '" is over 25 MB.'); return; }
+    var generation = sessionGeneration;
     uploadFile(file).then(function(url) {
+      if (!sameSession(generation)) return;
       insertIntoComposer(window.joindUi.fileLinkMarkdown(file.name, url), true);
-    }).catch(function() {
+    }).catch(function(err) {
+      if (!sameSession(generation) || isAbortError(err)) return;
       showComposerError('Could not upload "' + (file.name || 'file') + '".');
     });
   });
@@ -2311,7 +2446,9 @@ function pasteImageFromClipboard() {
     showComposerNote('Press Ctrl+V (Cmd+V on a Mac) in the message box to paste an image.');
   };
   if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') { fallback(); return; }
+  var generation = sessionGeneration;
   navigator.clipboard.read().then(function(items) {
+    if (!sameSession(generation)) return; // signed out while the clipboard was read
     var blobs = [];
     var reads = [];
     items.forEach(function(item) {
@@ -2319,12 +2456,13 @@ function pasteImageFromClipboard() {
       if (type) reads.push(item.getType(type).then(function(b) { blobs.push(new File([b], 'pasted.' + type.split('/')[1], { type: type })); }));
     });
     return Promise.all(reads).then(function() {
+      if (!sameSession(generation)) return;
       if (blobs.length === 0) { showComposerNote('No image on the clipboard.'); input.focus(); return; }
       showComposerNote('');
       addImageFiles(blobs);
       input.focus();
     });
-  }).catch(fallback);
+  }).catch(function() { if (sameSession(generation)) fallback(); });
 }
 
 // A message's images as a grid of thumbnails, each opening the viewer. In
@@ -2537,7 +2675,7 @@ function jumpToMessage(conv, id, known) {
       if (!res.ok) { showRefNotice(refNotFoundText(id, res.body)); return; }
       openLoadedMessage(conv, res.body, seq);
     })
-    .catch(function() { if (seq === jumpSeq) showRefNotice('Could not load message #' + id); });
+    .catch(function(err) { if (seq === jumpSeq && !isAbortError(err)) showRefNotice('Could not load message #' + id); });
 }
 
 function openLoadedMessage(conv, msg, seq) {
@@ -2590,7 +2728,7 @@ function loadAroundMessage(conv, id, seq) {
       var el = messageElementFor(conv, id);
       if (el) highlightMessageEl(el);
     })
-    .catch(function() { if (seq === jumpSeq) showRefNotice('Could not load message #' + id); });
+    .catch(function(err) { if (seq === jumpSeq && !isAbortError(err)) showRefNotice('Could not load message #' + id); });
 }
 
 // The history window's banner (top of the pane) and its "latest" pill.
@@ -2638,7 +2776,7 @@ function exitHistoryView() {
   renderHistoryChrome();
   var mySeq = ++historyExitSeq;
   fetch('/api/messages?conversation=' + encodeURIComponent(conv) + '&token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
+    .then(okJson) // a refusal is the catch's notice, never an empty page
     .then(function(list) {
       if (mySeq !== historyExitSeq || historyView) return;
       if (!activeConversation || activeConversation.id !== conv) return;
@@ -2654,7 +2792,7 @@ function exitHistoryView() {
       allMessages = fetched;
       if (!activeDm) renderChannelView();
     })
-    .catch(function() { showRefNotice('Could not load the latest messages'); });
+    .catch(function(err) { if (!isAbortError(err)) showRefNotice('Could not load the latest messages'); });
 }
 
 // --- Send ---
@@ -2727,14 +2865,18 @@ function postComposerSend(url, payload, draft) {
   // this response's snapshot whatever the clock does meanwhile.
   var requestSeq = nextPendingSeq();
   var genAtStart = pendingGeneration;
+  // Sign out releases the lock itself; a completion from an earlier session
+  // must not release a newer send's lock or clear a newer draft.
+  var session = sessionGeneration;
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) })
     .then(function(r) {
-      return r.json().catch(function() { return {}; }).then(function(body) {
+      return jsonOr(r, {}).then(function(body) {
         return { ok: r.ok, status: r.status, body: body || {} };
       });
     })
     .then(function(res) {
+      if (!sameSession(session)) return;
       composerSendInFlight = false;
       if (!res.ok) {
         var why = (res.body && typeof res.body.error === 'string' && res.body.error) || ('HTTP ' + res.status);
@@ -2756,8 +2898,10 @@ function postComposerSend(url, payload, draft) {
       syncHighlight();
       if (res.status === 202 && genAtStart === pendingGeneration) onComposerQueued(res.body, payload, requestSeq);
     })
-    .catch(function() {
+    .catch(function(err) {
+      if (!sameSession(session)) return;
       composerSendInFlight = false;
+      if (isAbortError(err)) return;
       showComposerError('Not sent: the server could not be reached. Your text is still in the box.');
     });
 }
@@ -2818,7 +2962,7 @@ function postDecisionCard(question, choices) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  });
+  }).catch(quietAbort);
 }
 
 function toggleDecidePopover() {
@@ -2921,8 +3065,14 @@ function openImportDialog() {
   input.onchange = function() {
     var file = input.files && input.files[0];
     if (!file) return;
+    // The read belongs to this session: sign out aborts it (sessionReaders),
+    // and a load that still fires after that starts nothing.
+    var generation = sessionGeneration;
     var reader = new FileReader();
+    sessionReaders.push(reader);
     reader.onload = function() {
+      sessionReaders = sessionReaders.filter(function(x) { return x !== reader; });
+      if (!sameSession(generation)) return;
       try {
         var bundle = JSON.parse(String(reader.result));
         fetch('/api/conversations/import', {
@@ -2933,15 +3083,17 @@ function openImportDialog() {
           if (!r.ok) return r.json().then(function(j) { throw new Error(j.error || 'Import failed'); });
           return r.json();
         }).then(function(result) {
+          if (!sameSession(generation)) return; // never select with a newer session's token
           if (result && result.conversation) {
             // Switch to the imported conversation
             fetch('/api/conversations/select', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ id: result.conversation.id, viewer: myName(), token: webToken() }),
-            });
+            }).catch(quietAbort);
           }
         }).catch(function(err) {
+          if (isAbortError(err) || !sameSession(generation)) return;
           alert('Import failed: ' + err.message);
         });
       } catch (err) {
@@ -3248,7 +3400,7 @@ function renderRolesInto(sec) {
         renderRolesInto(sec);
         var add = document.getElementById('settings-role-label');
         if (add) add.focus();
-      });
+      }).catch(quietAbort);
     });
     chip.appendChild(label);
     chip.appendChild(del);
@@ -3288,7 +3440,7 @@ function renderRolesInto(sec) {
     status.textContent = '';
     fetch('/api/roles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emoji: em, label: lb }) })
       .then(function(resp) {
-        return resp.json().catch(function() { return {}; }).then(function(d) {
+        return jsonOr(resp, {}).then(function(d) {
           if (!resp.ok) { status.textContent = resp.status === 409 ? 'That role already exists' : (d && d.error) || 'Could not add the role'; return; }
           // The server cleans the label (lower case, hyphens): keep its role.
           var role = d && d.role && d.role.label ? d.role : { emoji: em, label: lb };
@@ -3373,7 +3525,7 @@ function buildAgentKeySection() {
   sec.appendChild(body);
   fetch('/api/agent-auth').then(function(r) { return r.ok ? r.json() : null; }).then(function(st) {
     renderAgentKeyInto(body, st);
-  }).catch(function() { renderAgentKeyInto(body, null); });
+  }).catch(function(err) { if (!isAbortError(err)) renderAgentKeyInto(body, null); });
   return sec;
 }
 
@@ -3449,7 +3601,7 @@ function renderAgentKeyInto(body, st) {
   reveal.addEventListener('click', function() {
     if (!shown.hidden) { shown.value = ''; shown.hidden = true; copy.hidden = true; reveal.textContent = 'Reveal'; return; }
     fetch('/api/agent-auth/reveal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      .then(function(r) { return r.json().catch(function() { return null; }).then(function(d) { return r.ok ? d : { error: (d && d.error) || 'Could not read the key' }; }); })
+      .then(function(r) { return jsonOr(r, null).then(function(d) { return r.ok ? d : { error: (d && d.error) || 'Could not read the key' }; }); })
       .then(function(d) {
         if (!d || !d.key) { status.textContent = (d && d.error) || 'Could not read the key'; return; }
         shown.value = d.key;
@@ -3494,7 +3646,7 @@ function renderAgentKeyInto(body, st) {
     }
     rotate.disabled = true;
     fetch('/api/agent-auth/rotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      .then(function(r) { return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; }); })
+      .then(function(r) { return jsonOr(r, {}).then(function(d) { return { ok: r.ok, d: d }; }); })
       .then(function(x) {
         if (!x.ok) { rotateStatus.textContent = (x.d && x.d.error) || 'Could not rotate'; rotate.disabled = false; return; }
         return fetch('/api/agent-auth').then(function(r) { return r.ok ? r.json() : null; }).then(function(next) {
@@ -3789,12 +3941,19 @@ var autoScanRunning = false;
 function scanTerminals() {
   var btn = document.getElementById('scan-btn');
   btn.textContent = '...'; btn.disabled = true;
-  fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
+  var generation = sessionGeneration; // sign out resets the button itself
+  fetch('/api/terminals').then(function(r) { return r.ok ? r.json() : null; }).then(function(t) {
+    if (!sameSession(generation)) return;
+    btn.textContent = 'Scan'; btn.disabled = false;
+    if (!Array.isArray(t)) return; // refused: the list on screen stays
     lastScanResults = t;
-    renderTerminals(t); btn.textContent = 'Scan'; btn.disabled = false;
+    renderTerminals(t);
     // Start auto-scan after first manual scan
     if (!autoScanInterval) startAutoScan();
-  }).catch(function() { lastScanResults = []; renderTerminals([]); btn.textContent = 'Scan'; btn.disabled = false; });
+  }).catch(function(err) {
+    if (!sameSession(generation) || isAbortError(err)) return;
+    lastScanResults = []; renderTerminals([]); btn.textContent = 'Scan'; btn.disabled = false;
+  });
 }
 
 function startAutoScan() {
@@ -3805,9 +3964,11 @@ function startAutoScan() {
 function autoScanTerminals() {
   if (autoScanRunning || signedOut) return;
   autoScanRunning = true;
-  fetch('/api/terminals').then(function(r) { return r.json(); }).then(function(t) {
+  var generation = sessionGeneration; // sign out clears the flag itself
+  fetch('/api/terminals').then(function(r) { return r.ok ? r.json() : null; }).then(function(t) {
+    if (!sameSession(generation)) return;
     autoScanRunning = false;
-    if (signedOut) return;
+    if (signedOut || !Array.isArray(t)) return; // refused: keep the last scan
     // Only re-render if something changed (compare by pid+paneId+tabTitle fingerprint)
     var oldFp = lastScanResults.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
     var newFp = t.map(function(x) { return x.pid + ':' + (x.weztermGui || '') + ':' + (x.weztermPaneId || '') + ':' + (x.tabTitle || ''); }).sort().join('|');
@@ -3815,7 +3976,7 @@ function autoScanTerminals() {
       lastScanResults = t;
       renderTerminals(t);
     }
-  }).catch(function() { autoScanRunning = false; });
+  }).catch(function() { if (sameSession(generation)) autoScanRunning = false; });
 }
 
 function renderTerminals(terminals) {
@@ -3865,7 +4026,7 @@ function inviteTerminal(t) {
     if (t.wtSession) payload.wtSession = t.wtSession;
     // The pane travels with the GUI its scan found it in; the server binds the pair or nothing.
     if (t.weztermPaneId != null && t.weztermGui != null) { payload.weztermPaneId = t.weztermPaneId; payload.weztermGui = t.weztermGui; }
-    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(quietAbort);
   });
 }
 
@@ -3873,7 +4034,7 @@ function kickAgent(name) {
   // Only the selected conversation's member leaves; the same name elsewhere is another registration.
   var leaveBody = { name: name };
   if (activeConversation && activeConversation.id) leaveBody.conversation = activeConversation.id;
-  fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leaveBody) });
+  fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leaveBody) }).catch(quietAbort);
 }
 
 // --- Sidebar toggle (desktop: show/hide, mobile: drawer overlay) ---
@@ -4218,7 +4379,9 @@ var HARNESS_LABELS = { claude: 'Claude Code', codex: 'Codex CLI', gemini: 'Gemin
 var crewRoster = [];
 function loadCrewRoster() {
   // A refused read keeps the roster we have (runBootReads loads it again).
+  var generation = sessionGeneration;
   return fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(list) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     if (!Array.isArray(list)) return;
     crewRoster = list;
     refreshSenderTags();
@@ -4637,6 +4800,7 @@ var decisionsPage = { view: 'waiting', lists: { waiting: null, open: null, close
 
 function loadDecisionsPage() {
   var seq = ++decisionsPage.seq;
+  var generation = sessionGeneration;
   var tok = encodeURIComponent(webToken());
   var urls = {
     waiting: '/api/decisions?state=open&token=' + tok,
@@ -4644,13 +4808,15 @@ function loadDecisionsPage() {
     closed: '/api/decisions?state=resolved&for=&token=' + tok,
   };
   Object.keys(urls).forEach(function(k) {
-    fetch(urls[k]).then(function(r) { return r.ok ? r.json() : { decisions: [] }; }).then(function(d) {
-      if (seq !== decisionsPage.seq) return; // a newer load is under way
-      decisionsPage.lists[k] = (d && Array.isArray(d.decisions)) ? d.decisions : [];
+    // A refused or unreadable answer keeps the list on screen (an error body
+    // is not an empty list); a list never loaded shows as empty.
+    fetch(urls[k]).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
+      if (seq !== decisionsPage.seq || !sameSession(generation)) return; // a newer load, or a signed-out session
+      decisionsPage.lists[k] = (d && Array.isArray(d.decisions)) ? d.decisions : (decisionsPage.lists[k] || []);
       renderDecisionViews();
       if (pageNow === 'decisions' && k === decisionsPage.view) renderDecisionsPage();
-    }).catch(function() {
-      if (seq !== decisionsPage.seq) return;
+    }).catch(function(err) {
+      if (seq !== decisionsPage.seq || !sameSession(generation) || isAbortError(err)) return;
       decisionsPage.lists[k] = decisionsPage.lists[k] || [];
       renderDecisionViews();
     });
@@ -4810,8 +4976,9 @@ function chooseDecision(d, value, btn) {
     if (!r.ok) throw new Error('choose ' + r.status);
     decisionsSeq++;
     refreshDecisionsBadge();
-  }).catch(function() {
+  }).catch(function(err) {
     btn.disabled = false;
+    if (isAbortError(err)) return;
     showRefNotice('Could not record the answer; try again from the room.');
   });
 }
@@ -4942,16 +5109,17 @@ var BOARD_VIEWS = [['all', 'All tasks'], ['mine', 'Assigned to me'], ['urgent', 
 
 function loadBoard() {
   var seq = ++board.seq;
+  var generation = sessionGeneration;
   fetch('/api/tasks?scope=all&status=all&token=' + encodeURIComponent(webToken()))
     .then(function(r) { if (!r.ok) throw new Error('tasks ' + r.status); return r.json(); })
     .then(function(list) {
-      if (seq !== board.seq) return;
+      if (seq !== board.seq || !sameSession(generation)) return;
       board.tasks = Array.isArray(list) ? list : [];
       renderBoardSide();
       renderBoard();
     })
-    .catch(function() {
-      if (seq !== board.seq) return;
+    .catch(function(err) {
+      if (seq !== board.seq || !sameSession(generation) || isAbortError(err)) return;
       board.tasks = board.tasks || [];
       renderBoardSide();
       renderBoard();
@@ -5121,12 +5289,12 @@ function updateBoardTask(t, fields, focusKey) {
   Object.keys(fields).forEach(function(k) { body[k] = fields[k]; });
   fetch('/api/tasks/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(function(r) { if (!r.ok) throw new Error('update ' + r.status); })
-    .catch(function() {
+    .catch(function(err) {
       t.status = prev.status;
       t.assignee = prev.assignee;
       renderBoard();
       renderBoardSide();
-      showRefNotice('Could not update task ' + t.id + '; it is back where it was.');
+      if (!isAbortError(err)) showRefNotice('Could not update task ' + t.id + '; it is back where it was.');
     });
 }
 
@@ -5227,12 +5395,13 @@ function boardAddForm(colKey, colEl) {
           // and the board says so instead of looking done.
           return fetch('/api/tasks/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: task.id, status: colKey, conversation: roomId, respondedBy: myName() }) })
             .then(function(r) { if (!r.ok) throw new Error('move ' + r.status); })
-            .catch(function() {
+            .catch(function(err) {
+              if (isAbortError(err)) return;
               var col = (window.joindUi ? window.joindUi.boardColumns() : []).filter(function(c) { return c[0] === colKey; })[0];
               showRefNotice('Task ' + task.id + ' was created in Open; it could not be moved to ' + (col ? col[1] : colKey) + '.');
             });
         }
-      }, function(err) { input.disabled = false; showRefNotice('Could not create the task.'); throw err; })
+      }, function(err) { input.disabled = false; if (!isAbortError(err)) showRefNotice('Could not create the task.'); throw err; })
       .then(function() { loadBoard(); })
       .catch(function() { /* reported above */ });
   });
@@ -5762,7 +5931,7 @@ function onAttachMenuKey(e) {
 function loadSnippets() {
   var seq = ++snippetsSeq;
   return fetch('/api/snippets').then(function(r) {
-    return r.json().catch(function() { return {}; }).then(function(body) {
+    return jsonOr(r, {}).then(function(body) {
       if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
       return body;
     });
@@ -6031,7 +6200,7 @@ function buildSnippetsSection() {
     var url = editing ? '/api/snippets/' + encodeURIComponent(editing) : '/api/snippets';
     save.disabled = true;
     fetch(url, { method: editing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function(r) { return r.json().catch(function() { return {}; }).then(function(b) { return { ok: r.ok, status: r.status, body: b }; }); })
+      .then(function(r) { return jsonOr(r, {}).then(function(b) { return { ok: r.ok, status: r.status, body: b }; }); })
       .then(function(res) {
         save.disabled = false;
         if (!res.ok) { fail('Not saved: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)) + '.'); return; }
@@ -6482,6 +6651,13 @@ function signOut() {
   var served = !!window.__JOIND_TOKEN;
   signedOut = true;
   authEpoch++; // a refusal still in flight cannot raise the banner
+  sessionGeneration++; // no answer to a request sent so far reaches the page
+  // Cancel every request still in flight; the next session gets a fresh
+  // controller. Aborted requests reject, and their callers stay silent.
+  var ending = sessionAbort;
+  sessionAbort = newSessionAbort();
+  reconcileOnInit = false;
+  releaseSessionLocks();
   forgetWebToken();
   window.__JOIND_TOKEN = '';
   closePopover();
@@ -6499,9 +6675,33 @@ function signOut() {
   clearInterval(sessionStatusInterval);
   clearInterval(membersTick);
   if (autoScanInterval) { clearInterval(autoScanInterval); autoScanInterval = null; }
+  // Pending timers and file reads that would start requests go too.
+  if (board.reload) { clearTimeout(board.reload); board.reload = 0; }
+  clearTimeout(searchDebounce);
+  searchDebounce = null;
+  var reads = sessionReaders;
+  sessionReaders = [];
+  reads.forEach(function(x) { try { x.abort(); } catch (e) { /* already done */ } });
   document.querySelectorAll('.session-modal-overlay, .notify-panel-overlay, .crew-panel-overlay, .launch-dialog-overlay').forEach(function(el) { el.remove(); });
   closeTabSockets();
   showSignedOut(served);
+  if (ending) ending.abort();
+}
+
+// What the ending session's requests held, released at once instead of
+// waiting for their callbacks: the send lock, the image uploads (their
+// slots go, the images already up stay in the draft), and the scanner's
+// busy flag and button.
+function releaseSessionLocks() {
+  composerSendInFlight = false;
+  if (imageUploadsInFlight > 0) {
+    imageUploadsInFlight = 0;
+    pendingImages = pendingImages.filter(function(p) { return !!p.url; });
+    renderImageStrip();
+  }
+  autoScanRunning = false;
+  var scan = document.getElementById('scan-btn');
+  if (scan) { scan.textContent = 'Scan'; scan.disabled = false; }
 }
 
 function showSignedOut(served) {
@@ -6529,16 +6729,21 @@ function showSignedOut(served) {
   btn.className = 'btn btn-primary';
   btn.textContent = 'Sign in';
   btn.addEventListener('click', function() {
-    if (served) { location.reload(); return; }
+    // Without AbortController (sessionAbort null) the old session's requests
+    // cannot be cancelled: start clean with a reload rather than resume.
+    if (served || !sessionAbort) { location.reload(); return; }
     overlay.remove();
-    promptWebToken(function() { location.reload(); });
+    // Resume in place, never reload: the typed token lives in page memory
+    // too, and with sessionStorage blocked a reload would lose it and ask
+    // for it a second time.
+    promptWebToken(resumeSession);
   });
   box.appendChild(title);
   box.appendChild(text);
   box.appendChild(btn);
   overlay.appendChild(box);
   // The app behind is out of reach (inert: no focus, no clicks) until the
-  // page reloads, and Tab stays on the one control here.
+  // session resumes (or the page reloads), and Tab stays on the one control here.
   var app = document.querySelector('.app');
   if (app) app.inert = true;
   overlay.addEventListener('keydown', function(e) {
@@ -6546,6 +6751,42 @@ function showSignedOut(served) {
   });
   document.body.appendChild(overlay);
   btn.focus();
+}
+
+// Sign in after sign out, in place: the boot path again, deliberately. Undo
+// what signOut stopped (the signed-out screen, the inert app, the polls),
+// re-run the boot reads, then register and connect once (sessionAttempt and
+// connect keep it to one socket). The socket's init repaints rooms and
+// messages. Does nothing unless the tab is signed out.
+function resumeSession() {
+  if (!signedOut) return;
+  signedOut = false;
+  wsAuthFailures = 0;
+  var screen = document.getElementById('signed-out');
+  if (screen) screen.remove();
+  var app = document.querySelector('.app');
+  if (app) app.inert = false;
+  clearInterval(membersTick);
+  membersTick = setInterval(tickMembers, 60000);
+  clearInterval(sessionStatusInterval);
+  sessionStatusInterval = setInterval(refreshSessionStatus, 3000);
+  reconcileOnInit = true;
+  runBootReads();
+  startSession();
+}
+
+// The first init after a resume repaints rooms, messages and the task badge.
+// What the old reload also rebuilt is refetched here, so nothing on screen
+// is left as it was at sign out: the page open on the rail (the Tasks board,
+// Decisions, Crew once its roster and templates are back) and an open task
+// panel (init keeps a same-room task list as it is). The bell reloads on
+// every socket open.
+function reconcileVisibleViews() {
+  if (pageNow) renderPage(pageNow);
+  if (pageNow === 'crew') {
+    Promise.all([loadCrewRoster(), loadTemplates()]).then(function() { renderCrewPage(); });
+  }
+  if (taskPanelOpen && activeConversation) loadTasks(activeConversation.id);
 }
 
 // --- Conversations ---
@@ -6568,14 +6809,16 @@ function loadConversations() {
   var seqAtStart = nextPendingSeq();
   // no-store: a live list never comes from a cache, and identical GETs are
   // not serialized behind the browser's cache lock
-  fetch('/api/conversations?token=' + encodeURIComponent(webToken()), { cache: 'no-store' }).then(function(r) { return r.json(); }).then(function(data) {
+  fetch('/api/conversations?token=' + encodeURIComponent(webToken()), { cache: 'no-store' }).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
+    // A refused read keeps the list and the active room as they are.
+    if (!data || !Array.isArray(data.conversations)) return;
     if (myFetch < convFetchApplied) return; // a newer fetch already landed
     convFetchApplied = myFetch;
     activeConversation = data.active;
     conversationList = data.conversations || [];
     applyLinkPayload(data, false, genAtStart !== pendingGeneration, seqAtStart);
     renderConversationList();
-  });
+  }).catch(function() { /* unreachable server: keep the list */ });
 }
 
 // Last-CALL-wins guard for conversation selection: without it, a slow
@@ -6628,13 +6871,16 @@ function selectConversation(id, after) {
   var seqAtStart = nextPendingSeq();
   var initsAtStart = socketInitCount;
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.json(); }).then(function(data) {
+    body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
       if (mySelect !== convSelectSeq) return; // superseded by a newer selection
+      // Refused: say so, not an endless Loading, unless an init repainted
+      // this room meanwhile (its messages are newer than any answer here).
+      if (!data) { if (!initRepainted()) showRoomLoadError(); return; }
       // A reconnect during the request re-sent init for this same room: the
       // screen already holds newer messages and queue than this response.
       // Only the snapshot is stale: room-scoped state that init does not
       // reset (the task list and panel) still switches to this room.
-      if (initsAtStart !== socketInitCount && activeConversation && activeConversation.id === id) {
+      if (initRepainted()) {
         resetRoomTasks(id);
         return;
       }
@@ -6655,16 +6901,36 @@ function selectConversation(id, after) {
         resetRoomTasks(activeConversation.id);
         if (typeof after === 'function' && activeConversation.id === id) after();
       }
-    });
+    }).catch(function(err) { if (mySelect === convSelectSeq && !initRepainted() && !isAbortError(err)) showRoomLoadError(); });
+  // True once a socket init has painted this room since the request went out.
+  function initRepainted() {
+    return initsAtStart !== socketInitCount && !!activeConversation && activeConversation.id === id;
+  }
+}
+
+// The room's messages could not be loaded (refused, or no server): replace
+// the Loading line with a plain error line in the same style.
+function showRoomLoadError() {
+  var c = document.getElementById('messages');
+  if (!c) return;
+  c.textContent = '';
+  var err = document.createElement('div');
+  err.className = 'empty-state';
+  err.style.textAlign = 'center';
+  err.style.padding = '24px';
+  err.textContent = 'Could not load this room. Select it again to retry.';
+  c.appendChild(err);
 }
 
 function newConversation() {
   fetch('/api/conversations/new', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}) }).then(function(r) { return r.json(); }).then(function(data) {
-      if (data.conversation) {
+    body: JSON.stringify({}) }).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
+      if (data && data.conversation) {
         selectConversation(data.conversation.id);
+      } else {
+        showRefNotice('Could not create a conversation.');
       }
-    });
+    }).catch(function(err) { if (!isAbortError(err)) showRefNotice('Could not create a conversation.'); });
 }
 
 function showNoConversation() {
@@ -6699,7 +6965,7 @@ function renderConversationList() {
       customPrompt('Rename conversation:', activeConversation.name, function(newName) {
         if (newName && newName !== activeConversation.name) {
           fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: activeConversation.id, name: newName }) }).then(function() { loadConversations(); });
+            body: JSON.stringify({ id: activeConversation.id, name: newName }) }).then(function() { loadConversations(); }).catch(quietAbort);
         }
       });
     };
@@ -6802,8 +7068,9 @@ function messageInCurrentView(m) {
 var dmPartnersCache = [];
 function fetchDmPartners() {
   fetch('/api/dms?token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(d) {
+      if (!d || !Array.isArray(d.partners)) return; // refused: keep the list
       // Union with partners discovered over the socket while this was in flight
       var fetched = (d && d.partners) ? d.partners.map(function(p) { return p.partner; }) : [];
       dmPartnersCache.forEach(function(p) { if (fetched.indexOf(p) < 0) fetched.push(p); });
@@ -6950,7 +7217,9 @@ function refreshDmThread(name) {
   c.appendChild(loader);
   var mySeq = ++dmFetchSeq;
   fetch('/api/dms?with=' + encodeURIComponent(name) + '&token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
+    // A refused read repaints the thread the page holds (no new messages, the
+    // route unknown) instead of reading the error body as a thread.
+    .then(function(r) { return r.ok ? r.json() : {}; })
     .then(function(data) {
       if (mySeq !== dmFetchSeq || activeDm !== name) return; // superseded
       dmRoute = { partner: name, remote: typeof data.routesToRemote === 'boolean' ? data.routesToRemote : null };
@@ -7705,11 +7974,11 @@ function deletePending(conv, clientId, el, btn) {
       notePendingLedger(clientId, 'deleted');
       dropPending(conv, clientId);
     })
-    .catch(function() {
+    .catch(function(err) {
       // Already dispatched, or the server refused: keep the row honest.
       btn.disabled = false;
       el.classList.remove('deleting');
-      btn.title = 'Could not delete: it may already have been sent';
+      if (!isAbortError(err)) btn.title = 'Could not delete: it may already have been sent';
     });
 }
 
@@ -7805,7 +8074,7 @@ function showConvMenu(evt, conv) {
   var actions = [
     { label: (conv.starred ? '\u2606 Unstar' : '\u2605 Star'), action: function() {
       fetch('/api/conversations/star', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: conv.id, starred: !conv.starred }) }).then(function() { loadConversations(); });
+        body: JSON.stringify({ id: conv.id, starred: !conv.starred }) }).then(function() { loadConversations(); }).catch(quietAbort);
       closePopover();
     }},
     { label: '\u270E Rename', action: function() {
@@ -7813,20 +8082,21 @@ function showConvMenu(evt, conv) {
       customPrompt('Rename:', conv.name, function(newName) {
         if (newName && newName !== conv.name) {
           fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: conv.id, name: newName }) }).then(function() { loadConversations(); });
+            body: JSON.stringify({ id: conv.id, name: newName }) }).then(function() { loadConversations(); }).catch(quietAbort);
         }
       });
     }},
     { label: '\u2715 Delete', danger: true, action: function() {
       if (confirm('Delete "' + conv.name + '"? This cannot be undone.')) {
         fetch('/api/conversations/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: conv.id }) }).then(function() {
+          body: JSON.stringify({ id: conv.id }) }).then(function(r) {
+            if (!r.ok) { showRefNotice('Could not delete "' + conv.name + '".'); return; }
             if (activeConversation && activeConversation.id === conv.id) {
               activeConversation = null;
               showNoConversation();
             }
             loadConversations();
-          });
+          }).catch(quietAbort);
       }
       closePopover();
     }},
@@ -7855,7 +8125,9 @@ var sessionTemplates = [];
 function loadTemplates() {
   // A refused read (401 before the token is known) keeps the current list:
   // the error body is not a list. runBootReads loads it again later.
+  var generation = sessionGeneration;
   return fetch('/api/templates').then(function(r) { return r.ok ? r.json() : null; }).then(function(tmpls) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     if (!Array.isArray(tmpls)) return;
     sessionTemplates = tmpls;
     renderTemplates();
@@ -8005,14 +8277,14 @@ function startSessionUI(template) {
         goal: goalInput.value.trim(),
         startedBy: sender
       })
-    }).then(function(r) { return r.json(); }).then(function(session) {
+    }).then(function(r) { return r.ok ? r.json() : refusalBody(r); }).then(function(session) {
       overlay.remove();
       if (session.error) {
         alert('Error: ' + session.error);
       } else {
         refreshSessionStatus();
       }
-    });
+    }).catch(quietAbort);
   });
 
   btnRow.appendChild(cancelBtn);
@@ -8052,14 +8324,14 @@ function refreshSessionStatus() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: s.id })
-        }).then(function() { refreshSessionStatus(); });
+        }).then(function() { refreshSessionStatus(); }).catch(quietAbort);
       });
 
       bar.appendChild(info);
       bar.appendChild(cancel);
       el.appendChild(bar);
     });
-  });
+  }).catch(quietAbort);
 }
 
 // Poll session status while active (stopped on sign out)
@@ -8109,9 +8381,12 @@ function resetRoomTasks(convId) {
 }
 
 function loadTaskCount(convId) {
+  var generation = sessionGeneration;
   fetch('/api/tasks/count?conversation=' + encodeURIComponent(convId))
-    .then(function(r) { return r.json(); })
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
+      if (!sameSession(generation)) return; // read in a signed-out session
+      if (!data) return; // refused: leave the badge as it is
       if (!taskRoomIsCurrent(convId)) return; // the room changed meanwhile
       renderTaskBadgeFromCount(data.count || 0, data.hasUrgent || false);
     })
@@ -8120,15 +8395,18 @@ function loadTaskCount(convId) {
 
 function loadTasks(convId) {
   var status = taskFilter === 'all' ? 'all' : taskFilter;
+  var generation = sessionGeneration;
   fetch('/api/tasks?conversation=' + encodeURIComponent(convId) + '&status=' + status)
-    .then(function(r) { return r.json(); })
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
+      if (!sameSession(generation)) return; // read in a signed-out session
+      if (!Array.isArray(data)) return; // refused: the list and panel stay
       if (!taskRoomIsCurrent(convId)) return; // the room changed meanwhile
-      tasks = data || [];
+      tasks = data;
       tasksConvId = convId;
       renderTaskBadge();
       renderTaskPanel();
-    });
+    }).catch(function() { /* unreachable server: keep the list */ });
 }
 
 function toggleTaskPanel() {
@@ -8299,12 +8577,12 @@ function submitTaskResponse(taskId, response) {
       respondedBy: senderName,
       conversation: activeConversation.id
     })
-  }).then(function(r) { return r.json(); }).then(function(task) {
-    if (task.error) return;
+  }).then(function(r) { return r.ok ? r.json() : null; }).then(function(task) {
+    if (!task || task.error) return; // refused: the card stays as it was
     tasks = tasks.map(function(t) { return t.id === task.id ? task : t; });
     renderTaskBadge();
     renderTaskPanel();
-  });
+  }).catch(function() { /* unreachable server: the card stays */ });
 }
 
 function showCreateTaskForm() {
@@ -8416,7 +8694,7 @@ function createTask(opts) {
       priority: opts.priority || 'normal',
       conversation: activeConversation.id
     })
-  });
+  }).catch(quietAbort);
 }
 
 // --- Turn Guard ---
@@ -8454,7 +8732,7 @@ function saveTurnGuard() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(turnGuardState)
-  });
+  }).catch(quietAbort);
 }
 
 function timeAgo(ts) {
@@ -8677,22 +8955,30 @@ function openLaunchDialog(preselectCrewName) {
   document.body.appendChild(overlay);
   launchDialogOverlay = overlay;
 
-  // Fetch all data in parallel
+  // Fetch all data in parallel. A refused or failed read falls back to what
+  // the page already holds (the crew roster, the room list) or to the
+  // existing defaults; an error body is never read as data.
+  var noTerminals = { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } };
+  var generation = sessionGeneration;
   Promise.all([
-    fetch('/api/crew').then(function(r) { return r.json(); }).catch(function() { return []; }),
-    fetch('/api/harnesses').then(function(r) { return r.json(); }).catch(function() { return []; }),
-    fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(function(r) { return r.json(); }).catch(function() { return { conversations: [] }; }),
-    fetch('/api/launcher/terminals').then(function(r) { return r.json(); }).catch(function() { return { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } }; })
+    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function(err) { if (isAbortError(err)) throw err; return crewRoster.slice(); }),
+    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function(err) { if (isAbortError(err)) throw err; return []; }),
+    fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(okJson).then(function(d) {
+      return d && Array.isArray(d.conversations) ? d : { conversations: conversationList.slice() };
+    }).catch(function(err) { if (isAbortError(err)) throw err; return { conversations: conversationList.slice() }; }),
+    fetch('/api/launcher/terminals').then(okJson).then(function(t) { return t && typeof t === 'object' ? t : noTerminals; }).catch(function(err) { if (isAbortError(err)) throw err; return noTerminals; })
   ]).then(function(results) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     var crewList = results[0];
     var harnesses = results[1];
     var convData = results[2];
     var terminalsInfo = results[3];
-    var convList = convData.conversations || convData || [];
+    var convList = convData.conversations;
     content.textContent = '';
     footer.textContent = '';
     buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo, preselectCrewName);
   }).catch(function(err) {
+    if (isAbortError(err) || !sameSession(generation)) return;
     content.textContent = '';
     var errMsg = document.createElement('div');
     errMsg.className = 'launch-error';
@@ -8770,7 +9056,8 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
   // Add folder inline form (hidden by default)
   var addCrewForm = buildAddCrewForm(function(newCrew) {
     // Reload after adding
-    fetch('/api/crew').then(function(r) { return r.json(); }).then(function(updated) {
+    fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(updated) {
+      if (!Array.isArray(updated)) return; // refused: the select keeps its options
       // Rebuild options preserving add
       while (crewSelect.options.length > 1) crewSelect.remove(1);
       updated.forEach(function(c) {
@@ -8975,7 +9262,8 @@ function buildLaunchForm(content, footer, crewList, harnesses, convList, termina
     var url = '/api/launcher/sessions?harness=' +
       encodeURIComponent(selectedHarness.id) +
       '&cwd=' + encodeURIComponent(selectedCrew.path);
-    fetch(url).then(function(r) { return r.json(); }).then(function(sessions) {
+    // A refusal is the catch's "(failed to load)", not "no sessions found".
+    fetch(url).then(okJson).then(function(sessions) {
       resumeSelect.textContent = '';
       if (!Array.isArray(sessions) || sessions.length === 0) {
         var opt = document.createElement('option');
@@ -9508,7 +9796,7 @@ function buildAddCrewForm(onAdd, onCancel) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name, path: path })
-    }).then(function(r) { return r.json(); }).then(function(crew) {
+    }).then(function(r) { return r.ok ? r.json() : refusalBody(r); }).then(function(crew) {
       addBtn.disabled = false;
       addBtn.textContent = 'Add';
       if (crew.error) {
@@ -9591,7 +9879,10 @@ function executeLaunch(harnesses, crewList, onResult) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
-  }).then(function(r) { return r.json(); }).then(function(result) {
+  }).then(function(r) {
+    // A refusal is a failed launch with the server's reason, as a network error is.
+    return r.ok ? r.json() : refusalBody(r).then(function(b) { return { error: b.error, status: 'failed' }; });
+  }).then(function(result) {
     onResult(result);
   }).catch(function(err) {
     if (goBtn) { goBtn.disabled = false; goBtn.textContent = 'Launch \u2192'; }
@@ -9754,7 +10045,7 @@ function doInject(launchId, view, convId, joinAs) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
-  }).then(function(r) { return r.json(); }).then(function(res) {
+  }).then(okJson).then(function(res) { // a refusal is the catch's "Inject failed"
     doingEl.remove();
     if (res.status === 'done' || res.status === 'injected') {
       var doneLine = document.createElement('div');
@@ -9813,9 +10104,10 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
     copyBtn.textContent = 'Copy command';
     copyBtn.addEventListener('click', function() {
       fetch('/api/launch/' + encodeURIComponent(launchId))
-        .then(function(r) { return r.json(); })
+        .then(function(r) { return r.ok ? r.json() : null; })
         .then(function(res) {
-          navigator.clipboard.writeText(res.command || '').then(function() {
+          if (!res || !res.command) return; // refused: copy nothing, claim nothing
+          navigator.clipboard.writeText(res.command).then(function() {
             copyBtn.textContent = '\u2713 Copied';
             copyBtn.classList.add('copied');
             setTimeout(function() {
@@ -9823,7 +10115,7 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
               copyBtn.classList.remove('copied');
             }, 1500);
           });
-        });
+        }).catch(function() { /* unreachable server: nothing copied */ });
     });
 
     actions.appendChild(retryBtn);
@@ -9841,8 +10133,9 @@ function startLaunchPolling(launchId, view, convId, joinAs) {
       return;
     }
     fetch('/api/launch/' + encodeURIComponent(launchId))
-      .then(function(r) { return r.json(); })
+      .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(res) {
+        if (!res) return; // refused: keep polling, as on a network error
         if (res.status === 'done' || res.status === 'injected') {
           clearInterval(launchPollInterval); launchPollInterval = null;
           pollIndicator.remove();
@@ -9930,13 +10223,18 @@ function openCrewPanel() {
   document.body.appendChild(overlay);
   crewPanelOverlay = overlay;
 
+  // A refused or failed read falls back to the crew roster the page holds, or
+  // to empty meta and harnesses; an error body is never read as data.
+  var generation = sessionGeneration;
   Promise.all([
-    fetch('/api/crew').then(function(r) { return r.json(); }).catch(function() { return []; }),
-    fetch('/api/crew/meta').then(function(r) { return r.json(); }).catch(function() { return {}; }),
-    fetch('/api/harnesses').then(function(r) { return r.json(); }).catch(function() { return []; })
+    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function(err) { if (isAbortError(err)) throw err; return crewRoster.slice(); }),
+    fetch('/api/crew/meta').then(okJson).then(function(m) { return m && typeof m === 'object' && !Array.isArray(m) ? m : {}; }).catch(function(err) { if (isAbortError(err)) throw err; return {}; }),
+    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function(err) { if (isAbortError(err)) throw err; return []; })
   ]).then(function(results) {
-    buildCrewPanel(content, results[0] || [], results[1] || {}, results[2] || []);
+    if (!sameSession(generation)) return; // read in a signed-out session
+    buildCrewPanel(content, results[0], results[1], results[2]);
   }).catch(function(err) {
+    if (isAbortError(err) || !sameSession(generation)) return;
     content.textContent = '';
     var errMsg = document.createElement('div');
     errMsg.className = 'launch-error';
@@ -9966,9 +10264,11 @@ function buildCrewPanel(content, crewList, meta, harnesses) {
   list.className = 'crew-panel-list';
 
   function refreshList() {
-    fetch('/api/crew').then(function(r) { return r.json(); }).then(function(updated) {
-      renderCrewRows(list, updated || [], refreshList);
-    }).catch(function() {
+    fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(updated) {
+      if (!Array.isArray(updated)) return; // refused: the rows on screen stay
+      renderCrewRows(list, updated, refreshList);
+    }).catch(function(err) {
+      if (isAbortError(err)) return; // cancelled by sign out: not an empty crew
       renderCrewRows(list, [], refreshList);
     });
   }
@@ -10117,7 +10417,7 @@ function buildCrewRow(crew, onChanged) {
     deleteBtn.disabled = true;
     deleteBtn.textContent = 'Deleting...';
     fetch('/api/crew/' + encodeURIComponent(crew.name), { method: 'DELETE' })
-      .then(function(r) { return r.json(); })
+      .then(function(r) { return r.ok ? r.json() : refusalBody(r); })
       .then(function(res) {
         if (res && res.error) {
           deleteBtn.disabled = false;
@@ -10208,7 +10508,7 @@ function buildCrewEditForm(row, crew, onChanged) {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
-    }).then(function(r) { return r.json(); }).then(function(res) {
+    }).then(function(r) { return r.ok ? r.json() : refusalBody(r); }).then(function(res) {
       saveBtn.disabled = false;
       saveBtn.textContent = 'Save';
       if (res && res.error) {
@@ -10408,22 +10708,22 @@ function sendReaction(messageId, emoji) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sender: sender, emoji: emoji })
-  });
+  }).catch(quietAbort);
 }
 
 function updateReactionPills(messageId) {
   // Refresh reaction pills from server
   fetch('/api/message/' + messageId + '?viewer=' + encodeURIComponent(myName()) + '&token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
-    .then(function() {
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
       // Fetch all reactions for the active conversation and rebuild for this message
-      if (!activeConversation) return;
+      if (!data || !activeConversation) return; // refused: the pills stay
       var row = document.querySelector('.msg-reactions[data-message-id="' + messageId + '"]');
       if (!row) return;
       // Find reactions for this message from our local cache
       var msgReactions = allReactions.filter(function(r) { return r.messageId === messageId; });
       renderReactionRow(row, messageId, msgReactions);
-    });
+    }).catch(quietAbort);
 }
 
 function renderReactionRow(row, messageId, reactions) {
@@ -10446,7 +10746,7 @@ function renderReactionRow(row, messageId, reactions) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sender: sender, emoji: emoji })
-      });
+      }).catch(quietAbort);
     });
     row.appendChild(pill);
   });
@@ -10691,7 +10991,7 @@ function gotoResultItem(conv, id) {
       item.addEventListener('click', open);
       item.addEventListener('keydown', function(e) { if (e.key === 'Enter') open(); });
     })
-    .catch(function() { if (item.isConnected) showMissing('Could not load message #' + id); });
+    .catch(function(err) { if (item.isConnected && !isAbortError(err)) showMissing('Could not load message #' + id); });
   return item;
 }
 
@@ -10775,8 +11075,8 @@ function doSearch(more) {
         results.appendChild(note);
       }
     })
-    .catch(function() {
-      if (mySeq !== searchSeq) return;
+    .catch(function(err) {
+      if (mySeq !== searchSeq || isAbortError(err)) return;
       results.textContent = 'Search failed';
       setSearchResultsStale(false);
     });
@@ -10816,7 +11116,9 @@ var NOTIFY_ICONS = {
 
 function loadNotifications() {
   var epochAtStart = notifyEpoch;
+  var generation = sessionGeneration;
   fetch('/api/notifications').then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     // A refused read (401 before the token is known) keeps the bell as is.
     if (!data || !Array.isArray(data.notifications)) return;
     if (data.generation && data.generation !== notifyGeneration) {
@@ -10925,7 +11227,7 @@ function toggleNotifyPanel() {
     var cutoff = notifyItems.length > 0 ? notifyItems[0].id : 0;
     if (cutoff === 0) return;
     fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ upToId: cutoff }) })
-      .then(function(r) { return r.json(); })
+      .then(okJson) // refused: nothing is marked read here
       .then(function(d) {
         notifyItems.forEach(function(n) { if (n.id <= cutoff) n.read = true; });
         notifyUnread = notifyItems.reduce(function(acc, n) { return acc + (n.read ? 0 : 1); }, 0);
@@ -10989,8 +11291,8 @@ function renderNotifyPanel() {
     row.appendChild(body);
     row.addEventListener('click', function() {
       fetch('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ upToId: n.id }) })
-        .then(function(r) { return r.json(); })
-        .then(function(d) { notifyUnread = d.unread || 0; renderNotifyBadge(); })
+        .then(okJson) // refused: the unread count is not zeroed
+        .then(function(d) { if (d && typeof d.unread === 'number') { notifyUnread = d.unread; renderNotifyBadge(); } })
         .catch(function() {});
       n.read = true;
       row.classList.remove('unread');
@@ -11047,7 +11349,7 @@ function resolveAsk(messageId, conversationId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token: webToken(), conversation: conversationId || (activeConversation && activeConversation.id) })
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  }).then(okJson).then(function(d) { // refused: nothing resolved, nothing refreshed
     if (d && d.ask) applyAskResolution(messageId, d.ask, conversationId);
     // The resolution is the new truth: invalidate anything in flight, then
     // start a fresh (and by construction latest) refresh.
@@ -11081,9 +11383,11 @@ function applyAskResolution(messageId, ask, conversationId) {
 function refreshDecisionsBadge() {
   var seqAtStart = decisionsSeq;
   var fetchId = ++decisionsFetchId;
+  var generation = sessionGeneration;
   fetch('/api/decisions?state=open&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(d) {
+      if (!sameSession(generation)) return; // read in a signed-out session
       // A refused read keeps the cache and the badge as they are.
       if (!d || !Array.isArray(d.decisions)) return;
       // Only the latest-started fetch may land, and only if no ask event
@@ -11676,17 +11980,24 @@ function renderServerBadgeSettings(part) {
   function send(body) {
     save.disabled = true;
     reset.disabled = true;
+    var generation = sessionGeneration;
     fetch('/api/instance/badge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function(r) { return r.json().catch(function() { return null; }).then(function(j) { return { ok: r.ok, j: j }; }); })
+      .then(function(r) { return jsonOr(r, null).then(function(j) { return { ok: r.ok, j: j }; }); })
       .then(function(res) {
         save.disabled = false;
         reset.disabled = false;
+        if (!sameSession(generation)) return; // answered to a signed-out session
         if (!res.ok) { status.textContent = res.j && res.j.error ? res.j.error : 'Not saved.'; return; }
         applyInstanceMarks(res.j);
         var again = document.querySelector('#settings-server-badge-part .badge-status');
         if (again) again.textContent = 'Saved. Linked servers pick it up within a minute.';
       })
-      .catch(function() { save.disabled = false; reset.disabled = false; status.textContent = 'Not saved: the server did not answer.'; });
+      .catch(function(err) {
+        save.disabled = false;
+        reset.disabled = false;
+        if (isAbortError(err) || !sameSession(generation)) return;
+        status.textContent = 'Not saved: the server did not answer.';
+      });
   }
   save.addEventListener('click', function() {
     if (!M.validBadge(draft)) { paint(); return; }

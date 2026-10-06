@@ -12,7 +12,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 const table = { calls: 0, delayMs: 3_000, liveGui: false };
 vi.mock("../src/inject.js", async () => {
@@ -33,25 +32,22 @@ vi.mock("../src/terminals.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import type { JoindConfig } from "../src/config.js";
 import { resolvePaneForJoin, type PaneResolverDeps } from "../src/tools.js";
 
 const TOKEN = "latency-link-token-0123456789";
 const WEB = "a".repeat(64);
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => { const a = s.address(); const port = typeof a === "object" && a ? a.port : 0; s.close(() => resolve(port)); });
-  });
-}
+// Each server binds port 0; its link names the peer by a placeholder URL that
+// resolves once the peer is up (tests/peer-routes.ts).
+const routes = new PeerRoutes();
 
-function config(dir: string, instance: string, port: number, peer: string, peerPort: number): JoindConfig {
+function config(dir: string, instance: string, peer: string): JoindConfig {
   return {
-    port, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
+    port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
     humanNames: [], presenceGraceMs: 1_800_000, logFile: "none", webToken: WEB, webTokenUserSet: true,
-    links: [{ name: peer, url: `http://127.0.0.1:${peerPort}`, token: TOKEN }],
+    links: [{ name: peer, url: routes.url(peer), token: TOKEN }],
   };
 }
 
@@ -105,10 +101,11 @@ describe("a remote REST join with a real pid, no pane, no handle", { timeout: 20
   beforeAll(async () => {
     dirA = mkdtempSync(join(tmpdir(), "joind-lat-a-"));
     dirB = mkdtempSync(join(tmpdir(), "joind-lat-b-"));
-    const [pa, pb] = [await freePort(), await freePort()];
-    A = await startJoind(config(dirA, "alpha", pa, "bravo", pb));
+    A = await startJoind(config(dirA, "alpha", "bravo"), { link: { fetchImpl: routes.wrap() } });
+    routes.set("alpha", A.baseUrl);
     room = A.manager.createConversation("latency").id;
-    B = await startJoind(config(dirB, "bravo", pb, "alpha", pa));
+    B = await startJoind(config(dirB, "bravo", "alpha"), { link: { fetchImpl: routes.wrap() } });
+    routes.set("bravo", B.baseUrl);
     await waitFor("B to mirror the room", () => B.manager.getRoom(`alpha:${room}`));
   }, 30_000);
 

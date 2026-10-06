@@ -6,7 +6,6 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 vi.mock("../src/inject.js", async () => {
   const actual = await vi.importActual<typeof import("../src/inject.js")>("../src/inject.js");
@@ -18,6 +17,7 @@ vi.mock("../src/terminals.js", async () => {
 });
 
 import { startJoind, type JoindHandle } from "../src/index.js";
+import { PeerRoutes } from "./peer-routes.js";
 import type { JoindConfig } from "../src/config.js";
 import type { FetchLike } from "../src/link.js";
 import { MirrorRoom, type MirrorTransport } from "../src/mirror.js";
@@ -117,19 +117,15 @@ describe("gate round 7, finding 1: a departure during recovery releases what the
 const TOKEN = "gate7-link-token-0123456789";
 const WEB = "d".repeat(64);
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => { const a = s.address(); const port = typeof a === "object" && a ? a.port : 0; s.close(() => resolve(port)); });
-  });
-}
+// Each server binds port 0; its link names the peer by a placeholder URL that
+// resolves once the peer is up (tests/peer-routes.ts).
+const routes = new PeerRoutes();
 
-function config(dir: string, instance: string, port: number, peer: string, peerPort: number): JoindConfig {
+function config(dir: string, instance: string, peer: string): JoindConfig {
   return {
-    port, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
+    port: 0, host: "127.0.0.1", dataDir: join(dir, "data"), instance, crewHome: join(dir, "crew"),
     humanNames: [], presenceGraceMs: 1_800_000, logFile: "none", webToken: WEB, webTokenUserSet: true,
-    links: [{ name: peer, url: `http://127.0.0.1:${peerPort}`, token: TOKEN }],
+    links: [{ name: peer, url: routes.url(peer), token: TOKEN }],
   };
 }
 
@@ -151,7 +147,6 @@ describe("gate round 7, routes", { timeout: 20_000 }, () => {
   beforeAll(async () => {
     dirA = mkdtempSync(join(tmpdir(), "joind-g7-a-"));
     dirB = mkdtempSync(join(tmpdir(), "joind-g7-b-"));
-    const [pa, pb] = [await freePort(), await freePort()];
     const fetchImpl: FetchLike = async (url, init) => {
       if (holdFor && url.includes("/api/peer/messages") && url.includes(holdFor)) {
         await new Promise<void>((r) => { releaseHold = r; });
@@ -160,12 +155,14 @@ describe("gate round 7, routes", { timeout: 20_000 }, () => {
       return { status: res.status, text: () => res.text() };
     };
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 60_000 };
-    A = await startJoind(config(dirA, "alpha", pa, "bravo", pb), { link: tuning });
+    A = await startJoind(config(dirA, "alpha", "bravo"), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("alpha", A.baseUrl);
     roomX = A.manager.createConversation("room X").id;
     roomY = A.manager.createConversation("room Y").id;
     A.manager.getRoom(roomX)!.send("Sisko", "said in X");
     A.manager.getRoom(roomY)!.send("Sisko", "said in Y");
-    B = await startJoind(config(dirB, "bravo", pb, "alpha", pa), { link: { ...tuning, fetchImpl } });
+    B = await startJoind(config(dirB, "bravo", "alpha"), { link: { ...tuning, fetchImpl: routes.wrap(fetchImpl) } });
+    routes.set("bravo", B.baseUrl);
     await waitFor("B to mirror both rooms", () => B.manager.getRoom(`alpha:${roomX}`) && B.manager.getRoom(`alpha:${roomY}`));
     expect((await post(B.baseUrl, "/api/web/register", { token: WEB, name: "Rami" })).status).toBe(200);
   }, 30_000);

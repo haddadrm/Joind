@@ -12,14 +12,13 @@
  *   (throttled), with no token, digest or fingerprint. Seats stay out of
  *   /api/who, the agent routes and the link.
  *
- * Real servers on loopback with port 0 or free ports and temp data dirs;
- * never the live port.
+ * Real servers on loopback, each binding port 0 (linked pairs name each
+ * other through PeerRoutes), with temp data dirs; never the live port.
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createServer } from "net";
 
 vi.mock("../src/terminals.js", async () => {
   const actual = await vi.importActual<typeof import("../src/terminals.js")>("../src/terminals.js");
@@ -29,6 +28,7 @@ vi.mock("../src/terminals.js", async () => {
 import { startJoind, type JoindHandle } from "../src/index.js";
 import type { JoindConfig } from "../src/config.js";
 import type { FetchLike } from "../src/link.js";
+import { PeerRoutes } from "./peer-routes.js";
 import { ReadonlySeatStore, SEAT_RECENT_READ_MS } from "../src/readonly-seats.js";
 import { ServerBadgeStore, badgeSettingsPath, defaultBadge } from "../src/server-badge.js";
 
@@ -36,17 +36,6 @@ const WEB = "e".repeat(64);
 const KEY = "marks-tests-agent-key-0123456789abcdef";
 const LINK = "link-token-for-marks-tests-0123456789";
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => {
-      const a = s.address();
-      const port = typeof a === "object" && a ? a.port : 0;
-      s.close(() => resolve(port));
-    });
-  });
-}
 
 function config(dir: string, instance: string, port: number, extra: Partial<JoindConfig> = {}): JoindConfig {
   return {
@@ -273,11 +262,13 @@ describe("the badge over a link", { timeout: 40_000 }, () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     dirA = mkdtempSync(join(tmpdir(), "joind-marks-a-"));
     dirB = mkdtempSync(join(tmpdir(), "joind-marks-b-"));
-    const [pa, pb] = [await freePort(), await freePort()];
+    const routes = new PeerRoutes();
     net = rewritingFetch();
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 300 };
-    A = await startJoind(config(dirA, "alpha", pa, { links: [{ name: "bravo", url: `http://127.0.0.1:${pb}`, token: LINK }] }), { link: tuning });
-    B = await startJoind(config(dirB, "bravo", pb, { links: [{ name: "alpha", url: `http://127.0.0.1:${pa}`, token: LINK }] }), { link: { ...tuning, fetchImpl: net.fetchImpl } });
+    A = await startJoind(config(dirA, "alpha", 0, { links: [{ name: "bravo", url: routes.url("bravo"), token: LINK }] }), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("alpha", A.baseUrl);
+    B = await startJoind(config(dirB, "bravo", 0, { links: [{ name: "alpha", url: routes.url("alpha"), token: LINK }] }), { link: { ...tuning, fetchImpl: routes.wrap(net.fetchImpl) } });
+    routes.set("bravo", B.baseUrl);
     A.manager.createConversation("ops");
   }, 30_000);
   afterAll(async () => {
@@ -444,10 +435,12 @@ describe("seats are not mirrored over a link", { timeout: 40_000 }, () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const dirA = mkdtempSync(join(tmpdir(), "joind-marks-la-"));
     const dirB = mkdtempSync(join(tmpdir(), "joind-marks-lb-"));
-    const [pa, pb] = [await freePort(), await freePort()];
+    const routes = new PeerRoutes();
     const tuning = { backoffMinMs: 100, backoffMaxMs: 400, pollTimeoutMs: 1_500, requestTimeoutMs: 3_000, discoverEveryMs: 300 };
-    const A = await startJoind(config(dirA, "alpha", pa, { links: [{ name: "bravo", url: `http://127.0.0.1:${pb}`, token: LINK }] }), { link: tuning });
-    const B = await startJoind(config(dirB, "bravo", pb, { links: [{ name: "alpha", url: `http://127.0.0.1:${pa}`, token: LINK }] }), { link: tuning });
+    const A = await startJoind(config(dirA, "alpha", 0, { links: [{ name: "bravo", url: routes.url("bravo"), token: LINK }] }), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("alpha", A.baseUrl);
+    const B = await startJoind(config(dirB, "bravo", 0, { links: [{ name: "alpha", url: routes.url("alpha"), token: LINK }] }), { link: { ...tuning, fetchImpl: routes.wrap() } });
+    routes.set("bravo", B.baseUrl);
     try {
       const room = A.manager.createConversation("ops").id;
       const minted = await call(A.baseUrl, "POST", "/api/readonly-seats", { name: "Watcher", conversation: room }, webHdr);
