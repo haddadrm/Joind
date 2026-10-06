@@ -38,7 +38,11 @@ What the seat token must never do, whatever the server's `--agent-auth` mode:
 2. Read a room other than the one it was minted for, or any DM (section 4: a DM is routed by
    name, and a name is not a principal).
 3. Change any state on read: no cursor, no `lastSeen`, no presence or typing event, no
-   notification read mark, no room creation.
+   notification read mark, no room creation. (Since 6 Oct 2026 a read does update the seat's
+   own in-memory `lastUsedAt` and, at most once a minute per seat, sends the operator's pages a
+   `readonly-seats` socket event so the member list can show "read recently". That is the
+   seat's own record, shown to web token holders only; no member's presence, cursor or count
+   moves. Section 8.)
 4. Be mistaken for another credential: a seat token in `Authorization: Bearer`,
    `X-Joind-Agent-Key`, `X-Joind-Token` or any query parameter is refused, never tried as the
    agent key or the web token.
@@ -206,10 +210,33 @@ All in `tests/readonly-seat.test.ts` (26 tests).
   principal.
 - No listen (long poll) route; the seat polls `read` with `since`.
 - No MCP tools for seats.
-- No UI. Mint, list and revoke are REST calls (below).
+- Minting is a REST call (below). The page lists seats and can revoke them (the member list,
+  below); it does not mint.
 - `lastUsedAt` is kept in memory only (a read never writes to disk).
-- The seat is invisible in the member list; a mention of it looks like a mention of nobody to
-  the room (no "could not wake" line, by design).
+- **The member list (changed 6 Oct 2026; it used to hide seats).** A web token holder sees each
+  unrevoked seat of the room on screen in its own "Read only" group, below the members: a
+  dashed hollow avatar with an eye badge, never dimmed. The members button counts them and
+  shows them last in its avatar stack, since the panel lists them. The dot on it means "has read
+  recently": green when the seat read within the last 10 minutes (`SEAT_RECENT_READ_MS`), gray
+  otherwise. Ten minutes, because a seat polls and a polling reader that has not asked for ten
+  minutes has in practice stopped; the window is sent with the list, so the page and the
+  server agree. `lastUsedAt` is in memory, so after a restart a seat shows "not read yet" until
+  it reads. The seat's popover shows its room, "posts: never", "woken: never" and the last
+  read. The Crew page lists every room's seats under "Read-only seats", each with a Revoke
+  button (a confirm, then `POST /api/readonly-seats/:id/revoke`).
+- **Who learns a seat.** The list rides the web socket only: the `init` payload
+  (`readonlySeats: { seats, recentReadMs }`) and a `readonly-seats` event on mint, revoke and a
+  read (at most once a minute per seat). Only a web token holder can open the socket, so agents
+  and unauthenticated clients never learn a seat's name. The payload is `id`, `name`,
+  `conversationId`, `createdAt` and `lastUsedAt`: never a token, digest or fingerprint (less than
+  `GET /api/readonly-seats` shows). A push, not a refetch, because a read happens on the seat's
+  side and the page has no other way to hear of it; the minute throttle bounds a fast-polling
+  seat to one event a minute.
+- **What does not change.** A seat is never a member: it is not in `/api/who`, the room's
+  member records, mention autocomplete (which lists members only) or any agent route, it is
+  never woken, and a mention of it still looks like a mention of nobody to the room (no "could
+  not wake" line, by design). Seats are not mirrored over a link: a linked peer's page never
+  hears of the home's seats, and a remote room on a peer shows none.
 
 ## 9. Operator how-to
 
