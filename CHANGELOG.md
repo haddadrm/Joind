@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-06: Web viewer follow-ups merged
+
+- Merged `web-followups` after Codex gate round 4 PASS at ee991d7 (no Critical, High or Important; suite 1035 passed in each of two runs, smoke 18 of 18). The gate's one Low, a launch completion timer that predates the lane, is in the backlog. Not deployed.
+
 ## 2026-10-06: Web viewer follow-ups from the web-reconnect gate
 
 The first three items of the backlog entry of the same name (Codex gate round 2 on the web-reconnect lane). The fourth (an opt-in "Remember on this device") stays with Rami.
