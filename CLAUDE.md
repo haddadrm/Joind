@@ -157,7 +157,10 @@ screen (`reconcileVisibleViews`). Sign out aborts every `/api/` request still in
 caller's signal), releases what they held at once (`releaseSessionLocks`: send lock, image uploads,
 scanner flag and button), and bumps `sessionGeneration`; a cancelled request rejects with an
 `AbortError` that callers treat as silent (`isAbortError`), and completions check `sameSession`
-before they touch the page. Entering a token re-runs the boot reads. Reads check `r.ok` (`okJson`, `refusalBody`) and
+before they touch the page. The wrapper also fences body reads (`fenceBody`: a body arriving after
+sign out rejects as cancelled), `jsonOr` never turns a cancellation into fallback data, sign out
+aborts pending file reads (`sessionReaders`) and request timers, fire-and-forget writes end in
+`.catch(quietAbort)`, and without `AbortController` Sign in reloads instead of resuming. Entering a token re-runs the boot reads. Reads check `r.ok` (`okJson`, `refusalBody`) and
 keep what the page holds on a refusal. Browser smoke:
 `tools/web-smoke/` (Playwright, ephemeral port, see its README).
 
