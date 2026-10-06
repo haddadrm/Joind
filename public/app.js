@@ -6320,6 +6320,7 @@ function setTheme(t) {
   document.querySelectorAll('[data-theme-choice]').forEach(function(b) {
     b.setAttribute('aria-pressed', b.getAttribute('data-theme-choice') === theme ? 'true' : 'false');
   });
+  if (typeof applyFavicon === 'function') applyFavicon();
 }
 function toggleTheme() { setTheme(currentTheme() === 'light' ? 'dark' : 'light'); }
 
@@ -11227,6 +11228,7 @@ refreshDecisionsBadge();
 var selfServerName = '';
 var selfServerBadge = null;     // { code, color } as /api/instance sent it
 var faviconWithBadge = false;
+var badgeEditable = true;       // false while the web token is served (auto): the server refuses badge edits
 var readonlySeats = [];         // [{ id, name, conversationId, createdAt, lastUsedAt }]
 var seatRecentReadMs = 10 * 60000;
 
@@ -11237,6 +11239,7 @@ function applyInstanceMarks(info) {
   var M = window.joindMarks;
   if (M && info.badge) selfServerBadge = M.validBadge(info.badge) || selfServerBadge;
   if (typeof info.faviconBadge === 'boolean') faviconWithBadge = info.faviconBadge;
+  if (typeof info.badgeEditable === 'boolean') badgeEditable = info.badgeEditable;
   renderBrandMarks();
   applyFavicon();
   // Members of this server shown in a remote room, and the badge settings.
@@ -11293,9 +11296,12 @@ function applyFavicon() {
   var M = window.joindMarks;
   var link = document.getElementById('favicon');
   if (!M || !link) return;
-  var href = M.faviconHref(faviconWithBadge ? ownServerBadge() : null);
+  // The tab icon follows the app's theme (data-theme), not only the system's.
+  var theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  var href = M.faviconHref(faviconWithBadge ? ownServerBadge() : null, theme);
   if (link.getAttribute('href') !== href) link.setAttribute('href', href);
 }
+applyFavicon();
 
 // --- Member marks (M1) ---
 
@@ -11694,4 +11700,14 @@ function renderServerBadgeSettings(part) {
   part.appendChild(status);
   markSwatches();
   paint();
+  if (!badgeEditable) {
+    // The same rule as minting a read-only seat: a served (auto) web token
+    // reaches every visitor of /, so it cannot change what peers are shown.
+    Array.prototype.forEach.call(part.querySelectorAll('input, button'), function(el) { el.disabled = true; });
+    var why = document.createElement('p');
+    why.className = 'setting-hint badge-locked';
+    why.id = 'settings-badge-locked';
+    why.textContent = 'Read only: this server hands its web token to every visitor. Set JOIND_WEB_TOKEN (or --web-token) and restart to change the badge.';
+    part.insertBefore(why, part.firstChild);
+  }
 }

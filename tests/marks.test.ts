@@ -29,8 +29,8 @@ interface Marks {
   seatSummary(summary: { count: number; label: string }, n: number): { count: number; label: string };
   seatReadRecently(seat: Seat | null, nowMs: number, windowMs: number): boolean;
   whiteContrast(hex: string): number;
-  faviconSvg(badge: unknown): string;
-  faviconHref(badge: unknown): string;
+  faviconSvg(badge: unknown, theme?: "light" | "dark"): string;
+  faviconHref(badge: unknown, theme?: "light" | "dark"): string;
   hexIcon(doc: Document, size: number): SVGElement;
   eyeIcon(doc: Document, size: number): SVGElement;
   badgeEl(doc: Document, badge: unknown, inline?: boolean): HTMLElement;
@@ -222,6 +222,17 @@ describe("favicon", () => {
     expect(html.indexOf("marks.js?v=34")).toBeGreaterThan(0);
     expect(html.indexOf("marks.js?v=34")).toBeLessThan(html.indexOf("app.js?v=34"));
   });
+  it("takes one theme's accent when the page names its theme", () => {
+    const light = m.faviconSvg(null, "light");
+    expect(light).toContain("#7330e3");
+    expect(light).not.toContain("#a78bfa");
+    expect(light).not.toContain("prefers-color-scheme");
+    const dark = m.faviconSvg({ code: "R", color: "#1d4ed8" }, "dark");
+    expect(dark).toContain("#a78bfa");
+    expect(dark).not.toContain("#7330e3");
+    expect(dark).not.toContain("prefers-color-scheme");
+    expect(dark).toContain(">R</text>");
+  });
   it("is a valid SVG document", () => {
     const dom = new JSDOM("");
     const doc = new dom.window.DOMParser().parseFromString(m.faviconSvg({ code: "B", color: "#1d4ed8" }), "image/svg+xml");
@@ -250,5 +261,90 @@ describe("DOM builders", () => {
     const h = m.hexIcon(doc, 20);
     expect(h.getAttribute("width")).toBe("20");
     expect(h.querySelector("path")?.getAttribute("d")).toBe(LUCIDE_HEXAGON);
+  });
+});
+
+// --- the shipped page functions in JSDOM ---------------------------------
+
+const APP = readFileSync(join(pub, "app.js"), "utf8").replace(/\r\n?/g, "\n");
+
+/** A top-level function from app.js, as shipped. */
+function lift(name: string): string {
+  const start = APP.indexOf(`\nfunction ${name}(`);
+  if (start < 0) throw new Error(`${name} not found in app.js`);
+  const end = APP.indexOf("\n}\n", start + 1);
+  if (end < 0) throw new Error(`end of ${name} not found in app.js`);
+  return APP.slice(start + 1, end + 2);
+}
+
+/** A one-line top-level `var` from app.js, as shipped. */
+function liftVar(name: string): string {
+  const match = new RegExp(`^var ${name} = [^\n]*$`, "m").exec(APP);
+  if (!match) throw new Error(`var ${name} not found in app.js`);
+  return match[0];
+}
+
+interface PageWindow {
+  document: Document;
+  eval(src: string): unknown;
+}
+
+function page(): PageWindow {
+  const dom = new JSDOM('<!doctype html><head><link rel="icon" id="favicon" href="x"></head><body></body>', { runScripts: "outside-only", url: "http://joind.test/" });
+  const w = dom.window as unknown as PageWindow;
+  w.eval(readFileSync(join(pub, "marks.js"), "utf8"));
+  w.eval([
+    liftVar("THEME_KEY"), liftVar("selfServerName"), liftVar("selfServerBadge"), liftVar("faviconWithBadge"), liftVar("badgeEditable"),
+    ...["currentTheme", "setTheme", "applyFavicon", "ownServerBadge", "settingsRow", "settingsSwitch", "renderServerBadgeSettings"].map(lift),
+  ].join("\n"));
+  return w;
+}
+
+function faviconOf(w: PageWindow): string {
+  return decodeURIComponent((w.document.getElementById("favicon")?.getAttribute("href") ?? "").replace(/^data:image\/svg\+xml,/, ""));
+}
+
+describe("the page's tab icon follows the app theme", () => {
+  it("regenerates the data URI on every theme switch", () => {
+    const w = page();
+    w.eval("applyFavicon()");
+    expect(faviconOf(w)).toBe(m.faviconSvg(null, "dark"));
+    w.eval("setTheme('light')");
+    expect(w.document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(faviconOf(w)).toBe(m.faviconSvg(null, "light"));
+    w.eval("setTheme('dark')");
+    expect(faviconOf(w)).toBe(m.faviconSvg(null, "dark"));
+  });
+  it("keeps the badge across a switch when the badge option is on", () => {
+    const w = page();
+    w.eval("selfServerName = 'ramiy530'; faviconWithBadge = true; setTheme('light')");
+    expect(faviconOf(w)).toBe(m.faviconSvg(m.defaultBadge("ramiy530"), "light"));
+  });
+});
+
+describe("the Settings badge editor and the token kind", () => {
+  function render(editable: boolean): HTMLElement {
+    const w = page();
+    w.eval(`selfServerName = 'ramiy530'; badgeEditable = ${editable};`);
+    const part = w.document.createElement("div");
+    w.document.body.appendChild(part);
+    (w.eval("renderServerBadgeSettings") as (p: HTMLElement) => void)(part);
+    return part;
+  }
+  it("a configured token gets every control, and no lock line", () => {
+    const part = render(true);
+    const controls = Array.from(part.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input, button"));
+    expect(controls.length).toBeGreaterThan(8);
+    expect(controls.every((c) => !c.disabled)).toBe(true);
+    expect(part.querySelector("#settings-badge-locked")).toBeNull();
+  });
+  it("a served (auto) token gets every control disabled and a one-line reason", () => {
+    const part = render(false);
+    const controls = Array.from(part.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input, button"));
+    expect(controls.length).toBeGreaterThan(8);
+    expect(controls.every((c) => c.disabled)).toBe(true);
+    const why = part.querySelector("#settings-badge-locked");
+    expect(why?.textContent).toMatch(/JOIND_WEB_TOKEN/);
+    expect(part.firstChild).toBe(why);
   });
 });

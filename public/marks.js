@@ -129,15 +129,19 @@
     });
   }
 
-  // The favicon: the outlined hexagon in the accent (the darker accent on a
-  // light tab strip, the lighter one on a dark strip, by the SVG's own
-  // colour-scheme query), with a faint fill so it holds at 16 px. With a
-  // badge, the server's code on its colour in the top corner.
-  function faviconSvg(badge) {
+  // The favicon: the outlined hexagon in the accent, with a faint fill so it
+  // holds at 16 px. With theme 'light' or 'dark' it takes that theme's accent
+  // (the page passes its own data-theme); with no theme, the SVG's own
+  // colour-scheme query picks one (the static icon in index.html, before the
+  // page runs). With a badge, the server's code on its colour in the corner.
+  function faviconSvg(badge, theme) {
     var b = validBadge(badge);
+    var light = '.h{stroke:' + ACCENT_LIGHT + ';fill:' + ACCENT_LIGHT + '}';
+    var dark = '.h{stroke:' + ACCENT_DARK + ';fill:' + ACCENT_DARK + '}';
+    var style = theme === 'light' ? light : theme === 'dark' ? dark : light + '@media (prefers-color-scheme:dark){' + dark + '}';
     var parts = [
       "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>",
-      '<style>.h{stroke:' + ACCENT_LIGHT + ';fill:' + ACCENT_LIGHT + '}@media (prefers-color-scheme:dark){.h{stroke:' + ACCENT_DARK + ';fill:' + ACCENT_DARK + '}}</style>',
+      '<style>' + style + '</style>',
       "<path class='h' fill-opacity='0.16' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='" + HEX_PATH + "'/>"
     ];
     if (b) {
@@ -148,8 +152,8 @@
     return parts.join('');
   }
 
-  function faviconHref(badge) {
-    return 'data:image/svg+xml,' + encodeURIComponent(faviconSvg(badge));
+  function faviconHref(badge, theme) {
+    return 'data:image/svg+xml,' + encodeURIComponent(faviconSvg(badge, theme));
   }
 
   // --- DOM builders -----------------------------------------------------
