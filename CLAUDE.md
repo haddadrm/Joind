@@ -117,7 +117,11 @@ that passed the token check gets that far) and the page adopts it before it conn
 `init`, never on open; 4401 with an injected token reloads once (`joind-token-reload` in
 sessionStorage), else drops the token, shows the `#auth-banner` and prompts; 4403 re-registers
 (adopting) and after three in a row stops on the banner. Any 401, or a 403 `unauthorized`, while
-a token is held shows the banner. Entering a token re-runs the boot reads. Browser smoke:
+a token is held shows the banner, unless the request went out before the banner last cleared
+(`authEpoch`) or with a token since replaced. A typed token is kept in page memory too, so blocked
+storage cannot lose it. One register-and-connect attempt at a time (`sessionAttempt`): a newer one
+supersedes, a replaced socket is closed and ignored, and sign out closes every socket the tab
+opened. Entering a token re-runs the boot reads. Browser smoke:
 `tools/web-smoke/` (Playwright, ephemeral port, see its README).
 
 ## REST API
