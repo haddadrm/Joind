@@ -309,3 +309,114 @@ describe("the two shared helpers", () => {
     expect(await run(`okJson(${resp(500, null)})`)).toEqual({ error: "HTTP 500" });
   });
 });
+
+// --- round 2 (Codex gate 1 on ff524c4) ---------------------------------------
+
+describe("a late selection failure never wipes a newer socket snapshot (gate 1 finding 2)", () => {
+  const SRC = `
+var convSelectSeq = 0, socketInitCount = 0, historyView = null, jumpSeq = 0, historyExitSeq = 0;
+var pendingGeneration = 0, activeDm = null, lastRenderedDayKey = null;
+var activeConversation = { id: 'r', name: 'ops' };
+function myName() { return 'Rami'; }
+function nextPendingSeq() { return 0; }
+function findConversationMeta() { return null; }
+function isMobileView() { return false; }
+function clearRoomUnread() {}
+function leavePageFor() {}
+function showComposerError() {}
+function clearReply() {}
+function clearImagePreview() {}
+function resetRoomTasks(id) { count('resetRoomTasks', [id]); }
+` + lift("selectConversation") + "\n" + lift("showRoomLoadError");
+
+  interface Settle { answer(a: Answer): void; fail(): void }
+  /** The select request stays pending until the test settles it. */
+  function deferredPage(): { api: PageApi; win: Window & typeof globalThis; pending: Settle[] } {
+    const pending: Settle[] = [];
+    const page = makePage('<div id="messages"></div>', SRC, () => REFUSED);
+    page.win.fetch = ((): Promise<unknown> => new Promise((resolve, reject) => {
+      pending.push({
+        answer: (a) => resolve({ status: a.status, ok: a.status >= 200 && a.status < 300, json: () => Promise.resolve(JSON.parse(JSON.stringify(a.body ?? null))) }),
+        fail: () => reject(new TypeError("Failed to fetch")),
+      });
+    })) as unknown as typeof fetch;
+    return { ...page, pending };
+  }
+  /** What a socket init paints for the room while the select is in flight. */
+  const initPaints = (api: PageApi): void => {
+    api.run("socketInitCount += 1; document.getElementById('messages').textContent = 'fresh socket init messages';");
+  };
+  const pane = (win: Window & typeof globalThis): string => win.document.getElementById("messages")?.textContent ?? "";
+  const ROOM_ERROR = "Could not load this room. Select it again to retry.";
+
+  const endings: Array<[string, (s: Settle) => void]> = [
+    ["a delayed refusal", (s) => s.answer(UNAUTHORIZED)],
+    ["a delayed network rejection", (s) => s.fail()],
+  ];
+  for (const [label, settleIt] of endings) {
+    it(`${label} after an init for the same room keeps the init's messages`, async () => {
+      const { api, win, pending } = deferredPage();
+      api.run("selectConversation('r')");
+      expect(pane(win)).toBe("Loading...");
+      initPaints(api);
+      settleIt(pending[0]);
+      await settle();
+      expect(pane(win)).toBe("fresh socket init messages");
+    });
+
+    it(`${label} with no init meanwhile still shows the room error`, async () => {
+      const { api, win, pending } = deferredPage();
+      api.run("selectConversation('r')");
+      settleIt(pending[0]);
+      await settle();
+      expect(pane(win)).toBe(ROOM_ERROR);
+    });
+  }
+
+  it("a superseded selection's failure stays silent (selection sequencing kept)", async () => {
+    const { api, win, pending } = deferredPage();
+    api.run("selectConversation('r')");
+    api.run("selectConversation('r')");
+    pending[0].answer(REFUSED);
+    await settle();
+    expect(pane(win)).toBe("Loading...");
+    pending[1].fail();
+    await settle();
+    expect(pane(win)).toBe(ROOM_ERROR);
+  });
+
+  it("an init that lands in another room does not hide this room's failure", async () => {
+    const { api, win, pending } = deferredPage();
+    api.run("selectConversation('r')");
+    api.run("socketInitCount += 1; activeConversation = { id: 'other', name: 'x' };");
+    pending[0].answer(REFUSED);
+    await settle();
+    expect(pane(win)).toBe(ROOM_ERROR);
+  });
+});
+
+describe("the Decisions page keeps its lists on a refusal", () => {
+  const SRC = `
+var pageNow = 'decisions';
+var decisionsPage = { view: 'waiting', lists: { waiting: [{ id: 1 }], open: [{ id: 2 }], closed: [{ id: 3 }] }, seq: 0 };
+function renderDecisionViews() { count('renderDecisionViews'); }
+function renderDecisionsPage() { count('renderDecisionsPage'); }
+` + lift("loadDecisionsPage");
+
+  for (const [label, answer] of [["a 401", REFUSED], ["a 403 unauthorized", UNAUTHORIZED], ["a 500 with an HTML body", HTML_500]] as const) {
+    it(`${label} keeps every list (it used to empty them)`, async () => {
+      const { api } = makePage("", SRC, () => answer);
+      api.run("loadDecisionsPage()");
+      await settle();
+      expect((api.v("decisionsPage") as { lists: unknown }).lists).toEqual({ waiting: [{ id: 1 }], open: [{ id: 2 }], closed: [{ id: 3 }] });
+    });
+  }
+
+  it("accepted lists still land", async () => {
+    const { api } = makePage("", SRC, () => ({ status: 200, body: { decisions: [{ id: 9 }] } }));
+    api.run("loadDecisionsPage()");
+    await settle();
+    expect((api.v("decisionsPage") as { lists: unknown }).lists).toEqual({ waiting: [{ id: 9 }], open: [{ id: 9 }], closed: [{ id: 9 }] });
+    expect(callsOf(api).renderDecisionsPage).toBe(1);
+  });
+});

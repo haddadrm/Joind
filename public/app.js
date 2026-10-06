@@ -4635,9 +4635,11 @@ function loadDecisionsPage() {
     closed: '/api/decisions?state=resolved&for=&token=' + tok,
   };
   Object.keys(urls).forEach(function(k) {
-    fetch(urls[k]).then(function(r) { return r.ok ? r.json() : { decisions: [] }; }).then(function(d) {
+    // A refused or unreadable answer keeps the list on screen (an error body
+    // is not an empty list); a list never loaded shows as empty.
+    fetch(urls[k]).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
       if (seq !== decisionsPage.seq) return; // a newer load is under way
-      decisionsPage.lists[k] = (d && Array.isArray(d.decisions)) ? d.decisions : [];
+      decisionsPage.lists[k] = (d && Array.isArray(d.decisions)) ? d.decisions : (decisionsPage.lists[k] || []);
       renderDecisionViews();
       if (pageNow === 'decisions' && k === decisionsPage.view) renderDecisionsPage();
     }).catch(function() {
@@ -6646,12 +6648,14 @@ function selectConversation(id, after) {
   fetch('/api/conversations/select', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id, viewer: myName(), token: webToken() }) }).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
       if (mySelect !== convSelectSeq) return; // superseded by a newer selection
-      if (!data) { showRoomLoadError(); return; } // refused: say so, not an endless Loading
+      // Refused: say so, not an endless Loading, unless an init repainted
+      // this room meanwhile (its messages are newer than any answer here).
+      if (!data) { if (!initRepainted()) showRoomLoadError(); return; }
       // A reconnect during the request re-sent init for this same room: the
       // screen already holds newer messages and queue than this response.
       // Only the snapshot is stale: room-scoped state that init does not
       // reset (the task list and panel) still switches to this room.
-      if (initsAtStart !== socketInitCount && activeConversation && activeConversation.id === id) {
+      if (initRepainted()) {
         resetRoomTasks(id);
         return;
       }
@@ -6672,7 +6676,11 @@ function selectConversation(id, after) {
         resetRoomTasks(activeConversation.id);
         if (typeof after === 'function' && activeConversation.id === id) after();
       }
-    }).catch(function() { if (mySelect === convSelectSeq) showRoomLoadError(); });
+    }).catch(function() { if (mySelect === convSelectSeq && !initRepainted()) showRoomLoadError(); });
+  // True once a socket init has painted this room since the request went out.
+  function initRepainted() {
+    return initsAtStart !== socketInitCount && !!activeConversation && activeConversation.id === id;
+  }
 }
 
 // The room's messages could not be loaded (refused, or no server): replace
