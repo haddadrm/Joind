@@ -22,6 +22,7 @@ import { JSDOM } from "jsdom";
 const PUB = join(__dirname, "..", "public");
 const APP = readFileSync(join(PUB, "app.js"), "utf8").replace(/\r\n?/g, "\n");
 const HELPERS = readFileSync(join(PUB, "ui-helpers.js"), "utf8");
+const MARKS = readFileSync(join(PUB, "marks.js"), "utf8");
 const TOKEN = "a".repeat(64);
 
 // --- pure helpers -------------------------------------------------------
@@ -136,15 +137,18 @@ const LIFTED_FUNCTIONS = [
   "reconcileVisibleViews", "renderPage", "loadBoard", "loadTasks", "taskRoomIsCurrent",
   "postComposerSend", "uploadFile", "addImageFiles", "clearImagePreview", "scanTerminals", "startAutoScan", "autoScanTerminals",
   "newSessionAbort", "sessionSignal", "abortError", "isAbortError", "sameSession", "releaseSessionLocks",
+  "jsonOr", "quietAbort", "fenceBody",
+  "loadTaskCount", "openImportDialog", "renderServerBadgeSettings", "settingsRow", "settingsSwitch", "ownServerBadge",
 ];
 const LIFTED_VARS = [
   "ws", "wsName", "pendingRename", "renameAttempt", "wsAuthFailures", "reconnectTimer",
   "injectedTokenStale", "TOKEN_RELOAD_KEY", "TOKEN_REFUSED_TEXT", "tokenPromptAfter",
   "bootTokenPrompted", "signedOut", "setMyName", "crewRoster", "sessionTemplates",
-  "typedWebToken", "authEpoch", "sessionAttempt", "tabSockets", "sessionGeneration", "reconcileOnInit",
+  "typedWebToken", "authEpoch", "sessionAttempt", "tabSockets", "sessionReaders", "searchDebounce", "sessionGeneration", "reconcileOnInit",
   "pageNow", "PAGES", "board", "tasks", "taskFilter", "taskPanelOpen",
   "composerSendInFlight", "pendingImages", "imageUploadsInFlight", "MAX_COMPOSER_IMAGES", "MAX_UPLOAD_BYTES",
   "replyingTo", "pendingGeneration", "lastScanResults", "autoScanRunning", "sessionAbort",
+  "selfServerName", "selfServerBadge", "faviconWithBadge", "badgeEditable",
 ];
 
 // What the init handler and the rest touch, stubbed (counted where useful).
@@ -164,7 +168,8 @@ function renderPills() {}
 function refreshDmThread() {}
 function renderMessages() {}
 function renderPendingForActive() {}
-function renderTaskBadgeFromCount() {}
+var taskBadgeCount = null;
+function renderTaskBadgeFromCount(n) { taskBadgeCount = n; count('renderTaskBadgeFromCount'); }
 function resetRoomTasks() {}
 function showNoConversation() {}
 function renderConversationList() { count('renderConversationList'); }
@@ -204,6 +209,9 @@ function onComposerQueued() { count('onComposerQueued'); }
 function nextPendingSeq() { return 1; }
 function attachmentsRefusedHere() { return false; }
 function renderTerminals() { count('renderTerminals'); }
+var appliedMarks = [];
+function applyInstanceMarks(info) { if (info) appliedMarks.push(info); }
+function alert(t) { count('alert'); }
 `;
 
 interface FakeSocket {
@@ -236,6 +244,8 @@ interface Page {
   route: (url: string, method: string) => FakeAnswer | Promise<FakeAnswer>;
   /** False: the fake fetch ignores init.signal (a fetch that cannot be cancelled). */
   honourSignal: boolean;
+  /** FileReader reads started and not yet completed by the test. */
+  readers: Array<{ reader: { result: string | null; aborted: boolean; onload: (() => void) | null }; text: string }>;
   flush(): Promise<void>;
   runTimers(): Promise<void>;
   last(): FakeSocket;
@@ -247,7 +257,7 @@ interface Page {
 }
 
 type StorageFault = "throw-read" | "throw-write" | "throw-all";
-interface PageOptions { injected?: string; sessionToken?: string; reloadFlag?: boolean; name?: string; storage?: StorageFault }
+interface PageOptions { injected?: string; sessionToken?: string; reloadFlag?: boolean; name?: string; storage?: StorageFault; noAbortController?: boolean }
 
 /** A sessionStorage whose reads, writes or both throw (storage blocked). */
 function faultyStorage(fault: StorageFault): Storage {
@@ -270,7 +280,8 @@ function makePage(opts: PageOptions = {}): Page {
     '<!doctype html><html><body><div id="connection-dot"></div><div id="you-pill"></div><span id="you-name-display"></span>' +
     '<span id="you-avatar"></span><input id="sender-name" type="hidden" value="human"><div id="template-list"></div>' +
     '<div id="session-status"></div><span id="instance-name"></span><div id="rail-brand"></div><div class="app"></div>' +
-    '<textarea id="message-input"></textarea><button id="scan-btn">Scan</button></body></html>',
+    '<textarea id="message-input"></textarea><button id="scan-btn">Scan</button>' +
+    '<input type="file" id="import-file-input"><div id="settings-server-badge-part"></div></body></html>',
     { runScripts: "outside-only", url: "http://joind.test/" },
   );
   const win = dom.window as unknown as Window & typeof globalThis & Record<string, unknown>;
@@ -279,6 +290,7 @@ function makePage(opts: PageOptions = {}): Page {
   if (opts.name) win.localStorage.setItem("joind-sender-name", opts.name);
   if (opts.injected) win.__JOIND_TOKEN = opts.injected;
   if (opts.storage) Object.defineProperty(win, "sessionStorage", { configurable: true, value: faultyStorage(opts.storage) });
+  if (opts.noAbortController) Object.defineProperty(win, "AbortController", { configurable: true, value: undefined });
 
   const page = {
     win, sockets: [] as FakeSocket[], fetches: [] as FetchCall[], timers: [] as Timer[], intervals: [] as Interval[], reloads: 0,
@@ -342,6 +354,17 @@ function makePage(opts: PageOptions = {}): Page {
   }) as unknown as typeof fetch;
 
   win.eval(HELPERS);
+  win.eval(MARKS);
+  // FileReader: the test decides when a read completes (page.readers).
+  page.readers = [];
+  class FakeReader {
+    result: string | null = null;
+    aborted = false;
+    onload: (() => void) | null = null;
+    readAsText(file: { text: string }): void { page.readers.push({ reader: this, text: file.text }); }
+    abort(): void { this.aborted = true; }
+  }
+  win.FileReader = FakeReader as unknown as typeof FileReader;
   const prelude = LIFTED_VARS.map(liftVar).join("\n");
   const body = LIFTED_FUNCTIONS.map(lift).join("\n");
   win.eval(
@@ -810,7 +833,7 @@ function miniPage(src: string, ans: FakeAnswer): PageApi {
     status: ans.status, ok: ans.status >= 200 && ans.status < 300,
     json: (): Promise<unknown> => Promise.resolve(JSON.parse(JSON.stringify(ans.body ?? null))),
   })) as unknown as typeof fetch;
-  win.eval("(function() {\nvar calls = {};\nfunction count(n) { calls[n] = (calls[n] || 0) + 1; }\n" + src +
+  win.eval("(function() {\nvar calls = {};\nfunction count(n) { calls[n] = (calls[n] || 0) + 1; }\nvar sessionGeneration = 0;\n" + lift("sameSession") + "\n" + src +
     "\nwindow.__page = { v: function(n) { return eval(n); }, run: function(s) { return eval(s); } };\n})();");
   return win.__page as PageApi;
 }
@@ -1328,5 +1351,172 @@ describe("round 3 (gate 2): a cancelled request is silent", () => {
     const f = page.fetches[page.fetches.length - 1];
     expect(f.signal).toBeNull();
     expect(f.token).toBeNull();
+  });
+});
+
+// --- round 4 (gate 3): nothing the old session started acts after a resume ---
+
+describe("round 4 (gate 3): no old-session operation acts in the resumed session", () => {
+  type Held = (a: FakeAnswer) => void;
+  function server(page: Page, held: Map<string, Held[]>, fresh: Record<string, unknown> = {}): void {
+    page.route = (url: string): FakeAnswer | Promise<FakeAnswer> => {
+      for (const [prefix, queue] of held) {
+        if (url.indexOf(prefix) === 0) return new Promise<FakeAnswer>((r) => { queue.push(r); });
+      }
+      if (url === "/api/web/register") return { status: 200, body: { ok: true, name: "Rami" } };
+      for (const [prefix, body] of Object.entries(fresh)) if (url.indexOf(prefix) === 0) return { status: 200, body };
+      return { status: 200, body: [] };
+    };
+  }
+  function initInRoom(page: Page): void {
+    page.last().onmessage?.({ data: JSON.stringify({ type: "init", data: {
+      agents: [], messages: [], conversations: [{ id: "c1", name: "ops" }], activeConversation: { id: "c1", name: "ops" },
+    } }) });
+  }
+  async function signedIn(page: Page): Promise<void> {
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); initInRoom(page);
+    await page.flush();
+  }
+  async function signOutAndResume(page: Page, token = TOKEN): Promise<void> {
+    signOutAndPressSignIn(page);
+    await page.flush();
+    typeToken(page, token);
+    await page.flush();
+    page.open(); initInRoom(page);
+    await page.flush();
+  }
+  /** Route one URL prefix to an answer whose body waits; restore() puts the
+   *  old route back for later reads, open() lets the held body through. */
+  function gateBody(page: Page, prefix: string, a: FakeAnswer): { restore(): void; open(): void } {
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((r) => { open = r; });
+    const route = page.route;
+    page.route = (url: string, method: string): FakeAnswer | Promise<FakeAnswer> =>
+      url.indexOf(prefix) === 0 ? { ...a, bodyGate: gate } : route(url, method);
+    return { restore: () => { page.route = route; }, open: () => open() };
+  }
+  const urls = (page: Page): string[] => page.fetches.map((f) => f.url);
+  const NEW_TOKEN = "b".repeat(64);
+  const MODES = [["cancellable", true], ["uncancellable", false]] as const;
+
+  function chooseImport(page: Page): void {
+    page.api.run("openImportDialog()");
+    const input = page.win.document.getElementById("import-file-input") as HTMLInputElement & { onchange: (() => void) | null };
+    Object.defineProperty(input, "files", { configurable: true, value: [{ text: JSON.stringify({ messages: [{ text: "old import" }] }) }] });
+    input.onchange?.();
+  }
+
+  it("finding 1: a file read still pending at sign out is aborted, and its late load starts no request", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all" });
+    server(page, new Map());
+    await signedIn(page);
+    chooseImport(page);
+    expect(page.readers).toHaveLength(1);
+    const { reader, text } = page.readers[0];
+    await signOutAndResume(page, NEW_TOKEN);
+    expect(reader.aborted).toBe(true);
+    reader.result = text; // a load the abort did not stop
+    reader.onload?.();
+    await page.flush();
+    expect(urls(page).filter((u) => u.indexOf("/api/conversations/") === 0)).toEqual([]);
+    expect((page.api.v("calls") as Record<string, number>).alert ?? 0).toBe(0);
+  });
+
+  for (const [mode, honour] of MODES) {
+    it(`finding 1 (${mode}): an import answered after the resume never selects the imported room with the new token`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      const held = new Map<string, Held[]>([["/api/conversations/import", []]]);
+      server(page, held);
+      await signedIn(page);
+      chooseImport(page);
+      const { reader, text } = page.readers[0];
+      reader.result = text;
+      reader.onload?.();
+      expect(held.get("/api/conversations/import")!).toHaveLength(1);
+      await signOutAndResume(page, NEW_TOKEN);
+      held.get("/api/conversations/import")![0]({ status: 200, body: { conversation: { id: "imported-old" } } });
+      await page.flush();
+      expect(urls(page)).not.toContain("/api/conversations/select");
+      expect((page.api.v("calls") as Record<string, number>).alert ?? 0).toBe(0);
+    });
+
+    it(`finding 2 (${mode}): an old crew roster body never replaces the resumed session's roster`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      server(page, new Map(), { "/api/crew": [{ name: "fresh" }] });
+      await signedIn(page);
+      const old = gateBody(page, "/api/crew", { status: 200, body: [{ name: "old" }] });
+      page.api.run("loadCrewRoster()");
+      await page.flush(); // headers in, body held
+      old.restore();
+      await signOutAndResume(page);
+      expect(page.api.v("crewRoster")).toEqual([{ name: "fresh" }]);
+      old.open();
+      await page.flush();
+      expect(page.api.v("crewRoster")).toEqual([{ name: "fresh" }]);
+    });
+
+    it(`finding 2 (${mode}): an old task count body never replaces the resumed session's badge`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      server(page, new Map(), { "/api/tasks/count": { count: 7, hasUrgent: false } });
+      await signedIn(page);
+      const old = gateBody(page, "/api/tasks/count", { status: 200, body: { count: 1, hasUrgent: false } });
+      page.api.run("loadTaskCount('c1')");
+      await page.flush();
+      old.restore();
+      await signOutAndResume(page);
+      page.api.run("loadTaskCount('c1')");
+      await page.flush();
+      expect(page.api.v("taskBadgeCount")).toBe(7);
+      old.open();
+      await page.flush();
+      expect(page.api.v("taskBadgeCount")).toBe(7);
+    });
+
+    it(`finding 2 (${mode}): a badge save answered after the resume applies nothing and writes nothing into the new settings`, async () => {
+      const page = makePage({ name: "Rami", storage: "throw-all" });
+      page.honourSignal = honour;
+      server(page, new Map());
+      await signedIn(page);
+      const part = (): HTMLElement => page.win.document.getElementById("settings-server-badge-part")!;
+      page.api.run("selfServerName = 'Joind'; renderServerBadgeSettings(document.getElementById('settings-server-badge-part'))");
+      const old = gateBody(page, "/api/instance/badge", { status: 200, body: { name: "old", badge: { code: "OL", color: "#123456" }, faviconBadge: false } });
+      const save = Array.from(part().querySelectorAll("button")).find((b) => b.textContent === "Save")!;
+      save.click();
+      await page.flush();
+      expect(page.fetches.filter((f) => f.url === "/api/instance/badge")).toHaveLength(1);
+      old.restore();
+      await signOutAndResume(page);
+      // The settings opened again in the resumed session.
+      part().textContent = "";
+      page.api.run("renderServerBadgeSettings(document.getElementById('settings-server-badge-part'))");
+      (part().querySelector(".badge-status") as HTMLElement).textContent = "Fresh";
+      old.open();
+      await page.flush();
+      expect(page.api.v("appliedMarks")).toEqual([]);
+      expect((part().querySelector(".badge-status") as HTMLElement).textContent).toBe("Fresh");
+    });
+  }
+});
+
+describe("round 4 (gate 3): without AbortController, Sign in reloads instead of resuming", () => {
+  it("no AbortController: Sign in after sign out reloads the page", async () => {
+    const page = makePage({ name: "Rami", storage: "throw-all", noAbortController: true });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    typeToken(page, TOKEN);
+    await page.flush();
+    page.open(); page.init();
+    await page.flush();
+    signOutAndPressSignIn(page);
+    expect(page.reloads).toBe(1);
+    expect(page.prompt()).toBeNull();
   });
 });

@@ -41,7 +41,7 @@ function count(n, a) { calls[n] = (calls[n] || 0) + 1; if (a) args[n] = a; }
 function webToken() { return 'tok'; }
 function showRefNotice(t) { count('showRefNotice', [t]); }
 var sessionGeneration = 0;
-` + lift("sameSession") + "\n" + lift("isAbortError") + `
+` + lift("sameSession") + "\n" + lift("isAbortError") + "\n" + lift("jsonOr") + "\n" + lift("quietAbort") + `
 `;
 
 function makePage(html: string, src: string, route: Route): { api: PageApi; win: Window & typeof globalThis } {

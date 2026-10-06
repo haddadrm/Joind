@@ -161,6 +161,9 @@ var authEpoch = 0;
 var sessionAttempt = 0;
 // Every socket this tab opened that has not closed yet: sign out closes all.
 var tabSockets = [];
+// File reads (FileReader) this session started that have not loaded yet:
+// sign out aborts them, so no old read starts a request in the next session.
+var sessionReaders = [];
 // Signed-in sessions of this tab, bumped on sign out. Sign out also aborts
 // every /api/ request the session still has in flight (sessionAbort): each
 // one rejects with an AbortError, so its catch and finally paths release
@@ -168,6 +171,8 @@ var tabSockets = [];
 // completion that still runs after a resume (a body read the browser could
 // not cancel) checks the generation it started in (sameSession) before it
 // touches the page, so nothing the old session asked for paints over the new.
+// Every /api/ body read is fenced the same way (the fetch wrapper): a body
+// that arrives after a sign out rejects as cancelled instead of resolving.
 var sessionGeneration = 0;
 var sessionAbort = newSessionAbort();
 // Set when Sign in resumes in place: the first init after it reconciles the
@@ -205,8 +210,9 @@ function clearTokenReload() {
   try { sessionStorage.removeItem(TOKEN_RELOAD_KEY); } catch (e) { /* storage unavailable */ }
 }
 
-// One AbortController per signed-in session (null where the browser has
-// none: the generation checks below still hold).
+// One AbortController per signed-in session. Null only where the browser
+// has none: Sign in then reloads the page instead of resuming in place
+// (showSignedOut), so no request of an old session outlives it.
 function newSessionAbort() {
   return typeof AbortController === 'function' ? new AbortController() : null;
 }
@@ -246,6 +252,41 @@ function sameSession(generation) {
   return generation === sessionGeneration;
 }
 
+// An answer's JSON body, or `fallback` when the body is not JSON. A read
+// cancelled by sign out stays a cancellation (AbortError): it never turns
+// into empty data a caller would paint or act on.
+function jsonOr(r, fallback) {
+  return r.json().catch(function(err) {
+    if (isAbortError(err)) throw err;
+    return fallback;
+  });
+}
+
+// The last catch of a request nobody waits on: a cancellation is silent,
+// any other failure still surfaces.
+function quietAbort(err) {
+  if (!isAbortError(err)) throw err;
+}
+
+// Fence an /api/ answer's body reads to the session it was sent in: a body
+// that arrives after a sign out rejects as cancelled (see sessionGeneration).
+function fenceBody(r, generation) {
+  ['json', 'text'].forEach(function(k) {
+    var read = r && r[k];
+    if (typeof read !== 'function') return;
+    r[k] = function() {
+      return read.call(r).then(function(v) {
+        if (!sameSession(generation)) throw abortError();
+        return v;
+      }, function(err) {
+        if (!sameSession(generation)) throw abortError();
+        throw err;
+      });
+    };
+  });
+  return r;
+}
+
 // Every request this page makes to its own /api/ carries the web token in
 // the X-Joind-Token header: the server refuses web writes without it. Only
 // same-origin relative URLs get it, never another host. It also carries the
@@ -276,7 +317,7 @@ function sameSession(generation) {
       // A refused token while one is held means it is stale or wrong: say
       // so on the page instead of leaving an empty list and a spinner.
       if (held && !signedOut && (r.status === 401 || r.status === 403)) noteRefusedAnswer(r, epoch, held);
-      return r;
+      return ours ? fenceBody(r, generation) : r;
     }, function(err) {
       if (fromOldSession()) throw abortError();
       throw err;
@@ -310,7 +351,7 @@ var TOKEN_REFUSED_TEXT = 'This server refused the web token: it changed, or it w
 // A refused answer (not r.ok) as { error }: the server's own message when its
 // body has one, else the HTTP status. For handlers that already read `.error`.
 function refusalBody(r) {
-  return r.json().catch(function() { return null; }).then(function(b) {
+  return jsonOr(r, null).then(function(b) {
     return { error: (b && typeof b.error === 'string' && b.error) || ('HTTP ' + r.status) };
   });
 }
@@ -465,7 +506,9 @@ function bootSession() {
 
 // The instance name in the header and the page title.
 function loadInstanceInfo() {
+  var generation = sessionGeneration;
   fetch('/api/instance').then(function(r) { return r.ok ? r.json() : null; }).then(function(info) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     if (!info || !info.name) return;
     var el = document.getElementById('instance-name');
     if (el) el.textContent = info.name;
@@ -488,7 +531,7 @@ function registerWebName(after) {
   fetch('/api/web/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token: webToken(), name: name }) })
     .then(function(r) {
-      return r.json().catch(function() { return null; }).then(function(body) {
+      return jsonOr(r, null).then(function(body) {
         if (attempt !== sessionAttempt || signedOut) return; // superseded
         var out = window.joindUi ? window.joindUi.registerOutcome(r.status, body, name) : { kind: r.ok ? 'ok' : 'error', name: name };
         if (out.kind === 'adopt') adoptRegisteredName(out.name);
@@ -1600,7 +1643,7 @@ function showPopover(anchor, agent) {
       var newName = renameInput.value.trim();
       if (newName && newName !== agent.name) {
         fetch('/api/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(Object.assign({ oldName: agent.name, newName: newName }, activeConversation && activeConversation.id ? { conversation: activeConversation.id } : {})) });
+          body: JSON.stringify(Object.assign({ oldName: agent.name, newName: newName }, activeConversation && activeConversation.id ? { conversation: activeConversation.id } : {})) }).catch(quietAbort);
       }
       closePopover();
     }
@@ -1637,7 +1680,7 @@ function showPopover(anchor, agent) {
     btn.addEventListener('click', function() {
       var newRole = r.label === 'clear' ? '' : r.label;
       fetch('/api/role', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: agent.name, role: newRole }) });
+        body: JSON.stringify({ name: agent.name, role: newRole }) }).catch(quietAbort);
       closePopover();
     });
     roleGrid.appendChild(btn);
@@ -1656,7 +1699,7 @@ function showPopover(anchor, agent) {
   customInput.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') {
       fetch('/api/role', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: agent.name, role: customInput.value.trim() }) });
+        body: JSON.stringify({ name: agent.name, role: customInput.value.trim() }) }).catch(quietAbort);
       closePopover();
     }
   });
@@ -1995,7 +2038,7 @@ function appendMessage(msg, scroll) {
         headers: { 'Content-Type': 'application/json' },
         // The message's own room: a DM pane mixes rooms.
         body: JSON.stringify({ id: msg.id, conversation: el.dataset.conv || undefined })
-      });
+      }).catch(quietAbort);
     });
     actions.appendChild(delBtn);
 
@@ -2403,7 +2446,9 @@ function pasteImageFromClipboard() {
     showComposerNote('Press Ctrl+V (Cmd+V on a Mac) in the message box to paste an image.');
   };
   if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') { fallback(); return; }
+  var generation = sessionGeneration;
   navigator.clipboard.read().then(function(items) {
+    if (!sameSession(generation)) return; // signed out while the clipboard was read
     var blobs = [];
     var reads = [];
     items.forEach(function(item) {
@@ -2411,12 +2456,13 @@ function pasteImageFromClipboard() {
       if (type) reads.push(item.getType(type).then(function(b) { blobs.push(new File([b], 'pasted.' + type.split('/')[1], { type: type })); }));
     });
     return Promise.all(reads).then(function() {
+      if (!sameSession(generation)) return;
       if (blobs.length === 0) { showComposerNote('No image on the clipboard.'); input.focus(); return; }
       showComposerNote('');
       addImageFiles(blobs);
       input.focus();
     });
-  }).catch(fallback);
+  }).catch(function() { if (sameSession(generation)) fallback(); });
 }
 
 // A message's images as a grid of thumbnails, each opening the viewer. In
@@ -2825,7 +2871,7 @@ function postComposerSend(url, payload, draft) {
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) })
     .then(function(r) {
-      return r.json().catch(function() { return {}; }).then(function(body) {
+      return jsonOr(r, {}).then(function(body) {
         return { ok: r.ok, status: r.status, body: body || {} };
       });
     })
@@ -2916,7 +2962,7 @@ function postDecisionCard(question, choices) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  });
+  }).catch(quietAbort);
 }
 
 function toggleDecidePopover() {
@@ -3019,8 +3065,14 @@ function openImportDialog() {
   input.onchange = function() {
     var file = input.files && input.files[0];
     if (!file) return;
+    // The read belongs to this session: sign out aborts it (sessionReaders),
+    // and a load that still fires after that starts nothing.
+    var generation = sessionGeneration;
     var reader = new FileReader();
+    sessionReaders.push(reader);
     reader.onload = function() {
+      sessionReaders = sessionReaders.filter(function(x) { return x !== reader; });
+      if (!sameSession(generation)) return;
       try {
         var bundle = JSON.parse(String(reader.result));
         fetch('/api/conversations/import', {
@@ -3031,16 +3083,17 @@ function openImportDialog() {
           if (!r.ok) return r.json().then(function(j) { throw new Error(j.error || 'Import failed'); });
           return r.json();
         }).then(function(result) {
+          if (!sameSession(generation)) return; // never select with a newer session's token
           if (result && result.conversation) {
             // Switch to the imported conversation
             fetch('/api/conversations/select', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ id: result.conversation.id, viewer: myName(), token: webToken() }),
-            });
+            }).catch(quietAbort);
           }
         }).catch(function(err) {
-          if (isAbortError(err)) return;
+          if (isAbortError(err) || !sameSession(generation)) return;
           alert('Import failed: ' + err.message);
         });
       } catch (err) {
@@ -3347,7 +3400,7 @@ function renderRolesInto(sec) {
         renderRolesInto(sec);
         var add = document.getElementById('settings-role-label');
         if (add) add.focus();
-      });
+      }).catch(quietAbort);
     });
     chip.appendChild(label);
     chip.appendChild(del);
@@ -3387,7 +3440,7 @@ function renderRolesInto(sec) {
     status.textContent = '';
     fetch('/api/roles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emoji: em, label: lb }) })
       .then(function(resp) {
-        return resp.json().catch(function() { return {}; }).then(function(d) {
+        return jsonOr(resp, {}).then(function(d) {
           if (!resp.ok) { status.textContent = resp.status === 409 ? 'That role already exists' : (d && d.error) || 'Could not add the role'; return; }
           // The server cleans the label (lower case, hyphens): keep its role.
           var role = d && d.role && d.role.label ? d.role : { emoji: em, label: lb };
@@ -3472,7 +3525,7 @@ function buildAgentKeySection() {
   sec.appendChild(body);
   fetch('/api/agent-auth').then(function(r) { return r.ok ? r.json() : null; }).then(function(st) {
     renderAgentKeyInto(body, st);
-  }).catch(function() { renderAgentKeyInto(body, null); });
+  }).catch(function(err) { if (!isAbortError(err)) renderAgentKeyInto(body, null); });
   return sec;
 }
 
@@ -3548,7 +3601,7 @@ function renderAgentKeyInto(body, st) {
   reveal.addEventListener('click', function() {
     if (!shown.hidden) { shown.value = ''; shown.hidden = true; copy.hidden = true; reveal.textContent = 'Reveal'; return; }
     fetch('/api/agent-auth/reveal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      .then(function(r) { return r.json().catch(function() { return null; }).then(function(d) { return r.ok ? d : { error: (d && d.error) || 'Could not read the key' }; }); })
+      .then(function(r) { return jsonOr(r, null).then(function(d) { return r.ok ? d : { error: (d && d.error) || 'Could not read the key' }; }); })
       .then(function(d) {
         if (!d || !d.key) { status.textContent = (d && d.error) || 'Could not read the key'; return; }
         shown.value = d.key;
@@ -3593,7 +3646,7 @@ function renderAgentKeyInto(body, st) {
     }
     rotate.disabled = true;
     fetch('/api/agent-auth/rotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      .then(function(r) { return r.json().catch(function() { return {}; }).then(function(d) { return { ok: r.ok, d: d }; }); })
+      .then(function(r) { return jsonOr(r, {}).then(function(d) { return { ok: r.ok, d: d }; }); })
       .then(function(x) {
         if (!x.ok) { rotateStatus.textContent = (x.d && x.d.error) || 'Could not rotate'; rotate.disabled = false; return; }
         return fetch('/api/agent-auth').then(function(r) { return r.ok ? r.json() : null; }).then(function(next) {
@@ -3973,7 +4026,7 @@ function inviteTerminal(t) {
     if (t.wtSession) payload.wtSession = t.wtSession;
     // The pane travels with the GUI its scan found it in; the server binds the pair or nothing.
     if (t.weztermPaneId != null && t.weztermGui != null) { payload.weztermPaneId = t.weztermPaneId; payload.weztermGui = t.weztermGui; }
-    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(quietAbort);
   });
 }
 
@@ -3981,7 +4034,7 @@ function kickAgent(name) {
   // Only the selected conversation's member leaves; the same name elsewhere is another registration.
   var leaveBody = { name: name };
   if (activeConversation && activeConversation.id) leaveBody.conversation = activeConversation.id;
-  fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leaveBody) });
+  fetch('/api/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leaveBody) }).catch(quietAbort);
 }
 
 // --- Sidebar toggle (desktop: show/hide, mobile: drawer overlay) ---
@@ -4326,7 +4379,9 @@ var HARNESS_LABELS = { claude: 'Claude Code', codex: 'Codex CLI', gemini: 'Gemin
 var crewRoster = [];
 function loadCrewRoster() {
   // A refused read keeps the roster we have (runBootReads loads it again).
+  var generation = sessionGeneration;
   return fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(list) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     if (!Array.isArray(list)) return;
     crewRoster = list;
     refreshSenderTags();
@@ -4745,6 +4800,7 @@ var decisionsPage = { view: 'waiting', lists: { waiting: null, open: null, close
 
 function loadDecisionsPage() {
   var seq = ++decisionsPage.seq;
+  var generation = sessionGeneration;
   var tok = encodeURIComponent(webToken());
   var urls = {
     waiting: '/api/decisions?state=open&token=' + tok,
@@ -4755,12 +4811,12 @@ function loadDecisionsPage() {
     // A refused or unreadable answer keeps the list on screen (an error body
     // is not an empty list); a list never loaded shows as empty.
     fetch(urls[k]).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
-      if (seq !== decisionsPage.seq) return; // a newer load is under way
+      if (seq !== decisionsPage.seq || !sameSession(generation)) return; // a newer load, or a signed-out session
       decisionsPage.lists[k] = (d && Array.isArray(d.decisions)) ? d.decisions : (decisionsPage.lists[k] || []);
       renderDecisionViews();
       if (pageNow === 'decisions' && k === decisionsPage.view) renderDecisionsPage();
-    }).catch(function() {
-      if (seq !== decisionsPage.seq) return;
+    }).catch(function(err) {
+      if (seq !== decisionsPage.seq || !sameSession(generation) || isAbortError(err)) return;
       decisionsPage.lists[k] = decisionsPage.lists[k] || [];
       renderDecisionViews();
     });
@@ -5875,7 +5931,7 @@ function onAttachMenuKey(e) {
 function loadSnippets() {
   var seq = ++snippetsSeq;
   return fetch('/api/snippets').then(function(r) {
-    return r.json().catch(function() { return {}; }).then(function(body) {
+    return jsonOr(r, {}).then(function(body) {
       if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
       return body;
     });
@@ -6144,7 +6200,7 @@ function buildSnippetsSection() {
     var url = editing ? '/api/snippets/' + encodeURIComponent(editing) : '/api/snippets';
     save.disabled = true;
     fetch(url, { method: editing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function(r) { return r.json().catch(function() { return {}; }).then(function(b) { return { ok: r.ok, status: r.status, body: b }; }); })
+      .then(function(r) { return jsonOr(r, {}).then(function(b) { return { ok: r.ok, status: r.status, body: b }; }); })
       .then(function(res) {
         save.disabled = false;
         if (!res.ok) { fail('Not saved: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)) + '.'); return; }
@@ -6619,6 +6675,13 @@ function signOut() {
   clearInterval(sessionStatusInterval);
   clearInterval(membersTick);
   if (autoScanInterval) { clearInterval(autoScanInterval); autoScanInterval = null; }
+  // Pending timers and file reads that would start requests go too.
+  if (board.reload) { clearTimeout(board.reload); board.reload = 0; }
+  clearTimeout(searchDebounce);
+  searchDebounce = null;
+  var reads = sessionReaders;
+  sessionReaders = [];
+  reads.forEach(function(x) { try { x.abort(); } catch (e) { /* already done */ } });
   document.querySelectorAll('.session-modal-overlay, .notify-panel-overlay, .crew-panel-overlay, .launch-dialog-overlay').forEach(function(el) { el.remove(); });
   closeTabSockets();
   showSignedOut(served);
@@ -6666,7 +6729,9 @@ function showSignedOut(served) {
   btn.className = 'btn btn-primary';
   btn.textContent = 'Sign in';
   btn.addEventListener('click', function() {
-    if (served) { location.reload(); return; }
+    // Without AbortController (sessionAbort null) the old session's requests
+    // cannot be cancelled: start clean with a reload rather than resume.
+    if (served || !sessionAbort) { location.reload(); return; }
     overlay.remove();
     // Resume in place, never reload: the typed token lives in page memory
     // too, and with sessionStorage blocked a reload would lose it and ask
@@ -6900,7 +6965,7 @@ function renderConversationList() {
       customPrompt('Rename conversation:', activeConversation.name, function(newName) {
         if (newName && newName !== activeConversation.name) {
           fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: activeConversation.id, name: newName }) }).then(function() { loadConversations(); });
+            body: JSON.stringify({ id: activeConversation.id, name: newName }) }).then(function() { loadConversations(); }).catch(quietAbort);
         }
       });
     };
@@ -8009,7 +8074,7 @@ function showConvMenu(evt, conv) {
   var actions = [
     { label: (conv.starred ? '\u2606 Unstar' : '\u2605 Star'), action: function() {
       fetch('/api/conversations/star', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: conv.id, starred: !conv.starred }) }).then(function() { loadConversations(); });
+        body: JSON.stringify({ id: conv.id, starred: !conv.starred }) }).then(function() { loadConversations(); }).catch(quietAbort);
       closePopover();
     }},
     { label: '\u270E Rename', action: function() {
@@ -8017,7 +8082,7 @@ function showConvMenu(evt, conv) {
       customPrompt('Rename:', conv.name, function(newName) {
         if (newName && newName !== conv.name) {
           fetch('/api/conversations/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: conv.id, name: newName }) }).then(function() { loadConversations(); });
+            body: JSON.stringify({ id: conv.id, name: newName }) }).then(function() { loadConversations(); }).catch(quietAbort);
         }
       });
     }},
@@ -8031,7 +8096,7 @@ function showConvMenu(evt, conv) {
               showNoConversation();
             }
             loadConversations();
-          });
+          }).catch(quietAbort);
       }
       closePopover();
     }},
@@ -8060,7 +8125,9 @@ var sessionTemplates = [];
 function loadTemplates() {
   // A refused read (401 before the token is known) keeps the current list:
   // the error body is not a list. runBootReads loads it again later.
+  var generation = sessionGeneration;
   return fetch('/api/templates').then(function(r) { return r.ok ? r.json() : null; }).then(function(tmpls) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     if (!Array.isArray(tmpls)) return;
     sessionTemplates = tmpls;
     renderTemplates();
@@ -8217,7 +8284,7 @@ function startSessionUI(template) {
       } else {
         refreshSessionStatus();
       }
-    });
+    }).catch(quietAbort);
   });
 
   btnRow.appendChild(cancelBtn);
@@ -8257,14 +8324,14 @@ function refreshSessionStatus() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: s.id })
-        }).then(function() { refreshSessionStatus(); });
+        }).then(function() { refreshSessionStatus(); }).catch(quietAbort);
       });
 
       bar.appendChild(info);
       bar.appendChild(cancel);
       el.appendChild(bar);
     });
-  });
+  }).catch(quietAbort);
 }
 
 // Poll session status while active (stopped on sign out)
@@ -8314,9 +8381,11 @@ function resetRoomTasks(convId) {
 }
 
 function loadTaskCount(convId) {
+  var generation = sessionGeneration;
   fetch('/api/tasks/count?conversation=' + encodeURIComponent(convId))
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
+      if (!sameSession(generation)) return; // read in a signed-out session
       if (!data) return; // refused: leave the badge as it is
       if (!taskRoomIsCurrent(convId)) return; // the room changed meanwhile
       renderTaskBadgeFromCount(data.count || 0, data.hasUrgent || false);
@@ -8625,7 +8694,7 @@ function createTask(opts) {
       priority: opts.priority || 'normal',
       conversation: activeConversation.id
     })
-  });
+  }).catch(quietAbort);
 }
 
 // --- Turn Guard ---
@@ -8663,7 +8732,7 @@ function saveTurnGuard() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(turnGuardState)
-  });
+  }).catch(quietAbort);
 }
 
 function timeAgo(ts) {
@@ -8890,14 +8959,16 @@ function openLaunchDialog(preselectCrewName) {
   // the page already holds (the crew roster, the room list) or to the
   // existing defaults; an error body is never read as data.
   var noTerminals = { wezterm: { available: false, running: false }, wt: { available: false }, manual: { available: true } };
+  var generation = sessionGeneration;
   Promise.all([
-    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function() { return crewRoster.slice(); }),
-    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function() { return []; }),
+    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function(err) { if (isAbortError(err)) throw err; return crewRoster.slice(); }),
+    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function(err) { if (isAbortError(err)) throw err; return []; }),
     fetch('/api/conversations?token=' + encodeURIComponent(webToken())).then(okJson).then(function(d) {
       return d && Array.isArray(d.conversations) ? d : { conversations: conversationList.slice() };
-    }).catch(function() { return { conversations: conversationList.slice() }; }),
-    fetch('/api/launcher/terminals').then(okJson).then(function(t) { return t && typeof t === 'object' ? t : noTerminals; }).catch(function() { return noTerminals; })
+    }).catch(function(err) { if (isAbortError(err)) throw err; return { conversations: conversationList.slice() }; }),
+    fetch('/api/launcher/terminals').then(okJson).then(function(t) { return t && typeof t === 'object' ? t : noTerminals; }).catch(function(err) { if (isAbortError(err)) throw err; return noTerminals; })
   ]).then(function(results) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     var crewList = results[0];
     var harnesses = results[1];
     var convData = results[2];
@@ -8907,6 +8978,7 @@ function openLaunchDialog(preselectCrewName) {
     footer.textContent = '';
     buildLaunchForm(content, footer, crewList, harnesses, convList, terminalsInfo, preselectCrewName);
   }).catch(function(err) {
+    if (isAbortError(err) || !sameSession(generation)) return;
     content.textContent = '';
     var errMsg = document.createElement('div');
     errMsg.className = 'launch-error';
@@ -10153,13 +10225,16 @@ function openCrewPanel() {
 
   // A refused or failed read falls back to the crew roster the page holds, or
   // to empty meta and harnesses; an error body is never read as data.
+  var generation = sessionGeneration;
   Promise.all([
-    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function() { return crewRoster.slice(); }),
-    fetch('/api/crew/meta').then(okJson).then(function(m) { return m && typeof m === 'object' && !Array.isArray(m) ? m : {}; }).catch(function() { return {}; }),
-    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function() { return []; })
+    fetch('/api/crew').then(okJson).then(function(l) { return Array.isArray(l) ? l : crewRoster.slice(); }).catch(function(err) { if (isAbortError(err)) throw err; return crewRoster.slice(); }),
+    fetch('/api/crew/meta').then(okJson).then(function(m) { return m && typeof m === 'object' && !Array.isArray(m) ? m : {}; }).catch(function(err) { if (isAbortError(err)) throw err; return {}; }),
+    fetch('/api/harnesses').then(okJson).then(function(l) { return Array.isArray(l) ? l : []; }).catch(function(err) { if (isAbortError(err)) throw err; return []; })
   ]).then(function(results) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     buildCrewPanel(content, results[0], results[1], results[2]);
   }).catch(function(err) {
+    if (isAbortError(err) || !sameSession(generation)) return;
     content.textContent = '';
     var errMsg = document.createElement('div');
     errMsg.className = 'launch-error';
@@ -10192,7 +10267,8 @@ function buildCrewPanel(content, crewList, meta, harnesses) {
     fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(updated) {
       if (!Array.isArray(updated)) return; // refused: the rows on screen stay
       renderCrewRows(list, updated, refreshList);
-    }).catch(function() {
+    }).catch(function(err) {
+      if (isAbortError(err)) return; // cancelled by sign out: not an empty crew
       renderCrewRows(list, [], refreshList);
     });
   }
@@ -10632,22 +10708,22 @@ function sendReaction(messageId, emoji) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sender: sender, emoji: emoji })
-  });
+  }).catch(quietAbort);
 }
 
 function updateReactionPills(messageId) {
   // Refresh reaction pills from server
   fetch('/api/message/' + messageId + '?viewer=' + encodeURIComponent(myName()) + '&token=' + encodeURIComponent(webToken()))
-    .then(function(r) { return r.json(); })
-    .then(function() {
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
       // Fetch all reactions for the active conversation and rebuild for this message
-      if (!activeConversation) return;
+      if (!data || !activeConversation) return; // refused: the pills stay
       var row = document.querySelector('.msg-reactions[data-message-id="' + messageId + '"]');
       if (!row) return;
       // Find reactions for this message from our local cache
       var msgReactions = allReactions.filter(function(r) { return r.messageId === messageId; });
       renderReactionRow(row, messageId, msgReactions);
-    });
+    }).catch(quietAbort);
 }
 
 function renderReactionRow(row, messageId, reactions) {
@@ -10670,7 +10746,7 @@ function renderReactionRow(row, messageId, reactions) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sender: sender, emoji: emoji })
-      });
+      }).catch(quietAbort);
     });
     row.appendChild(pill);
   });
@@ -11040,7 +11116,9 @@ var NOTIFY_ICONS = {
 
 function loadNotifications() {
   var epochAtStart = notifyEpoch;
+  var generation = sessionGeneration;
   fetch('/api/notifications').then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
+    if (!sameSession(generation)) return; // read in a signed-out session
     // A refused read (401 before the token is known) keeps the bell as is.
     if (!data || !Array.isArray(data.notifications)) return;
     if (data.generation && data.generation !== notifyGeneration) {
@@ -11305,9 +11383,11 @@ function applyAskResolution(messageId, ask, conversationId) {
 function refreshDecisionsBadge() {
   var seqAtStart = decisionsSeq;
   var fetchId = ++decisionsFetchId;
+  var generation = sessionGeneration;
   fetch('/api/decisions?state=open&token=' + encodeURIComponent(webToken()))
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(d) {
+      if (!sameSession(generation)) return; // read in a signed-out session
       // A refused read keeps the cache and the badge as they are.
       if (!d || !Array.isArray(d.decisions)) return;
       // Only the latest-started fetch may land, and only if no ask event
@@ -11900,17 +11980,24 @@ function renderServerBadgeSettings(part) {
   function send(body) {
     save.disabled = true;
     reset.disabled = true;
+    var generation = sessionGeneration;
     fetch('/api/instance/badge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function(r) { return r.json().catch(function() { return null; }).then(function(j) { return { ok: r.ok, j: j }; }); })
+      .then(function(r) { return jsonOr(r, null).then(function(j) { return { ok: r.ok, j: j }; }); })
       .then(function(res) {
         save.disabled = false;
         reset.disabled = false;
+        if (!sameSession(generation)) return; // answered to a signed-out session
         if (!res.ok) { status.textContent = res.j && res.j.error ? res.j.error : 'Not saved.'; return; }
         applyInstanceMarks(res.j);
         var again = document.querySelector('#settings-server-badge-part .badge-status');
         if (again) again.textContent = 'Saved. Linked servers pick it up within a minute.';
       })
-      .catch(function() { save.disabled = false; reset.disabled = false; status.textContent = 'Not saved: the server did not answer.'; });
+      .catch(function(err) {
+        save.disabled = false;
+        reset.disabled = false;
+        if (isAbortError(err) || !sameSession(generation)) return;
+        status.textContent = 'Not saved: the server did not answer.';
+      });
   }
   save.addEventListener('click', function() {
     if (!M.validBadge(draft)) { paint(); return; }
