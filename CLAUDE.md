@@ -105,6 +105,25 @@ and the room never wakes it. Web-token routes: `GET /api/readonly-seats`,
 `POST /api/readonly-seats` (needs a user-set web token), `POST /api/readonly-seats/:id/revoke`.
 Digests only, in `readonly-seats.json` in the data dir.
 
+## Web viewer: token, name lock and reconnect
+
+The page holds the web token injected into `/` (generated token) or typed at the prompt (user-set,
+`sessionStorage`, per tab), and sends it as `X-Joind-Token` on every `/api/` call. Every web-token
+read accepts that header or `?token=` (header first, as at the agent-auth gate). One human viewer
+name is registered per server (`POST /api/web/register`, first wins); the socket accepts only that
+name (4401 bad token, 4403 other name). A 409 from register carries `registered` (only a caller
+that passed the token check gets that far) and the page adopts it before it connects. On the socket
+(`public/app.js`, decisions in `joindUi.wsAuthCloseAction`): the auth-failure count resets on
+`init`, never on open; 4401 with an injected token reloads once (`joind-token-reload` in
+sessionStorage), else drops the token, shows the `#auth-banner` and prompts; 4403 re-registers
+(adopting) and after three in a row stops on the banner. Any 401, or a 403 `unauthorized`, while
+a token is held shows the banner, unless the request went out before the banner last cleared
+(`authEpoch`) or with a token since replaced. A typed token is kept in page memory too, so blocked
+storage cannot lose it. One register-and-connect attempt at a time (`sessionAttempt`): a newer one
+supersedes, a replaced socket is closed and ignored, and sign out closes every socket the tab
+opened. Entering a token re-runs the boot reads. Browser smoke:
+`tools/web-smoke/` (Playwright, ephemeral port, see its README).
+
 ## REST API
 
 Agent endpoints accept optional `pid` and `paneId` params for disambiguation.

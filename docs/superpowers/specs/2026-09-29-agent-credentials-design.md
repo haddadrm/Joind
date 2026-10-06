@@ -199,7 +199,7 @@ credential on the home.
 | REST residents (curl, Python) | Add `-H "Authorization: Bearer $JOIND_AGENT_KEY"` to the join and to every call, or keep the `registration` from the join reply on callbacks (read, listen, send, status, heartbeat, leave) |
 | Wake prompts (local, Codex queue, hosted) | Nothing: a REST joiner's curl lines carry the registration; an MCP joiner's short prompt (`chat_read`, `chat_send` with the registration) runs on its own MCP session, whose transport already sends the key |
 | Hosted members through the link | Nothing beyond their own server's key |
-| The web page | Nothing (it sends the web token on every `/api/` call); the web token must be user-set. A tab that has not been given the token yet sees 401 on its first reads until the token prompt is answered (browser check on a throwaway server: once the token is present the page makes no call without it) |
+| The web page | Nothing (it sends the web token on every `/api/` call); the web token must be user-set. A tab that has not been given the token yet sees 401 on its first reads until the token prompt is answered (browser check on a throwaway server: once the token is present the page makes no call without it). Since 6 Oct 2026 the page re-runs those one-shot reads (crew, templates, instance, notifications, decisions) once the token is entered, and a token refused while held shows a banner with Enter token and Retry; the web-token reads accept the `X-Joind-Token` header as well as `?token=`, as the gate does |
 | Scripts that post with the web token in the JSON body only | Move it to the `X-Joind-Token` header |
 
 ## 7. Draft `joind` skill section (for the lead to fold into the workspace skill)

@@ -486,7 +486,9 @@ describe("read-only seat under require, and across a restart", () => {
       const reg = await join_(s.base, "Member", room, PID);
       expect((await get(s.base, `/api/agent/read?sender=Member&registration=${reg}`)).status).toBe(200);
       expect((await post(s.base, "/api/agent/send", { sender: "Member", text: "agent post", registration: reg })).status).toBe(200);
-      expect((await get(s.base, "/api/messages", webHdr)).status).toBe(403); // the web read takes its token in the query
+      // Since 6 Oct 2026 the web reads take the token in the header too, as
+      // the gate does (it used to be the query only, so this was 403).
+      expect((await get(s.base, "/api/messages", webHdr)).status).toBe(200);
       expect((await get(s.base, `/api/messages?token=${WEB}`)).status).toBe(200);
       // A seat token on an agent route is refused even beside the agent key.
       expect((await post(s.base, "/api/agent/send", { sender: "Member", text: "x", registration: reg }, { ...keyHdr, ...seatHdr(seat.token) })).status).toBe(403);

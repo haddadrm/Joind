@@ -40,7 +40,7 @@ import { EditStore } from "./edits.js";
 import { discoverTerminals, renameTabTitle, checkWezTerm, discoverWezTerm, getWeztermPath, getWeztermEnv, processTreeOnce } from "./terminals.js";
 import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from "./crew.js";
 import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webNamePath, validWebName, canRegister, type JoindConfig } from "./config.js";
-import { AgentAuth, AgentKeyRotateError, agentKeyPath, classifyRoute, loadOrCreateAgentKey, newAgentKey, routeLabel, type Credential } from "./agent-auth.js";
+import { AgentAuth, AgentKeyRotateError, agentKeyPath, classifyRoute, loadOrCreateAgentKey, newAgentKey, presentedWebToken, routeLabel, type Credential } from "./agent-auth.js";
 import { LinkRegistry, type LinkClientOptions } from "./link.js";
 import { ReadonlySeatStore, SeatError, seatGate, seatUpgradeRefusal } from "./readonly-seats.js";
 import { PeerHub } from "./peer.js";
@@ -859,6 +859,16 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   }
 
   /**
+   * The web token a browser READ carries: the `X-Joind-Token` header, else a
+   * `token` query parameter. The same rule (and the same function) as the
+   * agent-auth gate, so a request the gate admits on the web token is not
+   * then refused by the route. The header wins over the query, as at the gate.
+   */
+  function readTokenOf(req: express.Request): string | undefined {
+    return presentedWebToken(req);
+  }
+
+  /**
    * Web writes (the browser UI's own actions and web-only administration)
    * require the web token: 403 otherwise, before any state is read or
    * changed. Agent routes (/api/agent/*, /mcp) and the documented agent REST
@@ -891,10 +901,14 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     if (!webAuthorized(token)) { res.status(403).json({ error: "unauthorized" }); return; }
     const valid = validWebName(name);
     if (valid === null) { res.status(400).json({ error: "invalid name" }); return; }
-    if (seatStore.holdsAnywhere(valid)) { res.status(409).json({ error: `${valid} is a read-only seat's name; pick another name` }); return; }
+    // A 409 names the registered viewer (`registered`) so the page can adopt
+    // it before it opens the socket, which accepts only that name. Only a
+    // caller that proved the web token above ever reaches this point.
+    const registered = registeredWebName !== null && registeredWebName !== valid ? { registered: registeredWebName } : {};
+    if (seatStore.holdsAnywhere(valid)) { res.status(409).json({ error: `${valid} is a read-only seat's name; pick another name`, ...registered }); return; }
     const decision = canRegister(registeredWebName, valid);
     if (decision === "reject-conflict") {
-      res.status(409).json({ error: "name already registered; renames use the websocket" });
+      res.status(409).json({ error: "name already registered; renames use the websocket", ...registered });
       return;
     }
     if (decision === "accept-first") {
@@ -1152,7 +1166,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   }
 
   app.get("/api/messages", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const conv = req.query.conversation;
     // A window around one message (a link, a reply quote, a search hit):
     // the same viewer filtering as every other read, fail closed.
@@ -1205,7 +1219,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.get("/api/export", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const room = manager.getActiveRoom();
     if (!room) { res.status(400).send("No active conversation"); return; }
     const meta = manager.getActiveMeta();
@@ -1243,7 +1257,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   // Structured JSON export: round-trippable bundle for importing into another instance.
   app.get("/api/conversations/:id/export.json", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const convId = req.params.id;
     const meta = manager.getMeta(convId);
     const room = manager.getRoom(convId);
@@ -1527,7 +1541,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // GET /api/dms            -> partner summaries (sidebar), newest first
   // GET /api/dms?with=Name  -> the full cross-conversation thread with Name
   app.get("/api/dms", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const viewer = webViewer();
     if (!viewer) { res.status(409).json({ error: "no viewer registered" }); return; }
     const partner = req.query.with as string | undefined;
@@ -1637,7 +1651,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // the viewer is always the registered name (agents use the chat_decisions
   // MCP tool instead). DM visibility applies to the message bodies.
   app.get("/api/decisions", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     // open (default), resolved, or all: the decisions page lists all three.
     const stateRaw = (req.query.state as string | undefined) ?? "open";
     const state = stateRaw === "resolved" || stateRaw === "all" ? stateRaw : "open";
@@ -1732,7 +1746,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.get("/api/pins", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     // ?conversation= names the room (the side panel asks for the room on
     // screen, which can differ from the server's active room while a switch
     // is in flight); without it, the active room as before. A named room
@@ -1877,7 +1891,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // ({results, nextBefore, coverage}) and takes a `before` id cursor; without
   // it the answer is the plain array older clients read.
   app.get("/api/search", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const paged = req.query.page === "1";
     const conv = req.query.conversation;
     const room = viewedRoom(conv);
@@ -1897,7 +1911,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.get("/api/message/:id", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const conv = req.query.conversation;
     const room = viewedRoom(conv);
     if (!room) {
@@ -1915,7 +1929,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   // --- Export: decision log ---
   app.get("/api/export/decisions", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const room = manager.getActiveRoom();
     if (!room) { res.status(400).send("No active conversation"); return; }
     const meta = manager.getActiveMeta();
@@ -1934,7 +1948,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
 
   // --- Export: session summary ---
   app.get("/api/export/summary", (req, res) => {
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     const room = manager.getActiveRoom();
     if (!room) { res.status(400).send("No active conversation"); return; }
     const meta = manager.getActiveMeta();
@@ -1964,7 +1978,7 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   // --- Conversation management ---
   app.get("/api/conversations", (req, res) => {
     // Metadata only, but gating it closes the unauthenticated id-enumeration path.
-    if (!webAuthorized(req.query.token as string | undefined)) { res.status(403).json({ error: "unauthorized" }); return; }
+    if (!webAuthorized(readTokenOf(req))) { res.status(403).json({ error: "unauthorized" }); return; }
     res.json({
       conversations: manager.listConversations(),
       active: manager.getActiveMeta(),

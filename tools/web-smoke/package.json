@@ -1,0 +1,12 @@
+{
+  "name": "joind-web-smoke",
+  "private": true,
+  "description": "Playwright smoke for the web token prompt, the name lock and reconnects. Kept out of the root devDependencies on purpose.",
+  "type": "module",
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.63.0"
+  }
+}
