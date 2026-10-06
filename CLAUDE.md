@@ -123,8 +123,12 @@ storage cannot lose it. One register-and-connect attempt at a time (`sessionAtte
 supersedes, a replaced socket is closed and ignored, and sign out closes every socket the tab
 opened; Sign in then resumes in place (`resumeSession`, no reload) unless the token was served
 in the page. The first init after a resume reloads the page or task panel left on
-screen (`reconcileVisibleViews`), and an answer to a request sent before sign out never settles
-(`sessionGeneration` in the fetch wrapper). Entering a token re-runs the boot reads. Reads check `r.ok` (`okJson`, `refusalBody`) and
+screen (`reconcileVisibleViews`). Sign out aborts every `/api/` request still in flight (one
+`AbortController` per session, `sessionAbort`, attached by the fetch wrapper and composed with a
+caller's signal), releases what they held at once (`releaseSessionLocks`: send lock, image uploads,
+scanner flag and button), and bumps `sessionGeneration`; a cancelled request rejects with an
+`AbortError` that callers treat as silent (`isAbortError`), and completions check `sameSession`
+before they touch the page. Entering a token re-runs the boot reads. Reads check `r.ok` (`okJson`, `refusalBody`) and
 keep what the page holds on a refusal. Browser smoke:
 `tools/web-smoke/` (Playwright, ephemeral port, see its README).
 
