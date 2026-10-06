@@ -32,6 +32,7 @@ import type { ChatMessage, HostedWakeRequest, HostedWakeResult, JoinRoute } from
 import { MirrorRoom, type MirrorNotice, type MirrorTransport, type PendingPayload } from "./mirror.js";
 import { ensureDir } from "./persist.js";
 import type { SubmitCheckOptions } from "./submit-check.js";
+import { peerBadge, type ServerBadge } from "./server-badge.js";
 import {
   LINK_WAKE_TIMEOUT_MS, LinkDownError, PeerRefusedError, parseRemoteRoomId,
   type PeerActBody, type PeerLeaveBody, type PeerMessagesResult, type PeerRegisterBody, type PeerRegisterResult,
@@ -46,6 +47,10 @@ export interface LinkInfo {
   name: string;
   state: LinkState;
   since: number;
+  /** The peer's own server badge, as its last room list sent it (checked by
+   *  peerBadge). Absent until then, or from a peer too old to send one: the
+   *  page shows the default badge for the name. */
+  badge?: ServerBadge;
 }
 
 export interface RemoteConversationInfo {
@@ -101,6 +106,8 @@ export class LinkClient extends EventEmitter {
   readonly name: string;
   private state: LinkState | "unknown" = "unknown";
   private since = Date.now();
+  /** The peer's badge from its last room list (undefined: none sent yet). */
+  private badge: ServerBadge | undefined;
   private readonly link: LinkConfig;
   private readonly opts: Required<Omit<LinkClientOptions, "fetchImpl" | "submitCheckOptions">> & { fetchImpl: FetchLike; submitCheckOptions?: SubmitCheckOptions };
   private mirrors = new Map<string, MirrorRoom>();
@@ -153,7 +160,7 @@ export class LinkClient extends EventEmitter {
   }
 
   info(): LinkInfo {
-    return { name: this.name, state: this.state === "up" ? "up" : "down", since: this.since };
+    return { name: this.name, state: this.state === "up" ? "up" : "down", since: this.since, ...(this.badge ? { badge: { ...this.badge } } : {}) };
   }
 
   isUp(): boolean {
@@ -318,7 +325,16 @@ export class LinkClient extends EventEmitter {
       this.opts.manager.unregisterRemoteRoom(m.id);
       this.emit("rooms", { type: "conversation-deleted", data: { id: m.id, remote: true } });
     }
+    // The peer's badge: kept only when valid; a change (or a peer that
+    // stopped sending one) is told to the page as a link event, unless
+    // markUp is about to send one anyway.
+    const badge = peerBadge(r.badge);
+    const badgeChanged = (badge?.code ?? "") !== (this.badge?.code ?? "") || (badge?.color ?? "") !== (this.badge?.color ?? "");
+    this.badge = badge;
+    const wasUp = this.state === "up";
     this.markUp(epoch);
+    const markUpTold = !wasUp && this.state === "up";
+    if (badgeChanged && !markUpTold) this.emit("link", this.info());
     const active = this.opts.manager.getActiveId();
     if (active) this.onActive(active);
   }

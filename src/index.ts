@@ -42,7 +42,8 @@ import CrewStore, { detectIdentityFile, validateCrewFolder, initCrewStore } from
 import { loadConfig, acquireLock, tokensEqual, injectWebToken, loadWebName, webNamePath, validWebName, canRegister, type JoindConfig } from "./config.js";
 import { AgentAuth, AgentKeyRotateError, agentKeyPath, classifyRoute, loadOrCreateAgentKey, newAgentKey, presentedWebToken, routeLabel, type Credential } from "./agent-auth.js";
 import { LinkRegistry, type LinkClientOptions } from "./link.js";
-import { ReadonlySeatStore, SeatError, seatGate, seatUpgradeRefusal } from "./readonly-seats.js";
+import { ReadonlySeatStore, SEAT_RECENT_READ_MS, SeatError, seatGate, seatUpgradeRefusal } from "./readonly-seats.js";
+import { BadgeError, ServerBadgeStore } from "./server-badge.js";
 import { PeerHub } from "./peer.js";
 import { MirrorRoom, type MirrorNotice } from "./mirror.js";
 import { parseSearchQuery, hasTerms, searchLimit, searchBefore, windowLimit } from "./search.js";
@@ -262,9 +263,13 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
   // A mention of a member hosted on a peer is routed to that peer.
   manager.hostedWaker = (req) => linkRegistry.wake(req);
+  // This server's badge (src/server-badge.ts): shown on its own page and
+  // sent to its peers with its room list, so they show the same one.
+  const badgeStore = new ServerBadgeStore(DATA_DIR, INSTANCE_NAME);
   const peerHub = new PeerHub({
     manager,
     selfName: INSTANCE_NAME,
+    selfBadge: () => badgeStore.effective(),
     conversationsDir: join(DATA_DIR, "conversations"),
     links: CONFIG.links,
     registry: linkRegistry,
@@ -578,6 +583,15 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
     }
   });
 
+  // Read-only seats in the member list (seat spec section 8): the active
+  // seats go to web sockets only (every socket passed the web-token check),
+  // on connect and again on every mint, revoke and (at most once a minute
+  // per seat) read. Never to agents, never over the link, never a token.
+  seatStore.on("changed", () => {
+    const msg = JSON.stringify({ type: "readonly-seats", data: seatPayload() });
+    for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(msg);
+  });
+
   // Forward global events (conversation created/renamed/deleted)
   manager.on("global", (event) => {
     const msg = JSON.stringify(event);
@@ -634,10 +648,16 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
           roles: { preset: PRESET_ROLES, custom: customRoles },
           reactions: activeId ? reactionStore.getForConversation(activeId) : [],
           ...linkPayload(viewerName),
+          readonlySeats: seatPayload(),
         },
       })
     );
   });
+
+  /** The seats as the member list shows them, with the "read recently" window. */
+  function seatPayload(): { seats: ReturnType<ReadonlySeatStore["activeSeats"]>; recentReadMs: number } {
+    return { seats: seatStore.activeSeats(), recentReadMs: SEAT_RECENT_READ_MS };
+  }
 
   /** What the web viewer sees of a room: a remote room adds its local lines. */
   function viewMessages(room: ReturnType<typeof manager.getRoom> & object, limit: number, viewer: string | undefined): ChatMessage[] {
@@ -1215,7 +1235,33 @@ export async function startJoind(CONFIG: JoindConfig, startOptions: StartOptions
   });
 
   app.get("/api/instance", (_req, res) => {
-    res.json({ name: INSTANCE_NAME, port: PORT, dataDir: DATA_DIR });
+    res.json({ name: INSTANCE_NAME, port: PORT, dataDir: DATA_DIR, ...instanceMarks() });
+  });
+
+  /** The badge and favicon option, as /api/instance and the `instance`
+   *  socket event carry them. */
+  function instanceMarks(): { badge: ReturnType<ServerBadgeStore["effective"]>; faviconBadge: boolean } {
+    return { badge: badgeStore.effective(), faviconBadge: badgeStore.faviconBadge() };
+  }
+
+  // Set or clear the manual badge (code, color) and the favicon option. Web
+  // token only. A string sets, null or "" clears back to the default, an
+  // absent field is kept. Every open page hears the change; linked peers
+  // pick it up with their next room discovery (at most a minute).
+  app.post("/api/instance/badge", express.json(), (req, res) => {
+    if (!requireWebToken(req, res)) return;
+    const body = (req.body ?? {}) as { code?: unknown; color?: unknown; faviconBadge?: unknown };
+    try {
+      badgeStore.update({ code: body.code, color: body.color, faviconBadge: body.faviconBadge });
+    } catch (err) {
+      if (err instanceof BadgeError) { res.status(400).json({ error: err.message }); return; }
+      res.status(500).json({ error: `could not save the badge (${(err as Error).message})` });
+      return;
+    }
+    const marks = instanceMarks();
+    const msg = JSON.stringify({ type: "instance", data: { name: INSTANCE_NAME, ...marks } });
+    for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(msg);
+    res.json({ ok: true, name: INSTANCE_NAME, ...marks });
   });
 
   app.get("/api/export", (req, res) => {
