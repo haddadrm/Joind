@@ -104,6 +104,32 @@ held in its room (`ChatRoom.seatReserved`): no join, rename or peer registration
 and the room never wakes it. Web-token routes: `GET /api/readonly-seats`,
 `POST /api/readonly-seats` (needs a user-set web token), `POST /api/readonly-seats/:id/revoke`.
 Digests only, in `readonly-seats.json` in the data dir.
+The page lists a room's unrevoked seats in the member list ("Read only" group, dashed avatar with
+an eye badge, green dot when read in the last 10 minutes, `SEAT_RECENT_READ_MS`) and every seat
+on the Crew page with Revoke. The list rides the web socket only: `init.readonlySeats` and a
+`readonly-seats` event on mint, revoke and a read (throttled to one a minute per seat); the
+payload (`activeSeats()`) has no token, digest or fingerprint. Seats are never members, never in
+mention autocomplete, never woken and never mirrored over a link.
+
+## Server marks
+
+`src/server-badge.ts` and `public/marks.js`; decisions in the joind-marks lane (logo variant B,
+member variant M1). The rail brand is an outlined hexagon on the accent tile with the server
+badge on its top corner (title "<name> (this server)"); at phone width the drawer head carries
+it. The badge is a 1 to 2 character code on a colour: by default the first letter or digit of
+the server name on a palette colour picked by an FNV-1a hash of the lower-cased name (every
+palette colour carries white text at 4.5:1). An override (code, `#rrggbb` colour, favicon option)
+lives in `server-badge.json` in the data dir: `POST /api/instance/badge` (web token; a string
+sets, null or "" clears, absent keeps; 400 on a bad value) and Settings, Server badge.
+`/api/instance` adds `badge` (`{code, color, auto}`) and `faviconBadge`; a change is broadcast as
+an `instance` socket event. A home sends its badge with `GET /api/peer/rooms` (`badge`); the peer
+validates it (`peerBadge`) and shows it in `LinkInfo.badge` (init `links`, `link` events), so a
+server's linked peers show its own badge. An older home sends none and the page falls back to
+the default rule, which `public/marks.js` repeats (`tests/marks.test.ts` holds the two in step).
+Member avatars carry the badge of the server their terminal lives on (`host`, or the home of a
+remote room) on the top corner; remote room headings carry it too. The favicon is an outlined
+hexagon in the accent (an SVG data URI with its own colour-scheme query), with the badge when
+the favicon option is on.
 
 ## Web viewer: token, name lock and reconnect
 
