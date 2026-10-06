@@ -51,8 +51,12 @@ const CPM_LAST_ID = 1_900;
 // resolves once the peer is up (tests/peer-routes.ts).
 const routes = new PeerRoutes();
 
+// The link closes its connections too. Both servers share this process's
+// connection pool with call() below, so a link request left idle on a
+// keep-alive socket while a fill blocks the loop could be handed to call()
+// after the server timed it out, and read ECONNRESET.
 const fetchImpl: FetchLike = async (url, init) => {
-  const res = await fetch(url, init);
+  const res = await fetch(url, { ...init, headers: { ...init.headers, Connection: "close" } });
   return { status: res.status, text: () => res.text() };
 };
 
