@@ -133,15 +133,44 @@ var wsName = null;
 var pendingRename = false;
 // Previous registered name, remembered while a web-rename request is in flight.
 var renameAttempt = null;
-// Consecutive 4401/4403 closes; after a few, a user-supplied token is re-asked.
+// Consecutive 4401/4403 closes since the last `init`. Reset on init, never
+// on open: the server accepts the upgrade and then closes it, so onopen runs
+// before every refusal and a reset there kept the count at 1 forever.
 var wsAuthFailures = 0;
+// The pending reconnect, so a token entered meanwhile reconnects at once
+// instead of opening a second socket beside the timer's.
+var reconnectTimer = null;
+// Set when the injected token was refused even after the one reload: the
+// page stops preferring it and uses the token typed at the prompt.
+var injectedTokenStale = false;
+// sessionStorage flag: this tab already reloaded once for a refused
+// injected token. Cleared on the next init, so a later token change may
+// reload once again, but a refusal straight after the reload prompts.
+var TOKEN_RELOAD_KEY = 'joind-token-reload';
 
 // Server-issued token: injected into index.html when generated, otherwise the
 // browser supplies it once per tab session (sessionStorage) via a prompt.
 function webToken() {
   var stored = '';
   try { stored = sessionStorage.getItem('joind-web-token') || ''; } catch (e) { /* storage unavailable */ }
-  return window.__JOIND_TOKEN || stored;
+  if (window.__JOIND_TOKEN && !injectedTokenStale) return window.__JOIND_TOKEN;
+  return stored;
+}
+
+// True while the page is using a token injected into it by the server.
+function injectedTokenInUse() {
+  return !!window.__JOIND_TOKEN && !injectedTokenStale;
+}
+
+function tokenReloadDone() {
+  // Storage unavailable: no guard can hold, so never reload (no loop).
+  try { return sessionStorage.getItem(TOKEN_RELOAD_KEY) === '1'; } catch (e) { return true; }
+}
+function markTokenReload() {
+  try { sessionStorage.setItem(TOKEN_RELOAD_KEY, '1'); return true; } catch (e) { return false; }
+}
+function clearTokenReload() {
+  try { sessionStorage.removeItem(TOKEN_RELOAD_KEY); } catch (e) { /* storage unavailable */ }
 }
 
 // Every request this page makes to its own /api/ carries the web token in
@@ -160,15 +189,104 @@ function webToken() {
         init = Object.assign({}, init, { headers: headers });
       }
     }
-    return nativeFetch.call(window, input, init);
+    var held = typeof input === 'string' && input.indexOf('/api/') === 0 ? webToken() : '';
+    return nativeFetch.call(window, input, init).then(function(r) {
+      // A refused token while one is held means it is stale or wrong: say
+      // so on the page instead of leaving an empty list and a spinner.
+      if (held && !signedOut && (r.status === 401 || r.status === 403)) noteRefusedAnswer(r);
+      return r;
+    });
   };
 })();
 
+// Inspect a 401/403 (on a clone, the caller still reads the body) and show
+// the token banner when it is a refusal of the token itself.
+function noteRefusedAnswer(r) {
+  var copy;
+  try { copy = r.clone(); } catch (e) { return; }
+  copy.json().catch(function() { return null; }).then(function(body) {
+    if (window.joindUi && window.joindUi.tokenRefusedAnswer(r.status, body)) {
+      showAuthBanner(TOKEN_REFUSED_TEXT, { token: true, retry: true });
+    }
+  });
+}
+
+var TOKEN_REFUSED_TEXT = 'This server refused the web token: it changed, or it was mistyped.';
+
+// One visible banner for auth trouble: the token refused or the name
+// refused. Buttons: enter the token again, and retry. Cleared on `init`.
+function showAuthBanner(text, opts) {
+  var o = opts || {};
+  var banner = document.getElementById('auth-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'auth-banner';
+    banner.className = 'auth-banner';
+    banner.setAttribute('role', 'alert');
+    document.body.appendChild(banner);
+  }
+  banner.textContent = '';
+  var msg = document.createElement('span');
+  msg.className = 'auth-banner-text';
+  msg.textContent = text;
+  banner.appendChild(msg);
+  if (o.token) {
+    var enter = document.createElement('button');
+    enter.type = 'button';
+    enter.className = 'btn btn-sm btn-primary';
+    enter.id = 'auth-banner-token';
+    enter.textContent = 'Enter token';
+    enter.addEventListener('click', function() { promptWebToken(reconnectWithToken); });
+    banner.appendChild(enter);
+  }
+  if (o.retry) {
+    var retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'btn btn-sm';
+    retry.id = 'auth-banner-retry';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', function() { reconnectWithToken(); });
+    banner.appendChild(retry);
+  }
+}
+
+function hideAuthBanner() {
+  var banner = document.getElementById('auth-banner');
+  if (banner) banner.remove();
+}
+
+// The one-shot reads the page makes at boot. Under agent-auth require they
+// answer 401 until the token is known, so they run again once it is.
+function runBootReads() {
+  if (typeof loadInstanceInfo === 'function') loadInstanceInfo();
+  if (typeof loadCrewRoster === 'function') loadCrewRoster();
+  if (typeof loadTemplates === 'function') loadTemplates();
+  if (typeof loadNotifications === 'function') loadNotifications();
+  if (typeof refreshDecisionsBadge === 'function') refreshDecisionsBadge();
+}
+
+// A token was entered (prompt or banner), or Retry was pressed: re-run the
+// boot reads and, unless a socket is open or opening, register and connect
+// now (the pending reconnect, if any, is cancelled so only one socket opens).
+function reconnectWithToken() {
+  if (signedOut) return;
+  wsAuthFailures = 0;
+  runBootReads();
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  startSession();
+}
+
 // Ask for the web token (user-set mode). Reuses the existing modal classes.
-// `after` runs once a token is stored.
+// `after` runs once a token is stored. One prompt at a time: a second call
+// while it is open only replaces what runs after it.
+var tokenPromptAfter = null;
 function promptWebToken(after) {
+  tokenPromptAfter = after || null;
+  if (document.getElementById('web-token-overlay')) return;
   var overlay = document.createElement('div');
   overlay.className = 'session-modal-overlay';
+  overlay.id = 'web-token-overlay';
   var modal = document.createElement('div');
   modal.className = 'session-modal';
   var title = document.createElement('h3');
@@ -190,9 +308,14 @@ function promptWebToken(after) {
   function submit() {
     var value = input.value.trim();
     if (!value) return;
-    sessionStorage.setItem('joind-web-token', value);
+    try { sessionStorage.setItem('joind-web-token', value); } catch (e) { /* storage unavailable */ }
+    // A typed token supersedes an injected one that the server refused.
+    if (window.__JOIND_TOKEN) injectedTokenStale = true;
     overlay.remove();
-    if (after) after();
+    hideAuthBanner();
+    var next = tokenPromptAfter;
+    tokenPromptAfter = null;
+    if (next) next();
   }
   okBtn.addEventListener('click', submit);
   input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submit(); });
@@ -205,19 +328,77 @@ function promptWebToken(after) {
 
 // Ensure a token exists before connecting; prompt only when neither the
 // injected value nor sessionStorage has one.
+var bootTokenPrompted = false;
 function ensureWebToken(after) {
   if (webToken()) { if (after) after(); return; }
+  bootTokenPrompted = true;
   promptWebToken(after);
 }
 
+// First boot: the token (prompting when the page has none), then register
+// and connect. A prompt at boot means the one-shot reads ran without a token
+// (refused under agent-auth require): they run again once it is stored.
+function bootSession() {
+  ensureWebToken(function() {
+    if (bootTokenPrompted) runBootReads();
+    startSession();
+  });
+}
+
+// The instance name in the header and the page title.
+function loadInstanceInfo() {
+  fetch('/api/instance').then(function(r) { return r.ok ? r.json() : null; }).then(function(info) {
+    if (!info || !info.name) return;
+    var el = document.getElementById('instance-name');
+    if (el) el.textContent = info.name;
+    var brand = document.getElementById('rail-brand');
+    if (brand) { brand.title = info.name; brand.textContent = info.name.charAt(0).toUpperCase(); }
+    document.title = info.name === 'Joind' ? 'Joind' : info.name + ' \u2014 Joind';
+  }).catch(function() { /* ignore */ });
+}
+
 // Register the current human name against the token. The server only accepts
-// a WS ?name= equal to this registration. `after` runs either way: on failure
-// we still connect and let the server fail closed (4403/reconnect).
+// a WS ?name= equal to this registration. When another name is registered
+// the server names it (to a token holder only) and the page adopts it, so
+// the socket never claims a name the server will refuse. `after` gets the
+// outcome (joindUi.registerOutcome).
 function registerWebName(after) {
+  var name = myName();
   fetch('/api/web/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: webToken(), name: myName() }) })
-    .then(function(r) { if (after) after(r.ok); })
-    .catch(function() { if (after) after(false); });
+    body: JSON.stringify({ token: webToken(), name: name }) })
+    .then(function(r) {
+      return r.json().catch(function() { return null; }).then(function(body) {
+        var out = window.joindUi ? window.joindUi.registerOutcome(r.status, body, name) : { kind: r.ok ? 'ok' : 'error', name: name };
+        if (out.kind === 'adopt') adoptRegisteredName(out.name);
+        else if (out.kind === 'ok') wsName = out.name;
+        if (after) after(out);
+      });
+    })
+    .catch(function() { if (after) after({ kind: 'error' }); });
+}
+
+// Take the server's registered name as this page's display name: the socket
+// claims it, and no rename is queued (the server already holds it).
+function adoptRegisteredName(name) {
+  wsName = name;
+  pendingRename = false;
+  renameAttempt = null;
+  if (setMyName) setMyName(name);
+  else { try { localStorage.setItem('joind-sender-name', name); } catch (e) { /* storage unavailable */ } }
+}
+
+// Register, then connect, unless the name was refused with nothing to adopt
+// (then the banner says so; the user renames in Settings and presses Retry).
+// A refused token or a network failure still connects: the socket's 4401
+// path decides, and the server fails closed.
+function startSession() {
+  registerWebName(function(out) {
+    if (out && out.kind === 'refused') {
+      showAuthBanner('This server refused the name "' + myName() + '": ' + out.error + '. Change your display name in Settings, then press Retry.', { retry: true });
+      return;
+    }
+    connect();
+  });
 }
 
 // A rejected rename: go back to the last registered name everywhere, without
@@ -258,7 +439,6 @@ function connect() {
     dot.classList.remove('disconnected');
     dot.title = 'Connected';
     dot.setAttribute('aria-label', 'Connected');
-    wsAuthFailures = 0;
     // Reconcile the decisions badge and mailbox partners after every (re)connection.
     if (typeof refreshDecisionsBadge === 'function') refreshDecisionsBadge();
     if (typeof fetchDmPartners === 'function') fetchDmPartners();
@@ -278,6 +458,11 @@ function connect() {
     var event = JSON.parse(e.data);
     switch (event.type) {
       case 'init':
+        // The server accepted this token and this name: only now is the
+        // auth trouble over (see wsAuthFailures).
+        wsAuthFailures = 0;
+        clearTokenReload();
+        hideAuthBanner();
         if (typeof event.data.serverNow === 'number') clockOffset = event.data.serverNow - Date.now();
         agents = event.data.agents;
         agentsConv = event.data.activeConversation ? event.data.activeConversation.id : null;
@@ -594,25 +779,51 @@ function connect() {
         break;
     }
   };
+  var sock = ws;
   ws.onclose = function(e) {
+    if (ws !== sock) return; // a socket this page already replaced
     dot.classList.add('disconnected');
     dot.title = signedOut ? 'Signed out' : 'Disconnected, reconnecting';
     dot.setAttribute('aria-label', dot.title);
     if (signedOut) return; // signed out: no reconnect
-    // Repeated auth rejections with a user-supplied token: drop it and ask
-    // again (covers typos and stale sessionStorage tokens). Injected-token
-    // mode keeps the plain reconnect loop.
-    if (e && (e.code === 4401 || e.code === 4403)) {
-      wsAuthFailures++;
-      if (wsAuthFailures >= 3 && !window.__JOIND_TOKEN) {
-        wsAuthFailures = 0;
-        sessionStorage.removeItem('joind-web-token');
-        promptWebToken(function() { connect(); });
-        return;
-      }
-    }
-    setTimeout(connect, 2000);
+    handleSocketClose(e ? e.code : 0);
   };
+}
+
+// What a closed socket leads to (joindUi.wsAuthCloseAction decides):
+// 4401 (token refused) reloads once for an injected token, else drops the
+// token, shows the banner and prompts; 4403 (name refused) registers again,
+// adopting the registered name, and after a few refusals in a row stops on
+// the banner instead of looping; anything else reconnects after 2 s.
+function handleSocketClose(code) {
+  if (code === 4401 || code === 4403) wsAuthFailures++;
+  var injected = injectedTokenInUse();
+  var action = window.joindUi
+    ? window.joindUi.wsAuthCloseAction({ code: code, failures: wsAuthFailures, injected: injected, reloadedOnce: tokenReloadDone() })
+    : 'retry';
+  var dot = document.getElementById('connection-dot');
+  if (action === 'reload') {
+    if (markTokenReload()) { location.reload(); return; }
+    action = 'prompt'; // the guard cannot be stored: never risk a reload loop
+  }
+  if (action === 'prompt') {
+    if (injected) injectedTokenStale = true;
+    try { sessionStorage.removeItem('joind-web-token'); } catch (e) { /* storage unavailable */ }
+    if (dot) { dot.title = 'Web token refused'; dot.setAttribute('aria-label', dot.title); }
+    showAuthBanner(TOKEN_REFUSED_TEXT, { token: true, retry: true });
+    promptWebToken(reconnectWithToken);
+    return;
+  }
+  if (action === 'banner') {
+    if (dot) { dot.title = 'Name refused'; dot.setAttribute('aria-label', dot.title); }
+    showAuthBanner('This server keeps refusing this tab\'s name "' + (wsName || myName()) + '". Enter the web token again, or press Retry.', { token: true, retry: true });
+    return;
+  }
+  if (action === 'reregister') {
+    reconnectTimer = setTimeout(function() { reconnectTimer = null; startSession(); }, 2000);
+    return;
+  }
+  reconnectTimer = setTimeout(function() { reconnectTimer = null; connect(); }, 2000);
 }
 
 // --- Agent pills with popover ---
@@ -3903,8 +4114,10 @@ function presenceAvatar(name, size, cls) {
 var HARNESS_LABELS = { claude: 'Claude Code', codex: 'Codex CLI', gemini: 'Gemini CLI', openclaw: 'OpenClaw', copilot: 'Copilot CLI' };
 var crewRoster = [];
 function loadCrewRoster() {
-  return fetch('/api/crew').then(function(r) { return r.ok ? r.json() : []; }).then(function(list) {
-    crewRoster = Array.isArray(list) ? list : [];
+  // A refused read keeps the roster we have (runBootReads loads it again).
+  return fetch('/api/crew').then(function(r) { return r.ok ? r.json() : null; }).then(function(list) {
+    if (!Array.isArray(list)) return;
+    crewRoster = list;
     refreshSenderTags();
     renderPills();
     renderDmList();
@@ -6006,7 +6219,7 @@ function toggleTheme() { setTheme(currentTheme() === 'light' ? 'dark' : 'light')
 
 // --- Web token: where it comes from, masked ---
 function tokenSource() {
-  if (window.__JOIND_TOKEN) return 'served';
+  if (injectedTokenInUse()) return 'served';
   var stored = '';
   try { stored = sessionStorage.getItem('joind-web-token') || ''; } catch (e) { /* storage unavailable */ }
   return stored ? 'tab' : 'none';
@@ -7526,10 +7739,13 @@ function showConvMenu(evt, conv) {
 var sessionTemplates = [];
 
 function loadTemplates() {
-  fetch('/api/templates').then(function(r) { return r.json(); }).then(function(tmpls) {
+  // A refused read (401 before the token is known) keeps the current list:
+  // the error body is not a list. runBootReads loads it again later.
+  return fetch('/api/templates').then(function(r) { return r.ok ? r.json() : null; }).then(function(tmpls) {
+    if (!Array.isArray(tmpls)) return;
     sessionTemplates = tmpls;
     renderTemplates();
-  });
+  }).catch(function() { /* keep what we have */ });
 }
 
 function renderTemplates() {
@@ -7698,8 +7914,8 @@ function startSessionUI(template) {
 
 function refreshSessionStatus() {
   if (signedOut) return;
-  fetch('/api/sessions').then(function(r) { return r.json(); }).then(function(sessions) {
-    if (signedOut) return;
+  fetch('/api/sessions').then(function(r) { return r.ok ? r.json() : null; }).then(function(sessions) {
+    if (signedOut || !Array.isArray(sessions)) return;
     var el = document.getElementById('session-status');
     el.textContent = '';
     if (sessions.length === 0) {
@@ -8157,11 +8373,9 @@ document.addEventListener('DOMContentLoaded', function() {
   updateSendBtn();
   updateMuteBtn();
   // Prompt for the token first when the server uses a user-set (non-injected)
-  // one, then first-boot register -> connect (registerWebName runs either way;
-  // the server fails closed if the name was not accepted).
-  ensureWebToken(function() {
-    registerWebName(function() { connect(); });
-  });
+  // one, then first-boot register (adopting the registered name on a 409)
+  // and connect; see bootSession and startSession.
+  bootSession();
   loadTemplates();
   // Decide popover wiring
   var decideAdd = document.getElementById('decide-add');
@@ -8194,14 +8408,7 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   // Show instance name in header + page title
-  fetch('/api/instance').then(function(r) { return r.json(); }).then(function(info) {
-    if (!info || !info.name) return;
-    var el = document.getElementById('instance-name');
-    if (el) el.textContent = info.name;
-    var brand = document.getElementById('rail-brand');
-    if (brand) { brand.title = info.name; brand.textContent = info.name.charAt(0).toUpperCase(); }
-    document.title = info.name === 'Joind' ? 'Joind' : info.name + ' — Joind';
-  }).catch(function() { /* ignore */ });
+  loadInstanceInfo();
   // Wire conversation search
   var convSearch = document.getElementById('conv-search');
   if (convSearch) {

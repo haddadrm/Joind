@@ -311,7 +311,74 @@
     return { take: Math.min(room, adding), refused: Math.max(0, adding - room) };
   }
 
+  // What POST /api/web/register answered, for the page. `submitted` is the
+  // name the page sent. Kinds:
+  //   ok           the name is registered (first or same); connect with it
+  //   adopt        another name is registered and the server named it (only
+  //                a caller holding the web token is told); adopt, connect
+  //   refused      the name was refused and there is no name to adopt
+  //                (a read-only seat's name, an invalid name); do not connect
+  //   unauthorized the token was refused (403); the socket's 4401 decides
+  //   error        no usable answer (network, a server error)
+  function registerOutcome(status, body, submitted) {
+    var b = body && typeof body === 'object' ? body : {};
+    if (status >= 200 && status < 300) {
+      return { kind: 'ok', name: typeof b.name === 'string' && b.name ? b.name : String(submitted || '') };
+    }
+    if (status === 409 && typeof b.registered === 'string' && b.registered.trim()) {
+      return { kind: 'adopt', name: b.registered };
+    }
+    if (status === 409 || status === 400) {
+      return { kind: 'refused', error: typeof b.error === 'string' && b.error ? b.error : 'name refused' };
+    }
+    if (status === 401 || status === 403) return { kind: 'unauthorized' };
+    return { kind: 'error' };
+  }
+
+  // What the page does when its socket closes. `s` holds:
+  //   code         the close code
+  //   failures     consecutive 4401/4403 closes since the last `init`,
+  //                counting this one (the server accepts the upgrade and then
+  //                closes, so `onopen` always runs first: the count is reset
+  //                on `init`, never on open)
+  //   injected     the page is using a token injected into the page
+  //   reloadedOnce the page already reloaded once for a refused injected token
+  //   limit        how many name refusals to retry before stopping (default 3)
+  // Actions:
+  //   retry       plain reconnect after a delay (not an auth close)
+  //   reload      the injected token is stale: reload the page once, which
+  //               brings the current token (or none, and the prompt)
+  //   prompt      the token was refused: drop it, show the banner, ask again
+  //   reregister  the name was refused (4403): register again, adopting the
+  //               registered name, then reconnect
+  //   banner      the name keeps being refused: stop and show the banner
+  function wsAuthCloseAction(s) {
+    var o = s || {};
+    var limit = typeof o.limit === 'number' && o.limit > 0 ? o.limit : 3;
+    if (o.code === 4401) {
+      if (o.injected && !o.reloadedOnce) return 'reload';
+      return 'prompt';
+    }
+    if (o.code === 4403) {
+      return (o.failures || 0) >= limit ? 'banner' : 'reregister';
+    }
+    return 'retry';
+  }
+
+  // Whether an /api/ answer means this page's web token is refused: any 401
+  // (the agent-auth gate), or a 403 whose error is the routes' plain
+  // "unauthorized". Other 403s are permission answers about the request
+  // (editing someone else's message), not about the token.
+  function tokenRefusedAnswer(status, body) {
+    if (status === 401) return true;
+    if (status !== 403) return false;
+    return !!(body && typeof body === 'object' && body.error === 'unauthorized');
+  }
+
   return {
+    registerOutcome: registerOutcome,
+    wsAuthCloseAction: wsAuthCloseAction,
+    tokenRefusedAnswer: tokenRefusedAnswer,
     linkCardUrl: linkCardUrl,
     linkCardLabel: linkCardLabel,
     linkCardMarkdown: linkCardMarkdown,
