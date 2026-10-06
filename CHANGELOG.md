@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-06: Backlog after the marks merge
+
+- Removed the "Joind logo lost in the redesign" item (shipped with the marks merge). Added "Marks follow-ups from the marks gate" with the gate's three Lows and the seat last-read note.
+
 ## 2026-10-06: Marks (server mark, server badges, member marks, read-only seats in the member list)
 
 Logo variant B and member variant M1 from the marks mockup, with the read-only seats made visible to the operator.
