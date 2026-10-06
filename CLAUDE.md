@@ -121,7 +121,9 @@ a token is held shows the banner, unless the request went out before the banner 
 (`authEpoch`) or with a token since replaced. A typed token is kept in page memory too, so blocked
 storage cannot lose it. One register-and-connect attempt at a time (`sessionAttempt`): a newer one
 supersedes, a replaced socket is closed and ignored, and sign out closes every socket the tab
-opened. Entering a token re-runs the boot reads. Browser smoke:
+opened; Sign in then resumes in place (`resumeSession`, no reload) unless the token was served
+in the page. Entering a token re-runs the boot reads. Reads check `r.ok` (`okJson`, `refusalBody`) and
+keep what the page holds on a refusal. Browser smoke:
 `tools/web-smoke/` (Playwright, ephemeral port, see its README).
 
 ## REST API
