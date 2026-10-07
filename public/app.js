@@ -209,6 +209,12 @@ function forgetWebToken() {
 // it is given: Forget, sign out and a token entered unticked, in any tab,
 // move the revision on, so a wish another tab gave before the clear (its
 // init still on the way) no longer matches and writes nothing back.
+// The revision exists before any wish is recorded (a wish that cannot store
+// one is not recorded), and the token is written only while the revision is
+// present and equal to the wish's. A clear replaces it with a value of the
+// same length (no extra space at the quota), or removes it when even that
+// fails, which voids every pending wish. A clear never ends with the old
+// revision in place.
 // Every removal of the device copy is one of two kinds: a clear by the user
 // (clearDeviceToken: remove, and move the revision on), or a cleanup bound
 // to the exact token concerned (dropRememberedTokenIf, a refusal), which
@@ -224,15 +230,43 @@ function rememberedToken() {
 function rememberRevision() {
   try { return localStorage.getItem(REMEMBER_REV_KEY) || ''; } catch (e) { return ''; }
 }
-function bumpRememberRevision() {
-  var rev = Date.now().toString(36) + '.' + Math.random().toString(36).slice(2, 10);
-  try { localStorage.setItem(REMEMBER_REV_KEY, rev); } catch (e) { /* storage unavailable: nothing to protect */ }
-}
-function askToRemember(on) {
-  rememberAsked = !!on;
-  rememberAskedRev = on ? rememberRevision() : '';
+// A fresh revision, always 16 hex characters.
+function newRememberRevision() {
+  var words = [];
   try {
-    if (on) {
+    var a = new Uint32Array(2);
+    crypto.getRandomValues(a);
+    words = [a[0], a[1]];
+  } catch (e) {
+    words = [Math.floor(Math.random() * 0x100000000), Math.floor(Math.random() * 0x100000000)];
+  }
+  return words.map(function(w) { return ('0000000' + w.toString(16)).slice(-8); }).join('');
+}
+// The revision a wish is given under: the current one, or a new one stored
+// now. '' when none can be stored (quota or blocked storage).
+function ensureRememberRevision() {
+  try {
+    var rev = localStorage.getItem(REMEMBER_REV_KEY);
+    if (rev) return rev;
+    rev = newRememberRevision();
+    localStorage.setItem(REMEMBER_REV_KEY, rev);
+    return localStorage.getItem(REMEMBER_REV_KEY) === rev ? rev : '';
+  } catch (e) { return ''; }
+}
+// Move the revision on. If the write fails (at the quota), remove it: no
+// wish matches an absent revision, and a removal needs no space.
+function bumpRememberRevision() {
+  try { localStorage.setItem(REMEMBER_REV_KEY, newRememberRevision()); return; } catch (e) { /* full or blocked */ }
+  try { localStorage.removeItem(REMEMBER_REV_KEY); } catch (e) { /* blocked: nothing can be written either */ }
+}
+// A wish that cannot be bound to a stored revision is not recorded: Remember
+// then does nothing, as with blocked storage.
+function askToRemember(on) {
+  var rev = on ? ensureRememberRevision() : '';
+  rememberAsked = !!rev;
+  rememberAskedRev = rev;
+  try {
+    if (rev) {
       sessionStorage.setItem(REMEMBER_ASK_KEY, '1');
       sessionStorage.setItem(REMEMBER_REV_KEY, rememberAskedRev);
     } else {
@@ -252,11 +286,12 @@ function rememberAskedRevision() {
   try { return sessionStorage.getItem(REMEMBER_REV_KEY) || ''; } catch (e) { return ''; }
 }
 // Sign out, Forget, or a token entered with the box unticked: the device
-// copy goes, and every wish given before now, in any tab, is void.
+// copy goes, and every wish given before now, in any tab, is void. The
+// revision moves first, so no tab can match the old one once the copy is gone.
 function clearDeviceToken() {
   askToRemember(false);
-  try { localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* storage unavailable */ }
   bumpRememberRevision();
+  try { localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* storage unavailable */ }
 }
 // A refusal: drop the device copy only while it is still the refused token.
 // Another tab may have stored a different, accepted one since.
@@ -268,11 +303,12 @@ function dropRememberedTokenIf(token) {
 }
 // The socket's init: the server accepted `token`. Store it when asked to,
 // unless it is the token served in the page, or the device was cleared
-// since the wish was given.
+// since the wish was given (the revision moved on, or is absent).
 function rememberAcceptedToken(token, served) {
   if (served || !token || !rememberIsAsked()) return;
   if (window.__JOIND_TOKEN && token === window.__JOIND_TOKEN) return;
-  if (rememberAskedRevision() === rememberRevision()) {
+  var askedRev = rememberAskedRevision();
+  if (askedRev && askedRev === rememberRevision()) {
     try { localStorage.setItem(REMEMBER_KEY, token); } catch (e) { /* storage unavailable: this tab only */ }
   }
   askToRemember(false);

@@ -140,7 +140,7 @@ const LIFTED_FUNCTIONS = [
   "jsonOr", "quietAbort", "fenceBody",
   "loadTaskCount", "openImportDialog", "renderServerBadgeSettings", "settingsRow", "settingsSwitch", "ownServerBadge",
   "rememberedToken", "askToRemember", "rememberIsAsked", "dropRememberedTokenIf", "rememberAcceptedToken", "forgetOnThisDevice",
-  "rememberRevision", "bumpRememberRevision", "rememberAskedRevision", "clearDeviceToken", "tokenHint",
+  "rememberRevision", "newRememberRevision", "ensureRememberRevision", "bumpRememberRevision", "rememberAskedRevision", "clearDeviceToken", "tokenHint",
   "tokenSource", "maskedToken", "settingsSection", "buildTokenSection", "buildRememberRow",
 ];
 const LIFTED_VARS = [
@@ -1628,7 +1628,10 @@ describe("remember on this device: the token prompt", () => {
 
   it("the wish survives the reload after Change in Settings (a flag in sessionStorage, no token)", async () => {
     const page = makePage({ name: "Rami", sessionToken: TOKEN });
+    // As askToRemember(true) leaves it: the flag and the revision it was given under.
+    page.win.localStorage.setItem("joind-web-token-remember-rev", "0123456789abcdef");
     page.win.sessionStorage.setItem(REMEMBER_ASK, "1");
+    page.win.sessionStorage.setItem("joind-web-token-remember-rev", "0123456789abcdef");
     page.route = registerOk;
     page.api.run("bootSession()");
     await page.flush();
@@ -2110,12 +2113,12 @@ describe("remember on this device: a clear holds with localStorage at its quota"
   for (const fault of ["quota", "every set throws"] as const) {
     it(`consent at the quota (${fault}): nothing is remembered and nothing throws`, async () => {
       const local = quotaStorage(makePage().win);
-      local.fillToQuota();
-      if (fault === "every set throws") local.failEverySet = true;
       const page = makePage({ name: "Rami", local });
       page.route = registerOk;
       page.api.run("bootSession()");
       await page.flush();
+      local.fillToQuota();
+      if (fault === "every set throws") local.failEverySet = true;
       expect(() => typeTokenRemember(page, TOKEN, true)).not.toThrow();
       await page.flush();
       expect(page.api.run("rememberIsAsked()")).toBe(false); // no revision, so no consent
