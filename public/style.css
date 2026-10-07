@@ -2290,6 +2290,19 @@ a.msg-ref:hover { text-decoration: none; border-bottom-style: solid; }
 }
 .session-modal-title { font-size: var(--fs-title); font-weight: 700; color: var(--text-bright); }
 .session-modal-desc { font-size: var(--fs-label); color: var(--text-dim); margin-bottom: 4px; }
+/* The token prompt's "Remember on this device": the whole row is the
+   target, at least 44px tall so a phone thumb finds it. */
+.token-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  font-size: var(--fs-ui);
+  color: var(--text);
+  cursor: pointer;
+}
+.token-remember input { width: 18px; height: 18px; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
+.token-remember-note { margin: 0; font-size: var(--fs-label); line-height: 1.4; color: var(--text-dim); }
 .session-modal-row {
   display: flex;
   align-items: center;

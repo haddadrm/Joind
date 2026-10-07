@@ -181,17 +181,64 @@ var reconcileOnInit = false;
 
 // Server-issued token: injected into index.html when generated, otherwise the
 // browser supplies it once per tab session via a prompt (page memory, and
-// sessionStorage when it is available, so a reload keeps it).
+// sessionStorage when it is available, so a reload keeps it), or, when the
+// user ticked "Remember on this device", from localStorage.
 function webToken() {
   if (window.__JOIND_TOKEN && !injectedTokenStale) return window.__JOIND_TOKEN;
   if (typedWebToken) return typedWebToken;
-  try { return sessionStorage.getItem('joind-web-token') || ''; } catch (e) { return ''; }
+  var stored = '';
+  try { stored = sessionStorage.getItem('joind-web-token') || ''; } catch (e) { /* storage unavailable */ }
+  return stored || rememberedToken();
 }
 
-// Drop the typed token from memory and from storage (refused, or sign out).
+// Drop the typed token from memory and from storage (refused, or sign out),
+// the copy this device remembers included.
 function forgetWebToken() {
   typedWebToken = '';
   try { sessionStorage.removeItem('joind-web-token'); } catch (e) { /* storage unavailable */ }
+  dropRememberedToken();
+}
+
+// "Remember on this device": a typed token kept in localStorage, written
+// only once the server accepted it (the socket's init), never a served one.
+// Until then the wish is held in page memory and in sessionStorage (a flag,
+// no token), so the reload after Settings' Change keeps it.
+var REMEMBER_KEY = 'joind-web-token-remembered';
+var REMEMBER_ASK_KEY = 'joind-web-token-remember';
+var rememberAsked = false;
+function rememberedToken() {
+  try { return localStorage.getItem(REMEMBER_KEY) || ''; } catch (e) { return ''; }
+}
+function askToRemember(on) {
+  rememberAsked = !!on;
+  try {
+    if (on) sessionStorage.setItem(REMEMBER_ASK_KEY, '1');
+    else sessionStorage.removeItem(REMEMBER_ASK_KEY);
+  } catch (e) { /* storage unavailable: page memory holds the wish */ }
+}
+function rememberIsAsked() {
+  if (rememberAsked) return true;
+  try { return sessionStorage.getItem(REMEMBER_ASK_KEY) === '1'; } catch (e) { return false; }
+}
+// Refused, sign out, Forget, or a token entered with the box unticked.
+function dropRememberedToken() {
+  askToRemember(false);
+  try { localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* storage unavailable */ }
+}
+// The socket's init: the server accepted `token`. Store it when asked to,
+// unless it is the token served in the page.
+function rememberAcceptedToken(token, served) {
+  if (served || !token || !rememberIsAsked()) return;
+  if (window.__JOIND_TOKEN && token === window.__JOIND_TOKEN) return;
+  try { localStorage.setItem(REMEMBER_KEY, token); } catch (e) { /* storage unavailable: this tab only */ }
+  askToRemember(false);
+}
+// Settings, Forget on this device: the device stops remembering, and this
+// tab keeps the token in page memory until it reloads or signs out.
+function forgetOnThisDevice() {
+  var t = webToken();
+  if (t && !injectedTokenInUse() && !typedWebToken) typedWebToken = t;
+  dropRememberedToken();
 }
 
 // True while the page is using a token injected into it by the server.
@@ -450,13 +497,29 @@ function promptWebToken(after) {
   var title = document.createElement('h3');
   title.textContent = 'Web token required';
   var hint = document.createElement('p');
-  hint.textContent = 'This Joind uses a user-set web token. Enter it to view DMs (kept for this tab session only).';
+  hint.textContent = 'This Joind uses a user-set web token. Enter it to view DMs (kept for this tab session only, unless you tick Remember on this device).';
   hint.style.fontSize = 'var(--fs-ui)';
   hint.style.opacity = '0.8';
   var input = document.createElement('input');
   input.type = 'password';
   input.className = 'launch-input';
   input.placeholder = 'web token';
+  input.setAttribute('aria-label', 'Web token');
+  // Off by default; ticked when this device already remembers a token, so
+  // Change keeps remembering unless it is unticked.
+  var rememberRow = document.createElement('label');
+  rememberRow.className = 'token-remember';
+  var remember = document.createElement('input');
+  remember.type = 'checkbox';
+  remember.id = 'web-token-remember';
+  remember.checked = !!rememberedToken();
+  var rememberText = document.createElement('span');
+  rememberText.textContent = 'Remember on this device';
+  rememberRow.appendChild(remember);
+  rememberRow.appendChild(rememberText);
+  var rememberNote = document.createElement('p');
+  rememberNote.className = 'token-remember-note';
+  rememberNote.textContent = 'Kept in this browser until you sign out or forget it in Settings. Anyone using this device unlocked can then open Joind.';
   var btnRow = document.createElement('div');
   btnRow.style.marginTop = '10px';
   btnRow.style.textAlign = 'right';
@@ -468,6 +531,9 @@ function promptWebToken(after) {
     if (!value) return;
     typedWebToken = value;
     try { sessionStorage.setItem('joind-web-token', value); } catch (e) { /* storage unavailable: memory holds it */ }
+    // Stored only once the server accepts it (rememberAcceptedToken).
+    if (remember.checked) askToRemember(true);
+    else dropRememberedToken();
     // A typed token supersedes an injected one that the server refused.
     if (window.__JOIND_TOKEN) injectedTokenStale = true;
     overlay.remove();
@@ -479,14 +545,15 @@ function promptWebToken(after) {
   okBtn.addEventListener('click', submit);
   input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submit(); });
   btnRow.appendChild(okBtn);
-  modal.appendChild(title); modal.appendChild(hint); modal.appendChild(input); modal.appendChild(btnRow);
+  modal.appendChild(title); modal.appendChild(hint); modal.appendChild(input);
+  modal.appendChild(rememberRow); modal.appendChild(rememberNote); modal.appendChild(btnRow);
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
   input.focus();
 }
 
 // Ensure a token exists before connecting; prompt only when neither the
-// injected value nor sessionStorage has one.
+// injected value, sessionStorage nor the remembered copy has one.
 var bootTokenPrompted = false;
 function ensureWebToken(after) {
   if (webToken()) { if (after) after(); return; }
@@ -627,7 +694,10 @@ function connect() {
   // Always claim the last server-accepted name; renames flow through
   // web-rename on the open socket, never through a fresh ?name=.
   wsName = wsName || myName();
-  var sock = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(webToken()) + '&name=' + encodeURIComponent(wsName));
+  // The token this socket offers: its init means the server accepted it.
+  var sockToken = webToken();
+  var sockServed = injectedTokenInUse();
+  var sock = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(sockToken) + '&name=' + encodeURIComponent(wsName));
   ws = sock;
   tabSockets.push(sock);
   var dot = document.getElementById('connection-dot');
@@ -661,6 +731,7 @@ function connect() {
         // auth trouble over (see wsAuthFailures).
         wsAuthFailures = 0;
         clearTokenReload();
+        rememberAcceptedToken(sockToken, sockServed);
         hideAuthBanner();
         if (typeof event.data.serverNow === 'number') clockOffset = event.data.serverNow - Date.now();
         agents = event.data.agents;
@@ -3478,6 +3549,7 @@ function buildTokenSection() {
   var src = tokenSource();
   var hint = src === 'served' ? 'Served by this Joind to the page; it gates direct messages'
     : src === 'tab' ? 'Entered for this tab session only; it gates direct messages'
+    : src === 'device' ? 'Remembered on this device; it gates direct messages'
     : 'Not set: direct messages stay closed';
   var value = document.createElement('span');
   value.className = 'setting-mono';
@@ -3490,7 +3562,7 @@ function buildTokenSection() {
     change.type = 'button';
     change.className = 'btn btn-sm';
     change.id = 'settings-token-change';
-    change.textContent = src === 'tab' ? 'Change' : 'Enter token';
+    change.textContent = src === 'tab' || src === 'device' ? 'Change' : 'Enter token';
     change.addEventListener('click', function() {
       closeSettingsModal(false);
       promptWebToken(function() { location.reload(); });
@@ -3498,6 +3570,7 @@ function buildTokenSection() {
     both.appendChild(change);
   }
   sec.appendChild(settingsRow('Token', hint, both).row);
+  sec.appendChild(buildRememberRow());
   var out = document.createElement('button');
   out.type = 'button';
   out.className = 'btn btn-sm btn-danger-outline';
@@ -3508,8 +3581,38 @@ function buildTokenSection() {
     out.setAttribute('data-confirm', 'yes');
     out.textContent = 'Press again to sign out';
   });
-  sec.appendChild(settingsRow('Sign out', 'Clears the token from this tab and closes the connection', out).row);
+  sec.appendChild(settingsRow('Sign out', 'Clears the token from this tab and this device, and closes the connection', out).row);
   return sec;
+}
+
+// Whether this device remembers the token, with Forget. The row redraws
+// itself in place after Forget.
+function buildRememberRow() {
+  var remembered = !!rememberedToken();
+  var control = null;
+  if (remembered) {
+    control = document.createElement('button');
+    control.type = 'button';
+    control.className = 'btn btn-sm';
+    control.id = 'settings-token-forget';
+    control.textContent = 'Forget on this device';
+  }
+  var hint = remembered
+    ? 'This browser keeps the token until you sign out or forget it; anyone using this device unlocked can open Joind'
+    : 'Not remembered: tick Remember on this device when you enter the token to keep it here';
+  var built = settingsRow('This device', hint, control);
+  built.row.id = 'settings-token-device';
+  if (control) {
+    control.addEventListener('click', function() {
+      forgetOnThisDevice();
+      var fresh = buildRememberRow();
+      if (built.row.parentNode) built.row.parentNode.replaceChild(fresh, built.row);
+      var after = document.getElementById('settings-token-device');
+      var hintEl = after ? after.querySelector('.setting-hint') : null;
+      if (hintEl) hintEl.textContent = 'Forgotten on this device. This tab stays signed in until it reloads or signs out';
+    });
+  }
+  return built.row;
 }
 
 // Agent key (server side: src/agent-auth.ts). The status never carries the
@@ -6496,10 +6599,9 @@ function toggleTheme() { setTheme(currentTheme() === 'light' ? 'dark' : 'light')
 // --- Web token: where it comes from, masked ---
 function tokenSource() {
   if (injectedTokenInUse()) return 'served';
-  if (typedWebToken) return 'tab';
-  var stored = '';
-  try { stored = sessionStorage.getItem('joind-web-token') || ''; } catch (e) { /* storage unavailable */ }
-  return stored ? 'tab' : 'none';
+  var t = webToken();
+  if (!t) return 'none';
+  return t === rememberedToken() ? 'device' : 'tab';
 }
 function maskedToken() {
   var t = webToken();
@@ -6581,7 +6683,7 @@ function openUserMenu() {
     pill.focus();
   });
   var src = tokenSource();
-  addItem('key-round', 'Web token', src === 'served' ? 'served' : src === 'tab' ? 'this tab' : 'not set', function() {
+  addItem('key-round', 'Web token', src === 'served' ? 'served' : src === 'tab' ? 'this tab' : src === 'device' ? 'this device' : 'not set', function() {
     closePopover();
     openSettingsModal('token', pill);
   });
@@ -6722,8 +6824,8 @@ function showSignedOut(served) {
   var text = document.createElement('p');
   text.className = 'signed-out-text';
   text.textContent = served
-    ? 'The web token is cleared from this tab and the connection is closed. This Joind serves its token to the page, so signing in again reloads it.'
-    : 'The web token is cleared from this tab and the connection is closed. Enter the token again to sign in.';
+    ? 'The web token is cleared from this tab (and from this device, if it was remembered) and the connection is closed. This Joind serves its token to the page, so signing in again reloads it.'
+    : 'The web token is cleared from this tab (and from this device, if it was remembered) and the connection is closed. Enter the token again to sign in.';
   var btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn btn-primary';
