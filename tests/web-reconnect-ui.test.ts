@@ -264,6 +264,21 @@ interface PageOptions {
   injected?: string; sessionToken?: string; reloadFlag?: boolean; name?: string; storage?: StorageFault; noAbortController?: boolean;
   /** A token this device remembers (localStorage) before the page loads. */
   remembered?: string;
+  /** A localStorage shared with other pages: tabs of one browser on one origin. */
+  local?: Storage;
+}
+
+/** A working storage that several pages can share (one browser's localStorage). */
+function sharedStorage(): Storage {
+  const data = new Map<string, string>();
+  return {
+    get length(): number { return data.size; },
+    key: (i: number): string | null => [...data.keys()][i] ?? null,
+    getItem: (k: string): string | null => data.get(k) ?? null,
+    setItem: (k: string, v: string): void => { data.set(k, String(v)); },
+    removeItem: (k: string): void => { data.delete(k); },
+    clear: (): void => { data.clear(); },
+  };
 }
 
 /** A sessionStorage whose reads, writes or both throw (storage blocked). */
@@ -292,6 +307,7 @@ function makePage(opts: PageOptions = {}): Page {
     { runScripts: "outside-only", url: "http://joind.test/" },
   );
   const win = dom.window as unknown as Window & typeof globalThis & Record<string, unknown>;
+  if (opts.local) Object.defineProperty(win, "localStorage", { configurable: true, value: opts.local });
   if (opts.sessionToken) win.sessionStorage.setItem("joind-web-token", opts.sessionToken);
   if (opts.reloadFlag) win.sessionStorage.setItem("joind-token-reload", "1");
   if (opts.remembered) win.localStorage.setItem("joind-web-token-remembered", opts.remembered);
@@ -1770,5 +1786,101 @@ describe("remember on this device: blocked storage degrades to the old behaviour
     expect(tokenOf(page.last())).toBe(TOKEN);
     page.open(); page.init();
     expect(page.prompt()).toBeNull();
+  });
+});
+
+// --- Remember on this device, round 2 (gate 1 findings, 7 Oct 2026) ------
+
+/** A tab of one browser: shares `local`, signs in with Remember ticked, and stops before init. */
+async function tabPendingInit(local: Storage): Promise<Page> {
+  const page = makePage({ name: "Rami", local });
+  page.route = registerOk;
+  page.api.run("bootSession()");
+  await page.flush();
+  typeTokenRemember(page, TOKEN, true);
+  await page.flush();
+  page.open();
+  return page;
+}
+
+/** A fresh tab on the same device: does it stop at the token prompt? */
+async function freshTabPrompts(local: Storage): Promise<boolean> {
+  const page = makePage({ name: "Rami", local });
+  page.route = registerOk;
+  page.api.run("bootSession()");
+  await page.flush();
+  return page.prompt() !== null;
+}
+
+describe("remember on this device: another tab's late acceptance cannot undo a clear", () => {
+  const clears: Array<[string, (a: Page) => void]> = [
+    ["Forget in Settings", (a) => {
+      a.api.run("document.body.appendChild(buildTokenSection())");
+      (a.win.document.getElementById("settings-token-forget") as HTMLButtonElement).click();
+    }],
+    ["sign out", (a) => { a.api.run("signOut()"); }],
+  ];
+  for (const [label, clear] of clears) {
+    it(`${label} in tab A, then tab B's delayed init: nothing is written back`, async () => {
+      const local = sharedStorage();
+      const b = await tabPendingInit(local); // consent given, init delayed
+      const a = await tabPendingInit(local);
+      a.init();
+      expect(local.getItem(REMEMBERED)).toBe(TOKEN);
+      clear(a);
+      expect(local.getItem(REMEMBERED)).toBeNull();
+      b.init(); // the late acceptance
+      expect(local.getItem(REMEMBERED)).toBeNull();
+      expect(b.api.run("rememberIsAsked()")).toBe(false); // the stale wish is dropped
+      expect(b.api.run("webToken()")).toBe(TOKEN); // B itself stays signed in
+      expect(await freshTabPrompts(local)).toBe(true);
+    });
+  }
+
+  it("consent given after the clear is honoured", async () => {
+    const local = sharedStorage();
+    const a = await tabPendingInit(local);
+    a.init();
+    a.api.run("signOut()");
+    const c = await tabPendingInit(local);
+    c.init();
+    expect(local.getItem(REMEMBERED)).toBe(TOKEN);
+    expect(await freshTabPrompts(local)).toBe(false);
+  });
+
+  it("the wish carried over Change's reload is bound to the revision too", async () => {
+    const local = sharedStorage();
+    const b = await tabPendingInit(local);
+    const carried = b.win.sessionStorage;
+    // Tab B reloads after Change with the wish in sessionStorage; a clear lands meanwhile.
+    const a = await tabPendingInit(local);
+    a.init();
+    a.api.run("signOut()");
+    const reloaded = makePage({ name: "Rami", local, sessionToken: TOKEN });
+    for (let i = 0; i < carried.length; i++) {
+      const k = carried.key(i)!;
+      if (k.startsWith("joind-web-token-remember")) reloaded.win.sessionStorage.setItem(k, carried.getItem(k)!);
+    }
+    reloaded.route = registerOk;
+    reloaded.api.run("bootSession()");
+    await reloaded.flush();
+    reloaded.open(); reloaded.init();
+    expect(local.getItem(REMEMBERED)).toBeNull();
+  });
+});
+
+describe("remember on this device: Settings after Forget", () => {
+  it("the Token row no longer says the token is remembered", async () => {
+    const page = makePage({ name: "Rami", remembered: TOKEN });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    page.open(); page.init();
+    page.api.run("document.body.appendChild(buildTokenSection())");
+    const hint = (): string => page.win.document.getElementById("settings-token-row")!.querySelector(".setting-hint")!.textContent ?? "";
+    expect(hint()).toContain("Remembered on this device");
+    (page.win.document.getElementById("settings-token-forget") as HTMLButtonElement).click();
+    expect(hint()).not.toContain("Remembered on this device");
+    expect(hint()).toContain("Entered for this tab session only");
   });
 });
