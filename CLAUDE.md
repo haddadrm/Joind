@@ -137,7 +137,22 @@ in `index.html`, before the page runs, uses the SVG's own colour-scheme query.
 ## Web viewer: token, name lock and reconnect
 
 The page holds the web token injected into `/` (generated token) or typed at the prompt (user-set,
-`sessionStorage`, per tab), and sends it as `X-Joind-Token` on every `/api/` call. Every web-token
+`sessionStorage`, per tab), and sends it as `X-Joind-Token` on every `/api/` call. The prompt has
+an opt-in "Remember on this device" (off by default): the typed token goes to localStorage
+(`joind-web-token-remembered`) only when the socket's `init` accepts it (`rememberAcceptedToken`;
+until then the wish is a token-free `sessionStorage` flag), never a served token. Lookup order:
+served, then `sessionStorage`, then remembered. Two kinds of removal only: a clear by the user
+(sign out, Settings' "Forget on this device", a token entered with the box unticked:
+`clearDeviceToken`) removes it and moves the device clear revision on
+(`joind-web-token-remember-rev` in localStorage); a refusal (4401 prompt path) removes it only
+while it equals the refused socket's token (`dropRememberedTokenIf`), so it never touches another
+tab's newer token. The wish is bound to the revision read when it is given, so another tab's late
+`init` cannot write the token back after a clear. The revision is created when a wish is given (no
+wish is recorded if it cannot be stored), and `init` writes only while it is present and equal; a
+clear replaces it with a new value of the same length (16 hex characters, so no extra space at the
+quota) before removing the token, and removes the revision if even that write fails.
+Tradeoff: the token sits in that browser until sign out or Forget, so anyone with the unlocked
+device can use Joind. Every web-token
 read accepts that header or `?token=` (header first, as at the agent-auth gate). One human viewer
 name is registered per server (`POST /api/web/register`, first wins); the socket accepts only that
 name (4401 bad token, 4403 other name). A 409 from register carries `registered` (only a caller

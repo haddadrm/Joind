@@ -87,6 +87,9 @@ function cachedChromium() {
 
 // The token prompt, found by its input (older builds gave the overlay no id).
 const PROMPT = '.session-modal-overlay:has(input[placeholder="web token"])';
+// Its token field (the prompt also holds the Remember checkbox).
+const TOKEN_FIELD = PROMPT + ' input[placeholder="web token"]';
+const REMEMBERED = "joind-web-token-remembered";
 
 const results = [];
 function check(label, ok, detail) {
@@ -162,7 +165,7 @@ try {
     await page.waitForSelector(PROMPT, { timeout: 10_000 });
     check("A: fresh profile shows the token prompt", true);
     check("A: no rooms before the token", (await roomCount(page)) === 0);
-    await page.fill(PROMPT + " input", webToken);
+    await page.fill(TOKEN_FIELD, webToken);
     await page.click(PROMPT + " button");
     await page.waitForFunction(() => conversationList.length >= 2, null, { timeout: 15_000 }).catch(() => undefined);
     const names = await page.evaluate(() => conversationList.map((c) => c.name).sort());
@@ -178,6 +181,8 @@ try {
     const roster = await page.evaluate(() => crewRoster.map((c) => c.name));
     check("A: crew roster loaded after the token", roster.includes("Kira"), roster.join(","));
     check("A: no auth banner", (await page.locator("#auth-banner").count()) === 0);
+    const kept = await page.evaluate((k) => localStorage.getItem(k), REMEMBERED);
+    check("A: Remember left off: nothing in localStorage", kept === null);
     check("A: no page errors", errors.length === 0, errors.join(" | "));
     await page.screenshot({ path: join(dir, "a.png") }).catch(() => undefined);
     await context.close();
@@ -188,18 +193,64 @@ try {
     const { context, page, errors } = await freshPage();
     await page.goto(base + "/");
     await page.waitForSelector(PROMPT, { timeout: 10_000 });
-    await page.fill(PROMPT + " input", "not-the-token");
+    await page.fill(TOKEN_FIELD, "not-the-token");
     await page.click(PROMPT + " button");
     await page.waitForSelector("#auth-banner", { timeout: 10_000 }).catch(() => undefined);
     check("B: a refused token shows the banner", (await page.locator("#auth-banner").count()) === 1);
     check("B: and the prompt again", (await page.locator(PROMPT).count()) === 1);
     check("B: no rooms with a wrong token", (await roomCount(page)) === 0);
-    await page.fill(PROMPT + " input", webToken);
+    await page.fill(TOKEN_FIELD, webToken);
     await page.click(PROMPT + " button");
     await page.waitForFunction(() => conversationList.length >= 2, null, { timeout: 15_000 }).catch(() => undefined);
     check("B: the right token then connects with rooms", (await roomCount(page)) >= 2 && (await connected(page)));
     check("B: the banner is gone", (await page.locator("#auth-banner").count()) === 0);
     check("B: no page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+
+  // --- C: fresh phone, Remember on this device ---
+  {
+    const { context, page, errors } = await freshPage();
+    await page.goto(base + "/");
+    await page.waitForSelector(PROMPT, { timeout: 10_000 });
+    const box = await page.locator(PROMPT + " .token-remember").boundingBox();
+    const width = page.viewportSize() ? page.viewportSize().width : 0;
+    check("C: the Remember row fits the phone and is a thumb-sized target",
+      !!box && box.height >= 44 && box.x >= 0 && box.x + box.width <= width, box ? `${Math.round(box.width)}x${Math.round(box.height)} in ${width}` : "none");
+    check("C: Remember is off by default", !(await page.isChecked("#web-token-remember")));
+    await page.click(PROMPT + " .token-remember");
+    check("C: tapping the row ticks it", await page.isChecked("#web-token-remember"));
+    await page.fill(TOKEN_FIELD, webToken);
+    await page.click(PROMPT + " button");
+    await page.waitForFunction(() => conversationList.length >= 2, null, { timeout: 15_000 }).catch(() => undefined);
+    await page.waitForFunction((k) => localStorage.getItem(k) !== null, REMEMBERED, { timeout: 10_000 }).catch(() => undefined);
+    check("C: stored on this device once accepted", (await page.evaluate((k) => localStorage.getItem(k), REMEMBERED)) === webToken);
+    // A new tab in the same profile: sessionStorage is empty, the remembered token signs in.
+    const again = await context.newPage();
+    again.on("pageerror", (e) => errors.push(String(e && e.message)));
+    await again.goto(base + "/");
+    await again.waitForFunction(() => conversationList.length >= 2, null, { timeout: 15_000 }).catch(() => undefined);
+    check("C: a new tab signs in with no prompt", (await again.locator(PROMPT).count()) === 0 && (await roomCount(again)) >= 2 && (await connected(again)));
+    await again.evaluate(() => signOut());
+    check("C: sign out forgets it on this device", (await again.evaluate((k) => localStorage.getItem(k), REMEMBERED)) === null);
+    check("C: no page errors", errors.length === 0, errors.join(" | "));
+    await again.screenshot({ path: join(dir, "c.png") }).catch(() => undefined);
+    await context.close();
+  }
+
+  // --- D: a remembered token the server refuses ---
+  {
+    const { context, page, errors } = await freshPage();
+    await context.addInitScript((k) => { if (!sessionStorage.getItem("smoke-seeded")) { localStorage.setItem(k, "stale-token"); sessionStorage.setItem("smoke-seeded", "1"); } }, REMEMBERED);
+    let loads = 0;
+    page.on("load", () => { loads += 1; });
+    await page.goto(base + "/");
+    await page.waitForSelector(PROMPT, { timeout: 10_000 }).catch(() => undefined);
+    check("D: a refused remembered token prompts", (await page.locator(PROMPT).count()) === 1);
+    check("D: and is removed at once", (await page.evaluate((k) => localStorage.getItem(k), REMEMBERED)) === null);
+    await page.waitForTimeout(1500);
+    check("D: no reload (one load, one prompt)", loads === 1 && (await page.locator(PROMPT).count()) === 1, `loads ${loads}`);
+    check("D: no page errors", errors.length === 0, errors.join(" | "));
     await context.close();
   }
 } catch (err) {
