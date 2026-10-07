@@ -141,11 +141,13 @@ The page holds the web token injected into `/` (generated token) or typed at the
 an opt-in "Remember on this device" (off by default): the typed token goes to localStorage
 (`joind-web-token-remembered`) only when the socket's `init` accepts it (`rememberAcceptedToken`;
 until then the wish is a token-free `sessionStorage` flag), never a served token. Lookup order:
-served, then `sessionStorage`, then remembered. A refusal (4401 prompt path), sign out and
-Settings' "Forget on this device" remove it; a token entered with the box unticked drops it too.
-The wish is bound to a device clear revision (`joind-web-token-remember-rev` in localStorage, read
-when the wish is given); sign out and Forget move it on, so another tab's late `init` cannot write
-the token back after a clear.
+served, then `sessionStorage`, then remembered. Two kinds of removal only: a clear by the user
+(sign out, Settings' "Forget on this device", a token entered with the box unticked:
+`clearDeviceToken`) removes it and moves the device clear revision on
+(`joind-web-token-remember-rev` in localStorage); a refusal (4401 prompt path) removes it only
+while it equals the refused socket's token (`dropRememberedTokenIf`), so it never touches another
+tab's newer token. The wish is bound to the revision read when it is given, so another tab's late
+`init` cannot write the token back after a clear.
 Tradeoff: the token sits in that browser until sign out or Forget, so anyone with the unlocked
 device can use Joind. Every web-token
 read accepts that header or `?token=` (header first, as at the agent-auth gate). One human viewer
