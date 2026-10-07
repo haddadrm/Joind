@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-07: Remember the web token on this device (opt-in)
+
+The fourth item of the backlog entry "Web viewer follow-ups from the web-reconnect gate", decided by Rami on 7 Oct: he does not want to retype the token on his phone, and every device on his tailnet is his. Branch `remember-device`, not merged, not deployed.
+
+- **The prompt** (`public/app.js`, `promptWebToken`): a "Remember on this device" checkbox under the token field, off by default (ticked when this device already remembers a token, so Change keeps remembering unless it is unticked), with a one-line note on what it means. The whole row is a 44px target at phone width (`.token-remember` in `public/style.css`).
+- **Stored only once accepted**: ticking it records the wish (page memory plus a token-free `sessionStorage` flag, so the reload after Settings' Change keeps it). The socket's `init` (`rememberAcceptedToken`, given the token that socket offered) writes the token to `localStorage` under `joind-web-token-remembered`. A served (auto) token is never written. A token refused with 4401 is never stored, and the wish is dropped with it.
+- **Lookup order** (`webToken`): the served token, then `sessionStorage`, then the remembered one. A remembered token the server refuses goes down the existing 4401 path: `forgetWebToken` now removes the remembered copy as well, and the user is prompted once. No reload (a typed or remembered token never reloads; `TOKEN_RELOAD_KEY` untouched), no loop.
+- **Clearing it**: sign out removes it, and the signed-out screen and the Settings sign-out hint say so. Settings, Web token gains a "This device" row: whether this browser remembers the token, and "Forget on this device", which clears it while this tab stays signed in from page memory. A token entered with the box unticked also drops a remembered one. The user menu shows "this device" as the token source when the token in use is the remembered one.
+- **Blocked storage**: every `localStorage` access is in try/catch; with it blocked (reads, writes or both) the page behaves as before: the typed token lives in page memory and nothing throws.
+- **Security tradeoff, plainly**: the token sits in this browser's `localStorage` until sign out or Forget, readable by any script on the page's origin, and anyone with the unlocked device can open Joind with it. It is opt-in per device for that reason; the sign-out and session-fencing design (`sessionAbort`, `sameSession`, `fenceBody`) is unchanged.
+- Cache-bust `v=36` on every local asset in `public/index.html` (and `tests/marks.test.ts`).
+- 18 new page tests in `tests/web-reconnect-ui.test.ts` (box off by default; unticked stores nothing; ticked stores only after `init`; refused never stored; the wish survives the Change reload; unticked entry forgets; remembered-only load signs in with no prompt; lookup order; a refused remembered token is cleared and prompts once with no reload or reconnect; sign out and Forget clear it; Settings without a remembered token; a served token is never stored; a stale served token then a ticked typed one stores the typed one; `localStorage` blocked for reads, writes or both; both storages blocked), all red on the previous `app.js`.
+
 ## 2026-10-06: Web viewer follow-ups merged
 
 - Merged `web-followups` after Codex gate round 4 PASS at ee991d7 (no Critical, High or Important; suite 1035 passed in each of two runs, smoke 18 of 18). The gate's one Low, a launch completion timer that predates the lane, is in the backlog. Not deployed.

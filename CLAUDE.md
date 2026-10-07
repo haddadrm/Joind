@@ -137,7 +137,14 @@ in `index.html`, before the page runs, uses the SVG's own colour-scheme query.
 ## Web viewer: token, name lock and reconnect
 
 The page holds the web token injected into `/` (generated token) or typed at the prompt (user-set,
-`sessionStorage`, per tab), and sends it as `X-Joind-Token` on every `/api/` call. Every web-token
+`sessionStorage`, per tab), and sends it as `X-Joind-Token` on every `/api/` call. The prompt has
+an opt-in "Remember on this device" (off by default): the typed token goes to localStorage
+(`joind-web-token-remembered`) only when the socket's `init` accepts it (`rememberAcceptedToken`;
+until then the wish is a token-free `sessionStorage` flag), never a served token. Lookup order:
+served, then `sessionStorage`, then remembered. A refusal (4401 prompt path), sign out and
+Settings' "Forget on this device" remove it; a token entered with the box unticked drops it too.
+Tradeoff: the token sits in that browser until sign out or Forget, so anyone with the unlocked
+device can use Joind. Every web-token
 read accepts that header or `?token=` (header first, as at the agent-auth gate). One human viewer
 name is registered per server (`POST /api/web/register`, first wins); the socket accepts only that
 name (4401 bad token, 4403 other name). A 409 from register carries `registered` (only a caller
