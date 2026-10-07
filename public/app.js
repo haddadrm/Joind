@@ -191,12 +191,14 @@ function webToken() {
   return stored || rememberedToken();
 }
 
-// Drop the typed token from memory and from storage (refused, or sign out),
-// the copy this device remembers included.
+// Drop this tab's typed token from memory and from sessionStorage, and its
+// own wish to remember one (refused, or sign out). The device copy is the
+// caller's: sign out clears it (clearDeviceToken), a refusal drops it only
+// while it is the refused token (dropRememberedTokenIf).
 function forgetWebToken() {
   typedWebToken = '';
   try { sessionStorage.removeItem('joind-web-token'); } catch (e) { /* storage unavailable */ }
-  dropRememberedToken();
+  askToRemember(false);
 }
 
 // "Remember on this device": a typed token kept in localStorage, written
@@ -204,9 +206,13 @@ function forgetWebToken() {
 // Until then the wish is held in page memory and in sessionStorage (a flag,
 // no token), so the reload after Settings' Change keeps it.
 // The wish is bound to the device's clear revision (localStorage), read when
-// it is given: Forget and sign out in any tab move the revision on, so a
-// wish another tab gave before the clear (its init still on the way) no
-// longer matches and writes nothing back.
+// it is given: Forget, sign out and a token entered unticked, in any tab,
+// move the revision on, so a wish another tab gave before the clear (its
+// init still on the way) no longer matches and writes nothing back.
+// Every removal of the device copy is one of two kinds: a clear by the user
+// (clearDeviceToken: remove, and move the revision on), or a cleanup bound
+// to the exact token concerned (dropRememberedTokenIf, a refusal), which
+// leaves another tab's newer token and consent alone.
 var REMEMBER_KEY = 'joind-web-token-remembered';
 var REMEMBER_ASK_KEY = 'joind-web-token-remember';
 var REMEMBER_REV_KEY = 'joind-web-token-remember-rev';
@@ -245,16 +251,20 @@ function rememberAskedRevision() {
   if (rememberAsked) return rememberAskedRev;
   try { return sessionStorage.getItem(REMEMBER_REV_KEY) || ''; } catch (e) { return ''; }
 }
-// Refused, sign out, Forget, or a token entered with the box unticked.
-function dropRememberedToken() {
+// Sign out, Forget, or a token entered with the box unticked: the device
+// copy goes, and every wish given before now, in any tab, is void.
+function clearDeviceToken() {
   askToRemember(false);
   try { localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* storage unavailable */ }
-}
-// Sign out and Forget: the device copy goes, and every wish given before
-// now, in any tab, is void.
-function clearDeviceToken() {
-  dropRememberedToken();
   bumpRememberRevision();
+}
+// A refusal: drop the device copy only while it is still the refused token.
+// Another tab may have stored a different, accepted one since.
+function dropRememberedTokenIf(token) {
+  if (!token) return;
+  try {
+    if (localStorage.getItem(REMEMBER_KEY) === token) localStorage.removeItem(REMEMBER_KEY);
+  } catch (e) { /* storage unavailable */ }
 }
 // The socket's init: the server accepted `token`. Store it when asked to,
 // unless it is the token served in the page, or the device was cleared
@@ -567,7 +577,7 @@ function promptWebToken(after) {
     try { sessionStorage.setItem('joind-web-token', value); } catch (e) { /* storage unavailable: memory holds it */ }
     // Stored only once the server accepts it (rememberAcceptedToken).
     if (remember.checked) askToRemember(true);
-    else dropRememberedToken();
+    else clearDeviceToken(); // a deliberate choice, like Forget
     // A typed token supersedes an injected one that the server refused.
     if (window.__JOIND_TOKEN) injectedTokenStale = true;
     overlay.remove();
@@ -1101,7 +1111,7 @@ function connect() {
     dot.title = signedOut ? 'Signed out' : 'Disconnected, reconnecting';
     dot.setAttribute('aria-label', dot.title);
     if (signedOut) return; // signed out: no reconnect
-    handleSocketClose(e ? e.code : 0);
+    handleSocketClose(e ? e.code : 0, sockToken);
   };
 }
 
@@ -1110,7 +1120,7 @@ function connect() {
 // token, shows the banner and prompts; 4403 (name refused) registers again,
 // adopting the registered name, and after a few refusals in a row stops on
 // the banner instead of looping; anything else reconnects after 2 s.
-function handleSocketClose(code) {
+function handleSocketClose(code, token) {
   if (code === 4401 || code === 4403) wsAuthFailures++;
   var injected = injectedTokenInUse();
   var action = window.joindUi
@@ -1124,6 +1134,7 @@ function handleSocketClose(code) {
   if (action === 'prompt') {
     if (injected) injectedTokenStale = true;
     forgetWebToken();
+    dropRememberedTokenIf(token); // the socket's own token, not whatever is stored now
     if (dot) { dot.title = 'Web token refused'; dot.setAttribute('aria-label', dot.title); }
     showAuthBanner(TOKEN_REFUSED_TEXT, { token: true, retry: true });
     promptWebToken(reconnectWithToken);
@@ -6802,7 +6813,7 @@ function signOut() {
   reconcileOnInit = false;
   releaseSessionLocks();
   forgetWebToken();
-  bumpRememberRevision(); // forgetWebToken dropped the device copy
+  clearDeviceToken();
   window.__JOIND_TOKEN = '';
   closePopover();
   closeSettingsModal(false);

@@ -139,7 +139,7 @@ const LIFTED_FUNCTIONS = [
   "newSessionAbort", "sessionSignal", "abortError", "isAbortError", "sameSession", "releaseSessionLocks",
   "jsonOr", "quietAbort", "fenceBody",
   "loadTaskCount", "openImportDialog", "renderServerBadgeSettings", "settingsRow", "settingsSwitch", "ownServerBadge",
-  "rememberedToken", "askToRemember", "rememberIsAsked", "dropRememberedToken", "rememberAcceptedToken", "forgetOnThisDevice",
+  "rememberedToken", "askToRemember", "rememberIsAsked", "dropRememberedTokenIf", "rememberAcceptedToken", "forgetOnThisDevice",
   "rememberRevision", "bumpRememberRevision", "rememberAskedRevision", "clearDeviceToken", "tokenHint",
   "tokenSource", "maskedToken", "settingsSection", "buildTokenSection", "buildRememberRow",
 ];
@@ -1966,5 +1966,18 @@ describe("remember on this device: a refusal clears only the token it refused", 
     await a.flush();
     expect(local.getItem(REMEMBERED)).toBeNull();
     expect(await freshTabPrompts(local)).toBe(true);
+  });
+
+  it("a refused served token leaves a different device copy alone (it was never sent)", async () => {
+    const page = makePage({ name: "Rami", injected: "stale-served", remembered: "device", reloadFlag: true });
+    page.route = registerOk;
+    page.api.run("bootSession()");
+    await page.flush();
+    expect(tokenOf(page.last())).toBe("stale-served");
+    page.open(); page.close(4401);
+    await page.flush();
+    expect(page.reloads).toBe(0);
+    expect(page.prompt()).not.toBeNull();
+    expect(stored(page)).toBe("device");
   });
 });
