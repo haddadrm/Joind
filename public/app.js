@@ -203,34 +203,68 @@ function forgetWebToken() {
 // only once the server accepted it (the socket's init), never a served one.
 // Until then the wish is held in page memory and in sessionStorage (a flag,
 // no token), so the reload after Settings' Change keeps it.
+// The wish is bound to the device's clear revision (localStorage), read when
+// it is given: Forget and sign out in any tab move the revision on, so a
+// wish another tab gave before the clear (its init still on the way) no
+// longer matches and writes nothing back.
 var REMEMBER_KEY = 'joind-web-token-remembered';
 var REMEMBER_ASK_KEY = 'joind-web-token-remember';
+var REMEMBER_REV_KEY = 'joind-web-token-remember-rev';
 var rememberAsked = false;
+var rememberAskedRev = '';
 function rememberedToken() {
   try { return localStorage.getItem(REMEMBER_KEY) || ''; } catch (e) { return ''; }
 }
+function rememberRevision() {
+  try { return localStorage.getItem(REMEMBER_REV_KEY) || ''; } catch (e) { return ''; }
+}
+function bumpRememberRevision() {
+  var rev = Date.now().toString(36) + '.' + Math.random().toString(36).slice(2, 10);
+  try { localStorage.setItem(REMEMBER_REV_KEY, rev); } catch (e) { /* storage unavailable: nothing to protect */ }
+}
 function askToRemember(on) {
   rememberAsked = !!on;
+  rememberAskedRev = on ? rememberRevision() : '';
   try {
-    if (on) sessionStorage.setItem(REMEMBER_ASK_KEY, '1');
-    else sessionStorage.removeItem(REMEMBER_ASK_KEY);
+    if (on) {
+      sessionStorage.setItem(REMEMBER_ASK_KEY, '1');
+      sessionStorage.setItem(REMEMBER_REV_KEY, rememberAskedRev);
+    } else {
+      sessionStorage.removeItem(REMEMBER_ASK_KEY);
+      sessionStorage.removeItem(REMEMBER_REV_KEY);
+    }
   } catch (e) { /* storage unavailable: page memory holds the wish */ }
 }
 function rememberIsAsked() {
   if (rememberAsked) return true;
   try { return sessionStorage.getItem(REMEMBER_ASK_KEY) === '1'; } catch (e) { return false; }
 }
+// The revision the wish was given under (page memory, or the copy carried
+// over a reload in sessionStorage).
+function rememberAskedRevision() {
+  if (rememberAsked) return rememberAskedRev;
+  try { return sessionStorage.getItem(REMEMBER_REV_KEY) || ''; } catch (e) { return ''; }
+}
 // Refused, sign out, Forget, or a token entered with the box unticked.
 function dropRememberedToken() {
   askToRemember(false);
   try { localStorage.removeItem(REMEMBER_KEY); } catch (e) { /* storage unavailable */ }
 }
+// Sign out and Forget: the device copy goes, and every wish given before
+// now, in any tab, is void.
+function clearDeviceToken() {
+  dropRememberedToken();
+  bumpRememberRevision();
+}
 // The socket's init: the server accepted `token`. Store it when asked to,
-// unless it is the token served in the page.
+// unless it is the token served in the page, or the device was cleared
+// since the wish was given.
 function rememberAcceptedToken(token, served) {
   if (served || !token || !rememberIsAsked()) return;
   if (window.__JOIND_TOKEN && token === window.__JOIND_TOKEN) return;
-  try { localStorage.setItem(REMEMBER_KEY, token); } catch (e) { /* storage unavailable: this tab only */ }
+  if (rememberAskedRevision() === rememberRevision()) {
+    try { localStorage.setItem(REMEMBER_KEY, token); } catch (e) { /* storage unavailable: this tab only */ }
+  }
   askToRemember(false);
 }
 // Settings, Forget on this device: the device stops remembering, and this
@@ -238,7 +272,7 @@ function rememberAcceptedToken(token, served) {
 function forgetOnThisDevice() {
   var t = webToken();
   if (t && !injectedTokenInUse() && !typedWebToken) typedWebToken = t;
-  dropRememberedToken();
+  clearDeviceToken();
 }
 
 // True while the page is using a token injected into it by the server.
@@ -3544,13 +3578,16 @@ function buildRolesSection() {
   return sec;
 }
 
-function buildTokenSection() {
-  var sec = settingsSection('token', 'Web token');
-  var src = tokenSource();
-  var hint = src === 'served' ? 'Served by this Joind to the page; it gates direct messages'
+function tokenHint(src) {
+  return src === 'served' ? 'Served by this Joind to the page; it gates direct messages'
     : src === 'tab' ? 'Entered for this tab session only; it gates direct messages'
     : src === 'device' ? 'Remembered on this device; it gates direct messages'
     : 'Not set: direct messages stay closed';
+}
+
+function buildTokenSection() {
+  var sec = settingsSection('token', 'Web token');
+  var src = tokenSource();
   var value = document.createElement('span');
   value.className = 'setting-mono';
   value.textContent = maskedToken();
@@ -3569,7 +3606,9 @@ function buildTokenSection() {
     });
     both.appendChild(change);
   }
-  sec.appendChild(settingsRow('Token', hint, both).row);
+  var tokenRow = settingsRow('Token', tokenHint(src), both).row;
+  tokenRow.id = 'settings-token-row';
+  sec.appendChild(tokenRow);
   sec.appendChild(buildRememberRow());
   var out = document.createElement('button');
   out.type = 'button';
@@ -3610,6 +3649,8 @@ function buildRememberRow() {
       var after = document.getElementById('settings-token-device');
       var hintEl = after ? after.querySelector('.setting-hint') : null;
       if (hintEl) hintEl.textContent = 'Forgotten on this device. This tab stays signed in until it reloads or signs out';
+      var tokenHintEl = document.querySelector('#settings-token-row .setting-hint');
+      if (tokenHintEl) tokenHintEl.textContent = tokenHint(tokenSource());
     });
   }
   return built.row;
@@ -6761,6 +6802,7 @@ function signOut() {
   reconcileOnInit = false;
   releaseSessionLocks();
   forgetWebToken();
+  bumpRememberRevision(); // forgetWebToken dropped the device copy
   window.__JOIND_TOKEN = '';
   closePopover();
   closeSettingsModal(false);

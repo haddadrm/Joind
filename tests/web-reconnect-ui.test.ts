@@ -140,6 +140,7 @@ const LIFTED_FUNCTIONS = [
   "jsonOr", "quietAbort", "fenceBody",
   "loadTaskCount", "openImportDialog", "renderServerBadgeSettings", "settingsRow", "settingsSwitch", "ownServerBadge",
   "rememberedToken", "askToRemember", "rememberIsAsked", "dropRememberedToken", "rememberAcceptedToken", "forgetOnThisDevice",
+  "rememberRevision", "bumpRememberRevision", "rememberAskedRevision", "clearDeviceToken", "tokenHint",
   "tokenSource", "maskedToken", "settingsSection", "buildTokenSection", "buildRememberRow",
 ];
 const LIFTED_VARS = [
@@ -151,7 +152,7 @@ const LIFTED_VARS = [
   "composerSendInFlight", "pendingImages", "imageUploadsInFlight", "MAX_COMPOSER_IMAGES", "MAX_UPLOAD_BYTES",
   "replyingTo", "pendingGeneration", "lastScanResults", "autoScanRunning", "sessionAbort",
   "selfServerName", "selfServerBadge", "faviconWithBadge", "badgeEditable",
-  "REMEMBER_KEY", "REMEMBER_ASK_KEY", "rememberAsked",
+  "REMEMBER_KEY", "REMEMBER_ASK_KEY", "REMEMBER_REV_KEY", "rememberAsked", "rememberAskedRev",
 ];
 
 // What the init handler and the rest touch, stubbed (counted where useful).
