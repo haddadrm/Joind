@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-07: Remember on this device merged
+
+- Merged `remember-device` after Codex gate round 4 PASS at d6803d8 (rounds 1 to 3 failed on cross-tab and full-storage orderings, each fixed; round 4 found no Critical, High or Important; suite 1077 passed in each of two runs, smoke 30 of 30, 90 browser probe assertions passed). The two Lows (a Forget hint wording and an interim-build upgrade case) are in the backlog. Not deployed.
+
 ## 2026-10-07: Remember the web token on this device (opt-in)
 
 The fourth item of the backlog entry "Web viewer follow-ups from the web-reconnect gate", decided by Rami on 7 Oct: he does not want to retype the token on his phone, and every device on his tailnet is his. Branch `remember-device`, not merged, not deployed.
