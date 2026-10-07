@@ -13,6 +13,12 @@ phone-sized Chromium profile (Galaxy S9+ emulation) against it:
   nothing.
 - **B.** A mistyped token gets the visible banner and the prompt again, not a
   silent reconnect loop; the right token then connects.
+- **C.** "Remember on this device": the checkbox row fits the phone and is at
+  least 44px tall, it is off by default, a ticked token is in localStorage once
+  accepted, a new tab in the same profile signs in with no prompt, and sign out
+  removes it.
+- **D.** A remembered token the server refuses is removed at once and prompts
+  once, with no reload.
 
 It contacts no other server. The page's terminal scan (`/api/terminals`) is
 answered by the browser with an empty list, so nothing on the machine is
