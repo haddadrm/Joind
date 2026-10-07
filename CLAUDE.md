@@ -147,7 +147,10 @@ served, then `sessionStorage`, then remembered. Two kinds of removal only: a cle
 (`joind-web-token-remember-rev` in localStorage); a refusal (4401 prompt path) removes it only
 while it equals the refused socket's token (`dropRememberedTokenIf`), so it never touches another
 tab's newer token. The wish is bound to the revision read when it is given, so another tab's late
-`init` cannot write the token back after a clear.
+`init` cannot write the token back after a clear. The revision is created when a wish is given (no
+wish is recorded if it cannot be stored), and `init` writes only while it is present and equal; a
+clear replaces it with a new value of the same length (16 hex characters, so no extra space at the
+quota) before removing the token, and removes the revision if even that write fails.
 Tradeoff: the token sits in that browser until sign out or Forget, so anyone with the unlocked
 device can use Joind. Every web-token
 read accepts that header or `?token=` (header first, as at the agent-auth gate). One human viewer
